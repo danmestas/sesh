@@ -86,7 +86,7 @@ func (c *HubServeCmd) Run() error {
 		return fmt.Errorf("hub: %w", err)
 	}
 
-	leafURL := h.LeafUpstream()
+	leafURL := h.LeafURL()
 	if _, err := fmt.Fprintln(urlFile, leafURL); err != nil {
 		urlFile.Close()
 		_ = os.Remove(urlPath)
