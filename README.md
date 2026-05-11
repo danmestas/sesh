@@ -35,10 +35,26 @@ sesh up --session=morning
 
 # In another shell, look at what's running
 cat ~/.sesh/hub.url                              # hub's NATS leaf URL
-cat .sesh/sessions/morning.json                  # {"pid": <n>}
+cat .sesh/sessions/morning.json                  # {"pid":..,"nats_url":..,"leaf_url":..}
 
 # End the session — hub auto-shuts down if this was the last session
 sesh down --session=morning
+```
+
+### Attaching to a running session
+
+A live `sesh up` publishes its NATS client URL and leafnode listener URL in
+`.sesh/sessions/<label>.json`. Sub-leaves and clients dial those without
+grepping logs.
+
+```sh
+# EdgeSync leaf node under this session
+LEAF=$(jq -r .leaf_url < .sesh/sessions/morning.json)
+edgesync hub serve --leaf-upstream="$LEAF"
+
+# NATS client under this session
+NATS=$(jq -r .nats_url < .sesh/sessions/morning.json)
+nats --server="$NATS" sub '>'
 ```
 
 ## Lifecycle model
@@ -58,7 +74,9 @@ sesh down --session=morning
 └── hub.log           ← stderr from auto-spawned hub
 
 <cwd>/.sesh/sessions/
-├── <label>.json      ← {"pid": <n>} — sesh up's PID; removed on graceful exit
+├── <label>.json      ← {pid, nats_url, leaf_url} — claimed PID-only via O_EXCL,
+│                       URLs filled in once the embedded hub binds its ports;
+│                       file removed on graceful exit
 ├── <label>.repo      ← per-session fossil leaf repo
 └── <label>.messaging/  ← per-session JetStream storage
 ```

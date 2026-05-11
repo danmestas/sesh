@@ -64,6 +64,15 @@ func (c *UpCmd) Run() error {
 		return fmt.Errorf("sesh up: %w", err)
 	}
 
+	if err := updateSessionState(c.Session, SessionState{
+		PID:     os.Getpid(),
+		NATSURL: h.NATSURL(),
+		LeafURL: h.LeafURL(),
+	}); err != nil {
+		_ = h.Stop()
+		return fmt.Errorf("publish session URLs: %w", err)
+	}
+
 	slog.Info("sesh up running",
 		"name", h.ServerName(),
 		"project", project,

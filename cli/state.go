@@ -30,10 +30,15 @@ import (
 )
 
 // SessionState is the project-local JSON at <cwd>/.sesh/sessions/<label>.json.
-// PID is the only field today; the structure is JSON to leave room for
-// metadata without breaking parsers later.
+//
+// Written in two phases: claimSessionState creates the file O_EXCL with PID
+// only (the atomic ownership claim), then updateSessionState overwrites with
+// the URLs once the hub has bound its ports. Sub-leaves and NATS clients
+// read NATSURL/LeafURL to attach without grepping logs.
 type SessionState struct {
-	PID int `json:"pid"`
+	PID     int    `json:"pid"`
+	NATSURL string `json:"nats_url,omitempty"` // for NATS clients under this session
+	LeafURL string `json:"leaf_url,omitempty"` // for EdgeSync leaves to solicit upstream
 }
 
 // projectStateDir returns <cwd>/.sesh/sessions, creating it if needed.
@@ -90,6 +95,42 @@ func claimSessionState(label string, pid int) (release func(), err error) {
 	f.Close()
 
 	return func() { _ = os.Remove(path) }, nil
+}
+
+// updateSessionState replaces the session JSON with state. The session must
+// already be claimed (file exists) — guards against writing state for a
+// session no live process owns. Atomic via tempfile+rename in the same dir.
+func updateSessionState(label string, state SessionState) error {
+	path, err := sessionStatePath(label)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("update session state: %w", err)
+	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal session state: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("temp session state: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename session state: %w", err)
+	}
+	return nil
 }
 
 // readSessionState decodes a session JSON file.
