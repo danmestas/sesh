@@ -38,12 +38,11 @@ type LeafServeCmd struct {
 	HTTPPort       int    `help:"Fossil HTTP port (0 = auto)" default:"0"`
 	NATSClientPort int    `help:"NATS client port (0 = auto)" default:"0"`
 	NATSLeafPort   int    `help:"NATS leafnode port (0 = auto)" default:"0"`
-
-	// RenewInterval controls how often the lease is renewed against the
-	// hub. Defaults to ~TTL/3 (10s when TTL is 30s). Override only for
-	// tests or unusual deployments.
-	RenewInterval time.Duration `help:"How often to renew the session lease" default:"10s"`
 }
+
+// renewInterval is hardcoded to ~TTL/3. With coord.DefaultChildTTL = 1h,
+// renewing every 20 minutes leaves plenty of margin for one missed call.
+const renewInterval = 20 * time.Minute
 
 func (c *LeafServeCmd) Run(g *libfossilcli.Globals) error {
 	sessionLabel := c.Session
@@ -86,20 +85,20 @@ func (c *LeafServeCmd) Run(g *libfossilcli.Globals) error {
 	}
 	defer cd.Close()
 
-	if _, err := cd.Claim(ctx, c.Project, sessionLabel, owner); err != nil {
+	if _, err := cd.Claim(ctx, name, owner); err != nil {
 		return err
 	}
 	defer func() {
 		relCtx, relCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer relCancel()
-		if err := cd.Release(relCtx, c.Project, sessionLabel, owner); err != nil {
+		if err := cd.Release(relCtx, name, owner); err != nil {
 			slog.Warn("session lease release failed", "err", err)
 		}
 	}()
 
 	renewerStop := make(chan struct{})
 	renewerDone := make(chan struct{})
-	go renewerLoop(ctx, cd, c.Project, sessionLabel, owner, c.RenewInterval, renewerStop, renewerDone)
+	go renewerLoop(ctx, cd, name, owner, renewerStop, renewerDone)
 	defer func() {
 		close(renewerStop)
 		<-renewerDone
@@ -210,12 +209,11 @@ func ownerID() string {
 
 // renewerLoop renews the lease on a ticker until stop fires. Renew errors are
 // logged but don't terminate the loop — a transient NATS hiccup shouldn't tear
-// the leaf down. If the lease genuinely expired (e.g. clock skew, prolonged
-// hub outage), the next claim attempt by another process will succeed and
-// this leaf's renews will keep failing until the operator notices.
-func renewerLoop(ctx context.Context, cd *coord.Coord, project, sessionID, owner string, interval time.Duration, stop, done chan struct{}) {
+// the leaf down. If the lease genuinely expired, this leaf's renews keep
+// failing until the operator notices and shuts it down.
+func renewerLoop(ctx context.Context, cd *coord.Coord, name, owner string, stop, done chan struct{}) {
 	defer close(done)
-	t := time.NewTicker(interval)
+	t := time.NewTicker(renewInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -224,8 +222,8 @@ func renewerLoop(ctx context.Context, cd *coord.Coord, project, sessionID, owner
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := cd.Renew(ctx, project, sessionID, owner); err != nil {
-				slog.Error("session lease renew failed", "err", err, "project", project, "session", sessionID)
+			if err := cd.Renew(ctx, name, owner); err != nil {
+				slog.Error("lease renew failed", "err", err, "name", name)
 			}
 		}
 	}

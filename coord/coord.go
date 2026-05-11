@@ -1,20 +1,12 @@
-// Package coord implements sesh-side coordination state on top of the hub's
-// JetStream. Today: session leases (claim / renew / release / list / get) via
-// a single KV bucket named "sessions".
+// Package coord manages "children" — leases for the things one tier below
+// the current node. The hub holds its sessions; a session leaf would hold its
+// agents; an agent leaf would hold its tasks. Same code, same bucket name,
+// different parent NATS URL at each tier.
 //
-// Design captured during simple-brainstorm (2026-05-11):
+// Each level only knows about what's directly underneath it. There's no
+// cross-tier registry. State propagates upward only if explicitly mirrored.
 //
-//   - Coord lives in the consumer (sesh), not in EdgeSync. EdgeSync's hub is
-//     a NATS+fossil substrate; "session" is a sesh concept.
-//   - Atomic claim via jetstream.KeyValue.Create — fails fast if a session is
-//     already held. Owner identity is verified on every Renew / Release.
-//   - Per-key TTL on the bucket; a leaf renews on a ticker (~TTL/3). Crash =
-//     lease auto-expires; another claimer takes over.
-//   - The bucket is created idempotently on first connect (CreateOrUpdate); the
-//     hub stays session-agnostic — no hub-side handlers needed.
-//   - YAGNI: no generic Registry[T] yet. When agents (or any second concrete
-//     consumer) show up, copy-modify; refactor only when a third reveals real
-//     shared patterns.
+// YAGNI: no Get/List today. Add when a caller actually needs them.
 package coord
 
 import (
@@ -28,53 +20,51 @@ import (
 )
 
 const (
-	// SessionsBucket is the JetStream KV bucket holding session leases.
-	SessionsBucket = "sessions"
+	// DefaultChildrenBucket is the JetStream KV bucket every tier uses to
+	// track its direct children.
+	DefaultChildrenBucket = "children"
 
-	// DefaultSessionTTL is the per-key TTL applied when the bucket is
-	// created. A lease that isn't renewed within this window is reclaimable.
-	DefaultSessionTTL = 30 * time.Second
+	// DefaultChildTTL is the per-key TTL. A child must renew within this
+	// window or its lease is reclaimable.
+	DefaultChildTTL = time.Hour
 )
 
-// Coord is a handle to the hub-side coordination KV. Construct with Connect;
-// remember to Close when done.
+// Coord is a handle to a parent node's children KV bucket.
 type Coord struct {
 	nc       *nats.Conn
-	js       jetstream.JetStream
-	sessions jetstream.KeyValue
+	children jetstream.KeyValue
 }
 
-// Connect dials the hub's client NATS URL, attaches to JetStream, and ensures
-// the sessions KV bucket exists with DefaultSessionTTL.
-func Connect(ctx context.Context, natsURL string) (*Coord, error) {
-	nc, err := nats.Connect(natsURL,
+// Connect dials the parent node's client NATS URL and ensures the children
+// bucket exists. The "parent" is whichever node is one tier above the caller:
+// for a session leaf, the parent is the hub; for an agent leaf, the parent
+// is the session leaf.
+func Connect(ctx context.Context, parentNATS string) (*Coord, error) {
+	nc, err := nats.Connect(parentNATS,
 		nats.Name("sesh-coord"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("coord: connect %s: %w", natsURL, err)
+		return nil, fmt.Errorf("coord: connect %s: %w", parentNATS, err)
 	}
-
 	js, err := jetstream.New(nc)
 	if err != nil {
 		nc.Close()
 		return nil, fmt.Errorf("coord: jetstream: %w", err)
 	}
-
 	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: SessionsBucket,
-		TTL:    DefaultSessionTTL,
+		Bucket: DefaultChildrenBucket,
+		TTL:    DefaultChildTTL,
 	})
 	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("coord: kv bucket %q: %w", SessionsBucket, err)
+		return nil, fmt.Errorf("coord: kv bucket %q: %w", DefaultChildrenBucket, err)
 	}
-
-	return &Coord{nc: nc, js: js, sessions: kv}, nil
+	return &Coord{nc: nc, children: kv}, nil
 }
 
-// Close closes the underlying NATS connection.
+// Close drops the NATS connection.
 func (c *Coord) Close() error {
 	c.nc.Close()
 	return nil
@@ -82,4 +72,4 @@ func (c *Coord) Close() error {
 
 // ErrNotOwner is returned by Renew/Release when the caller's owner identity
 // doesn't match the stored lease.
-var ErrNotOwner = errors.New("coord: caller is not the lease owner")
+var ErrNotOwner = errors.New("coord: caller is not the owner")
