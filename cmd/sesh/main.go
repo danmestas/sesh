@@ -8,15 +8,22 @@ import (
 	seshcli "github.com/danmestas/sesh/cli"
 )
 
+// CLI is sesh's command surface.
+//
+//	sesh up   --session=<label>   — bring a session up (foreground; cwd-derived project)
+//	sesh down --session=<label>   — bring a session down (SIGINT the sesh up process)
+//	sesh hub serve                 — run the hub daemon (auto-spawned by sesh up; visible for power users)
 type CLI struct {
-	Leaf seshcli.LeafCmd `cmd:"" help:"Session leaf — solicits a leaf connection to a hub"`
+	Up   seshcli.UpCmd   `cmd:"" help:"Bring a session up — opens a leaf connection to the hub, blocking until SIGINT"`
+	Down seshcli.DownCmd `cmd:"" help:"Bring a session down — SIGINT the sesh up process for this label"`
+	Hub  seshcli.HubCmd  `cmd:"" help:"sesh hub serve runs the user-level hub daemon at ~/.sesh/"`
 }
 
 func main() {
 	var c CLI
 	ctx := kong.Parse(&c,
 		kong.Name("sesh"),
-		kong.Description("Session-aware leaf wrapper for EdgeSync. Owns the session/agent vocabulary and disk layout on top of EdgeSync's NATS+fossil hub substrate."),
+		kong.Description("Session manager wrapping EdgeSync. One hub per user (auto-lifecycle), one sesh up per session (foreground)."),
 	)
 	ctx.FatalIfErrorf(ctx.Run())
 }

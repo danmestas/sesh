@@ -11,27 +11,63 @@ Owns the **session** and **agent** vocabulary on top of EdgeSync's neutral NATS+
 ## Layering
 
 ```
-sesh                 ← session/agent vocabulary, lockfiles, ~/.sesh/ layout
+sesh                 ← user-facing CLI (up/down/hub) — session vocabulary, ~/.sesh
   └─ EdgeSync/hub    ← NATS+fossil substrate (in-process server, leaf solicit)
        └─ libfossil  ← repo primitives
 ```
 
 Dependency arrow goes one way: sesh depends on EdgeSync, never the reverse.
 
+## Commands
+
+- `sesh up --session=<label>` — bring a session up. Cwd-derived project name. Foreground; blocks until SIGINT. Auto-spawns the hub if none is running.
+- `sesh down --session=<label>` — SIGINT the matching `sesh up` and wait for it to exit.
+- `sesh hub serve` — run the hub daemon directly. Normally auto-spawned by `sesh up`; visible for power users. `--keepalive` keeps it running past the last leaf disconnect (default: exit when last session closes).
+
 ## Quick start
 
 ```sh
-# 1. Start an EdgeSync hub on this machine (provides the NATS leafnode endpoint)
-edgesync hub serve
+# In a project directory
+cd ~/projects/myproject
 
-# 2. Run a session leaf — auto-generated session id, no lockfile
-sesh leaf serve --upstream=nats-leaf://127.0.0.1:7422 --project=alpha
+# Start a session — hub is auto-spawned on first invocation
+sesh up --session=morning
 
-# 3. Run a named session — single-machine lockfile guards against collision
-sesh leaf serve --upstream=nats-leaf://127.0.0.1:7422 --project=alpha --session=morning
+# In another shell, look at what's running
+cat ~/.sesh/hub.url                              # hub's NATS leaf URL
+cat .sesh/sessions/morning.json                  # {"pid": <n>}
+
+# End the session — hub auto-shuts down if this was the last session
+sesh down --session=morning
+```
+
+## Lifecycle model
+
+- One **hub** per user (at `~/.sesh/`). Singleton. Auto-spawned by the first `sesh up`; auto-shuts down when the last leaf disconnects (unless `--keepalive`).
+- Many **session leaves** per project. Each `sesh up` opens one leaf connection to the hub via the `nats-leaf://` URL written to `~/.sesh/hub.url` by the hub at startup.
+- Session identity = `<cwd-basename>-session-<label>`. Project name is derived from the working directory.
+- Same-name collision detection is local: O_EXCL on `<cwd>/.sesh/sessions/<label>.json`. A second `sesh up` with the same label refuses to start, naming the holder PID.
+
+## Disk layout
+
+```
+~/.sesh/
+├── hub.url           ← hub's NATS leaf URL (O_EXCL by hub at bind)
+├── hub.repo          ← fossil repo (persistent across hub restarts)
+├── messaging/        ← JetStream storage (persistent)
+└── hub.log           ← stderr from auto-spawned hub
+
+<cwd>/.sesh/sessions/
+├── <label>.json      ← {"pid": <n>} — sesh up's PID; removed on graceful exit
+├── <label>.repo      ← per-session fossil leaf repo
+└── <label>.messaging/  ← per-session JetStream storage
 ```
 
 ## Status
 
-Spike. Cross-machine collision detection (lease registry on the hub) is the next
-piece — see `docs/` once that lands.
+Spike. Designed during a 2026-05-11 brainstorm; see commit messages for the design rationale captured inline. Out of scope today:
+
+- Coord/lease registry (use the hub's connection state, not a KV bucket)
+- Cross-machine session teleport
+- Historical session log persistence to JetStream
+- Agent-tier 3rd-level naming
