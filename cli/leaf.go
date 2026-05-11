@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"github.com/danmestas/EdgeSync/hub"
+	libfossilcli "github.com/danmestas/libfossil/cli"
+
+	"github.com/danmestas/sesh/coord"
 )
 
 // LeafCmd is the top-level command group for session leaves.
@@ -26,18 +29,23 @@ type LeafCmd struct {
 }
 
 type LeafServeCmd struct {
-	Upstream string `required:"" help:"Hub leaf URL (e.g. nats-leaf://127.0.0.1:7422)"`
+	Upstream string `required:"" help:"Hub leaf URL (e.g. nats-leaf://127.0.0.1:7422) — what this leaf solicits"`
+	HubNATS  string `required:"" help:"Hub client NATS URL (e.g. nats://127.0.0.1:4222) — used for session-lease coord on the hub's JetStream"`
 	Project  string `required:"" help:"Project name"`
 	Session  string `help:"Session label (default: time-prefixed random id; if user-set, a single-machine lockfile guards against collision)"`
 
-	Repo           string `help:"Path to session repo (default ~/.sesh/sessions/<project>/<session>/session.repo)"`
 	StoreDir       string `help:"JetStream store dir (default sibling of repo)"`
 	HTTPPort       int    `help:"Fossil HTTP port (0 = auto)" default:"0"`
 	NATSClientPort int    `help:"NATS client port (0 = auto)" default:"0"`
 	NATSLeafPort   int    `help:"NATS leafnode port (0 = auto)" default:"0"`
+
+	// RenewInterval controls how often the lease is renewed against the
+	// hub. Defaults to ~TTL/3 (10s when TTL is 30s). Override only for
+	// tests or unusual deployments.
+	RenewInterval time.Duration `help:"How often to renew the session lease" default:"10s"`
 }
 
-func (c *LeafServeCmd) Run() error {
+func (c *LeafServeCmd) Run(g *libfossilcli.Globals) error {
 	sessionLabel := c.Session
 	sessionUserSet := sessionLabel != ""
 	if !sessionUserSet {
@@ -54,7 +62,7 @@ func (c *LeafServeCmd) Run() error {
 		defer release()
 	}
 
-	repoPath := c.Repo
+	repoPath := g.Repo
 	if repoPath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -68,6 +76,34 @@ func (c *LeafServeCmd) Run() error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Claim the session lease on the hub before bringing the local hub up.
+	// Fail fast if another machine already holds it.
+	owner := ownerID()
+	cd, err := coord.Connect(ctx, c.HubNATS)
+	if err != nil {
+		return err
+	}
+	defer cd.Close()
+
+	if _, err := cd.Claim(ctx, c.Project, sessionLabel, owner); err != nil {
+		return err
+	}
+	defer func() {
+		relCtx, relCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer relCancel()
+		if err := cd.Release(relCtx, c.Project, sessionLabel, owner); err != nil {
+			slog.Warn("session lease release failed", "err", err)
+		}
+	}()
+
+	renewerStop := make(chan struct{})
+	renewerDone := make(chan struct{})
+	go renewerLoop(ctx, cd, c.Project, sessionLabel, owner, c.RenewInterval, renewerStop, renewerDone)
+	defer func() {
+		close(renewerStop)
+		<-renewerDone
+	}()
 
 	h, err := hub.NewHub(ctx, hub.Config{
 		RepoPath:       repoPath,
@@ -87,8 +123,10 @@ func (c *LeafServeCmd) Run() error {
 		"project", c.Project,
 		"session", sessionLabel,
 		"session_user_set", sessionUserSet,
+		"owner", owner,
 		"repo", repoPath,
 		"upstream", c.Upstream,
+		"hub_nats", c.HubNATS,
 		"nats", h.NATSURL(),
 		"leaf_listener", h.LeafUpstream(),
 		"http", "http://"+h.HTTPAddr(),
@@ -156,4 +194,39 @@ func alive(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// ownerID returns the lease owner identity: "<hostname>:<pid>". Sufficient
+// for the spike — distinguishes leaves across machines and across processes
+// on the same machine. Richer identity (start-time fingerprint, signing key)
+// is a later concern.
+func ownerID() string {
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s:%d", host, os.Getpid())
+}
+
+// renewerLoop renews the lease on a ticker until stop fires. Renew errors are
+// logged but don't terminate the loop — a transient NATS hiccup shouldn't tear
+// the leaf down. If the lease genuinely expired (e.g. clock skew, prolonged
+// hub outage), the next claim attempt by another process will succeed and
+// this leaf's renews will keep failing until the operator notices.
+func renewerLoop(ctx context.Context, cd *coord.Coord, project, sessionID, owner string, interval time.Duration, stop, done chan struct{}) {
+	defer close(done)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := cd.Renew(ctx, project, sessionID, owner); err != nil {
+				slog.Error("session lease renew failed", "err", err, "project", project, "session", sessionID)
+			}
+		}
+	}
 }
