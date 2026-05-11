@@ -64,6 +64,18 @@ func (c *UpCmd) Run() error {
 		return fmt.Errorf("sesh up: %w", err)
 	}
 
+	// LeafUpstream() on *hub.Hub returns this session's local leafnode
+	// listener URL — what sub-leaves dial as their upstream. (The Config
+	// field with the same name is the opposite direction.)
+	if err := updateSessionState(c.Session, SessionState{
+		PID:     os.Getpid(),
+		NATSURL: h.NATSURL(),
+		LeafURL: h.LeafUpstream(),
+	}); err != nil {
+		_ = h.Stop()
+		return fmt.Errorf("publish session URLs: %w", err)
+	}
+
 	slog.Info("sesh up running",
 		"name", h.ServerName(),
 		"project", project,
