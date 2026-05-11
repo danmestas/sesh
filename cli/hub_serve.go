@@ -52,15 +52,25 @@ func (c *HubServeCmd) Run() error {
 		return err
 	}
 
-	// O_EXCL on hub.url IS the race resolution. If another hub is running
-	// (or stale URL points at a reachable hub), exit cleanly.
+	// O_EXCL on hub.url IS the race resolution. `sesh up` callers already
+	// serialize via hub.spawn.lock and remove any stale URL before spawn,
+	// so reaching this branch means another hub is running OR a manual
+	// `sesh hub serve` is racing. Distinguish three cases:
+	//   - URL present and reachable: another hub is running, refuse.
+	//   - URL present but empty: another hub is mid-boot, refuse.
+	//   - URL present and unreachable: truly stale, take over.
 	urlFile, err := os.OpenFile(urlPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			if existing, rerr := os.ReadFile(urlPath); rerr == nil && reachable(stringTrim(existing)) {
-				return fmt.Errorf("hub already running at %s", stringTrim(existing))
+			existing, _ := os.ReadFile(urlPath)
+			trimmed := stringTrim(existing)
+			switch {
+			case trimmed == "":
+				return errors.New("another sesh hub serve is mid-boot (hub.url present but unwritten)")
+			case reachable(trimmed):
+				return fmt.Errorf("hub already running at %s", trimmed)
 			}
-			// Stale URL — remove and retry once
+			// Truly stale — take over.
 			_ = os.Remove(urlPath)
 			urlFile, err = os.OpenFile(urlPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		}

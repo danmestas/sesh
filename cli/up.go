@@ -101,33 +101,58 @@ func (c *UpCmd) Run() error {
 
 // ensureHubRunning returns the hub's leaf URL, spawning the hub via
 // fork-exec of `sesh hub serve` if no hub is currently running.
+//
+// Concurrent `sesh up` invocations serialize on hub.spawn.lock (flock) so
+// only one ever fork-execs a hub. The losers block on the lock, wake up,
+// see the URL is reachable, and return without spawning. Without this,
+// each racer would fork-exec its own hub, contend on the shared fossil +
+// JetStream storage at ~/.sesh, and no hub would stabilize.
 func ensureHubRunning() (string, error) {
 	urlPath, err := hubURLPath()
 	if err != nil {
 		return "", err
 	}
 
-	// Fast path: existing URL points at a running hub.
+	// Fast path: existing URL points at a running hub. No lock needed.
 	if url, err := readHubURL(urlPath); err == nil && reachable(url) {
 		return url, nil
 	}
 
-	// Slow path: stale or missing URL → remove stale, spawn fresh.
+	// Slow path: serialize the spawn.
+	lockPath, err := hubSpawnLockPath()
+	if err != nil {
+		return "", err
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("open hub spawn lock: %w", err)
+	}
+	defer lockFile.Close() // releases the flock
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("flock hub spawn lock: %w", err)
+	}
+
+	// Re-check under the lock: another caller may have spawned while we
+	// waited.
+	if url, err := readHubURL(urlPath); err == nil && reachable(url) {
+		return url, nil
+	}
 	_ = os.Remove(urlPath)
+
 	if err := spawnHub(); err != nil {
 		return "", err
 	}
 
-	// Poll for hub readiness. Hub writes hub.url after it's bound, so
-	// once we can read AND connect, we're good.
-	deadline := time.Now().Add(5 * time.Second)
+	// Poll for the spawned hub to publish its URL. 15s covers slow
+	// JetStream replay on a warm store.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if url, err := readHubURL(urlPath); err == nil && reachable(url) {
 			return url, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return "", errors.New("hub didn't come up within 5s")
+	return "", errors.New("hub didn't come up within 15s")
 }
 
 // readHubURL reads and trims hub.url.

@@ -195,6 +195,18 @@ func hubRepoPath() (string, error) {
 	return filepath.Join(dir, "hub.repo"), nil
 }
 
+// hubSpawnLockPath returns ~/.sesh/hub.spawn.lock — the flock target that
+// serializes concurrent `sesh up` invocations so only one ever fork-execs
+// a hub. The file content is irrelevant; flock semantics operate on the
+// inode.
+func hubSpawnLockPath() (string, error) {
+	dir, err := seshHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "hub.spawn.lock"), nil
+}
+
 // hubLogPath returns ~/.sesh/hub.log — where the auto-spawned hub's stderr
 // goes for debugging.
 func hubLogPath() (string, error) {
