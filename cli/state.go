@@ -97,6 +97,31 @@ func claimSessionState(label string, pid int) (release func(), err error) {
 	return func() { _ = os.Remove(path) }, nil
 }
 
+// writeAtomic writes data to path via tmpfile+rename so readers never
+// see a partial file. Used for hub.url, hub.nats.url, and similar.
+func writeAtomic(path, content string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename %s: %w", path, err)
+	}
+	return nil
+}
+
 // updateSessionState replaces the session JSON with state. The session must
 // already be claimed (file exists) — guards against writing state for a
 // session no live process owns. Atomic via tempfile+rename in the same dir.
@@ -177,13 +202,28 @@ func seshHome() (string, error) {
 	return dir, nil
 }
 
-// hubURLPath returns ~/.sesh/hub.url.
+// hubURLPath returns ~/.sesh/hub.url — the hub's leafnode listener URL,
+// written by the hub at bind for sesh up to discover the hub and solicit
+// upstream into it.
 func hubURLPath() (string, error) {
 	dir, err := seshHome()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, "hub.url"), nil
+}
+
+// hubNATSURLPath returns ~/.sesh/hub.nats.url — the hub's NATS client
+// URL, written by the hub at bind. Clients that need to operate on the
+// hub's JetStream domain (hub/project/workflow-scoped shared memory)
+// connect to this URL rather than to a session's NATS URL. Each session
+// runs its own JetStream domain; the hub's is the shared one.
+func hubNATSURLPath() (string, error) {
+	dir, err := seshHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "hub.nats.url"), nil
 }
 
 // hubRepoPath returns ~/.sesh/hub.repo.
