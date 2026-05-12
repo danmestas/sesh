@@ -81,6 +81,31 @@ nats --server="$NATS" sub '>'
 └── <label>.messaging/  ← per-session JetStream storage
 ```
 
+## Worktree seeded into Fossil
+
+When `sesh up` runs in a git worktree, the session's Fossil repo
+(`<cwd>/.sesh/sessions/<label>.repo`) gets seeded with the current
+worktree as a single initial commit. Agents in the session commit code
+and notes on top — Fossil's sync engine propagates those commits to
+sub-leaves and the hub for any other sesh that wants them.
+
+The git worktree itself is untouched. Agents work in Fossil; a human
+or an explicit `sesh promote` (TODO) decides which Fossil commits get
+applied back to the git working tree.
+
+Seed mode is set by `--seed`:
+
+- `all` (default): tracked + untracked-but-not-gitignored files
+- `tracked`: only files in the git index
+- `none`: skip seeding (Fossil starts empty)
+
+Skipped automatically when cwd isn't a git worktree, when the Fossil
+repo already has content from a prior session, or with `--seed=none`.
+Sesh's own `.sesh/` runtime state is never seeded.
+
+Recommended: add `.sesh/` to your `.gitignore` so git doesn't notice
+the sesh runtime state.
+
 ## Coordination patterns
 
 The mesh is a neutral transport — any well-known multi-agent coordination

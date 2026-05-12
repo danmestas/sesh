@@ -123,6 +123,12 @@ Sync is automatic via EdgeSync. Use Fossil when the artifact has
 identity (a commit) and when other agents should be able to read it at
 a specific revision.
 
+When `sesh up` runs in a git worktree, the session's Fossil is seeded
+with the worktree as a single initial commit (see the
+[README](../README.md#worktree-seeded-into-fossil) for `--seed` modes).
+The seed gives agents the real codebase as a baseline so commits stack
+on top; the git worktree itself is never modified by the session.
+
 ## Lifecycle responsibility
 
 | Bucket scope | Who creates                              | Who deletes                                  |
