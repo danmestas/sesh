@@ -33,12 +33,19 @@ Buckets are deterministic so agents can derive the name from context
 without a lookup table:
 
 ```
-sesh.hub                              hub scope
-sesh.project.<project>                project scope
-sesh.session.<project>.<session>      session scope
-sesh.workflow.<trace-id-8hex>         workflow scope
-sesh.agent.<role>.<agent-id>          agent scope
+sesh_hub                              hub scope
+sesh_project_<project>                project scope
+sesh_session_<project>_<session>      session scope
+sesh_workflow_<trace-id-8hex>         workflow scope
+sesh_agent_<role>_<agent-id>          agent scope
 ```
+
+NATS JetStream KV bucket names accept only `[a-zA-Z0-9_-]` — dots
+aren't allowed. The convention uses underscore as the separator.
+When deriving bucket names, sanitize user-supplied identifiers by
+replacing dots and hyphens with underscores (e.g., a project named
+`my-app` becomes `my_app` in the bucket name; a session-id like
+`myproj.alpha` becomes `myproj_alpha`).
 
 The identifiers come from the same sources sesh already uses: cwd
 basename for project, `--session=` flag for session, the publisher's
@@ -77,8 +84,8 @@ Stream and Object Store buckets follow the same naming with a different
 prefix:
 
 ```
-sesh.events.<scope>.<scope-id>    append-only event stream
-sesh.blobs.<scope>.<scope-id>     versioned object store
+sesh_events_<scope>_<scope-id>    append-only event stream
+sesh_blobs_<scope>_<scope-id>     versioned object store
 ```
 
 For Fossil: every sesh leaf has a repo at
@@ -109,7 +116,7 @@ common lifecycle operations will live in
 ```sh
 # Workflow root agent generates a plan, stores in workflow scope
 trace_id_short=${traceparent:3:8}     # 8 hex chars from "00-<trace-id>-..."
-bucket=sesh.workflow.$trace_id_short
+bucket=sesh_workflow_$trace_id_short
 
 nats kv add $bucket --ttl=24h
 nats kv put $bucket plan '{"phase":"research","next":["draft","review"]}'
@@ -124,9 +131,9 @@ nats kv watch $bucket plan
 ### Session-scoped scratchpad
 
 ```sh
-project=$(basename $(pwd))
+project=$(basename $(pwd) | tr .- _)   # sanitize: dots/hyphens → underscore
 session=alpha
-bucket=sesh.session.$project.$session
+bucket=sesh_session_${project}_${session}
 
 nats kv add $bucket --ttl=1h
 nats kv put $bucket roster '{"agents":["orchestrator","researcher"]}'
@@ -135,8 +142,8 @@ nats kv put $bucket roster '{"agents":["orchestrator","researcher"]}'
 ### Hub-wide preference
 
 ```sh
-nats kv add sesh.hub
-nats kv put sesh.hub default_max_attempts 3
+nats kv add sesh_hub
+nats kv put sesh_hub default_max_attempts 3
 ```
 
 ### Cross-scope: small structured state, large blob
@@ -176,8 +183,8 @@ nats pub workflow.update.findings "{\"rev\":\"$revid\"}"
 
 ```sh
 nats kv ls                                # all buckets
-nats kv info sesh.workflow.4bf92f35       # bucket config + key count
-nats kv ls-keys sesh.workflow.4bf92f35    # keys in a bucket
+nats kv info sesh_workflow_4bf92f35       # bucket config + key count
+nats kv ls-keys sesh_workflow_4bf92f35    # keys in a bucket
 nats kv get <bucket> <key>                # current value
 nats kv history <bucket> <key>            # version history (if enabled)
 nats kv watch <bucket>                    # tail change events

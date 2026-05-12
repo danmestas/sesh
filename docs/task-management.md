@@ -19,13 +19,15 @@ operations are sufficient to participate.
 Tasks are stored in a KV bucket named:
 
 ```
-sesh.tasks.<scope>.<scope-id>
+sesh_tasks_<scope>_<scope-id>
 ```
 
-Following the [scoped-memory](./scoped-memory.md) convention. Most
-common scope is workflow (`sesh.tasks.workflow.4bf92f35`) — tasks
-associated with one trace. Project or session scope is fine for
-longer-lived work plans.
+Following the [scoped-memory](./scoped-memory.md) convention
+(underscore separator; dots and hyphens in scope-ids sanitized to
+underscore because NATS KV bucket names disallow them). Most common
+scope is workflow (`sesh_tasks_workflow_4bf92f35`) — tasks associated
+with one trace. Project or session scope is fine for longer-lived
+work plans.
 
 Each task's KV key is its ID (a ULID). The KV value is the task record
 described below.
@@ -194,7 +196,7 @@ Multiple sweepers are safe — CAS ensures only one succeeds per task.
 NATS KV publishes change events. Subscribe to react in real time:
 
 ```sh
-nats kv watch sesh.tasks.workflow.4bf92f35
+nats kv watch sesh_tasks_workflow_4bf92f35
 ```
 
 Common watcher patterns:
@@ -249,7 +251,7 @@ A small workflow: build → test (depends on build) → deploy (depends on
 test).
 
 ```sh
-bucket=sesh.tasks.workflow.4bf92f35
+bucket=sesh_tasks_workflow_4bf92f35
 
 # Orchestrator creates the tasks
 for task in build test deploy; do
