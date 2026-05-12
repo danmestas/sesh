@@ -240,6 +240,11 @@ session's JetStream under `<cwd>/.sesh/sessions/<label>.messaging/`. If
 the teammate crashes, the next `sesh up --session=<same-label>` from the
 same cwd resumes it.
 
+**Task records** — for the work queue itself, use the
+[task-management](./task-management.md) schema: a structured KV record
+per task with a pull protocol that handles agent crashes via deadline
+extension and a sweeper that kicks expired pulls back to `pending`.
+
 ---
 
 ## Pattern 5: Message bus
@@ -302,7 +307,10 @@ each reads what others have produced and adds its contribution.
 **When to use** — collaborative research, design exploration, multi-stage
 analysis where contributions don't partition cleanly by subtask.
 
-Sesh has two complementary stores in the substrate, both already wired:
+See [scoped-memory.md](./scoped-memory.md) for the five-scope model
+(hub, project, session, workflow, agent), bucket naming convention, and
+TTL policy that frames everything below. Sesh has two complementary
+stores in the substrate, both already wired:
 
 ### JetStream KV — structured state with watchers
 
