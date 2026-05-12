@@ -94,6 +94,13 @@ For correlation and tracing across hops, agents should follow the
 [message envelope spec](docs/message-envelope.md) — NATS headers carrying
 W3C `traceparent` (OpenTelemetry-compatible) plus optional sesh metadata.
 
+For shared state across agents, see
+[`docs/scoped-memory.md`](docs/scoped-memory.md) (five scopes — hub,
+project, session, workflow, agent — with bucket conventions and TTL
+policy) and
+[`docs/task-management.md`](docs/task-management.md) (task schema and
+pull protocol built on scoped memory).
+
 ## Status
 
 Spike. Designed during a 2026-05-11 brainstorm; see commit messages for the design rationale captured inline. Out of scope today:
