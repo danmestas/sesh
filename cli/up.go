@@ -95,9 +95,10 @@ func (c *UpCmd) Run() error {
 	}
 
 	if err := updateSessionState(c.Session, SessionState{
-		PID:     os.Getpid(),
-		NATSURL: h.NATSURL(),
-		LeafURL: h.LeafURL(),
+		PID:       os.Getpid(),
+		NATSURL:   h.NATSURL(),
+		LeafURL:   h.LeafURL(),
+		FossilURL: "http://" + h.HTTPAddr() + "/",
 	}); err != nil {
 		_ = h.Stop()
 		return fmt.Errorf("publish session URLs: %w", err)

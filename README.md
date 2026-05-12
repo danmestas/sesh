@@ -107,27 +107,39 @@ Sesh's own `.sesh/` runtime state is never seeded.
 Recommended: add `.sesh/` to your `.gitignore` so git doesn't notice
 the sesh runtime state.
 
-### How cross-process Fossil sync works (and what's still gapped)
+### How cross-process Fossil sync works
 
 Same-project sessions share the `.sesh/project.repo` file directly
 (SQLite handles concurrent opens) — no network sync needed for
-intra-project commits.
+intra-project commits; readers see writes immediately.
 
 For **hub.repo** at `~/.sesh/`: sesh derives a deterministic
-project-code per project (hostname + project name) and passes it via
-`hub.Config.ProjectCode` plus `SESH_PROJECT_CODE` env to the spawned
-hub. Both the project's repo and the hub's repo subscribe to the same
-EdgeSync fossil-sync subject, so commits propagate. Verified by
+project-code per project (`sha1("sesh:" + hostname + ":" + project)`)
+and passes it via `hub.Config.ProjectCode` plus `SESH_PROJECT_CODE`
+env to the spawned hub. Both the project's repo and the hub's repo
+subscribe to the same EdgeSync fossil-sync subject, so commits
+propagate over NATS auto-publish. Verified by
 `TestHub_AccumulatesProjectCommits`.
 
-**Still gapped — sub-leaves.** An `edgesync hub serve
---leaf-upstream=...` spawned by hand can't yet share the parent's
-project-code because EdgeSync's CLI doesn't expose `--project-code`
-or `--seed-from-upstream` flags (the underlying `hub.Config` fields
-exist; the CLI surface doesn't yet). So sub-leaves get a fresh
-project-code and miss the project's sync subject.
-`TestSubLeaf_DoesNotSyncToday` asserts this remaining gap — will fail
-when EdgeSync wires the CLI flags.
+For **sub-leaves** (an `edgesync hub serve --leaf-upstream=...`
+spawned under a sesh): use `--seed-from-upstream=$FOSSIL_URL` where
+`FOSSIL_URL` comes from the parent session's state JSON
+(`.sesh/sessions/<label>.json` → `.fossil_url`). The sub-leaf clones
+the parent's Fossil over HTTP at startup (catching the seed commit
+and any prior agent commits) and inherits the parent's project-code,
+so subsequent commits land via NATS auto-publish. Verified by
+`TestSubLeaf_SyncsFromSesh`.
+
+```sh
+# Attach an edgesync sub-leaf under the running session "morning"
+LEAF=$(jq -r .leaf_url   < .sesh/sessions/morning.json)
+HTTP=$(jq -r .fossil_url < .sesh/sessions/morning.json)
+
+edgesync hub serve \
+  --repo=./.subleaf.repo \
+  --leaf-upstream="$LEAF" \
+  --seed-from-upstream="$HTTP"
+```
 
 ## Coordination patterns
 

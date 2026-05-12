@@ -130,16 +130,16 @@ commit (see the [README](../README.md#worktree-seeded-into-fossil)
 for `--seed` modes). Subsequent sessions open the existing repo — no
 re-seed.
 
-**Cross-process Fossil sync is partial.** Same-project sessions share
-the `.repo` file directly. The hub's repo also picks up the project's
-commits (sesh threads a deterministic project-code through
-`hub.Config.ProjectCode` so both subscribe to the same EdgeSync
+**Cross-process Fossil sync works.** Same-project sessions share the
+`.repo` file directly. The hub's repo picks up the project's commits
+because sesh threads a deterministic project-code through
+`hub.Config.ProjectCode` (both subscribe to the same EdgeSync
 fossil-sync subject). Sub-leaves spawned via `edgesync hub serve
---leaf-upstream=...` remain isolated until EdgeSync's CLI exposes
-the new `--project-code` / `--seed-from-upstream` flags (the
-underlying Config fields exist; the CLI surface is pending). See
-the [README](../README.md#how-cross-process-fossil-sync-works-and-whats-still-gapped)
-for the current state.
+--leaf-upstream=... --seed-from-upstream=$FOSSIL_URL` clone the
+parent's Fossil state and inherit its project-code, so they stay
+synced via NATS auto-publish. See the
+[README](../README.md#how-cross-process-fossil-sync-works) for the
+sub-leaf spawn recipe.
 
 ## Lifecycle responsibility
 

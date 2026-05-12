@@ -37,9 +37,10 @@ import (
 // the URLs once the hub has bound its ports. Sub-leaves and NATS clients
 // read NATSURL/LeafURL to attach without grepping logs.
 type SessionState struct {
-	PID     int    `json:"pid"`
-	NATSURL string `json:"nats_url,omitempty"` // for NATS clients under this session
-	LeafURL string `json:"leaf_url,omitempty"` // for EdgeSync leaves to solicit upstream
+	PID      int    `json:"pid"`
+	NATSURL  string `json:"nats_url,omitempty"`  // for NATS clients under this session
+	LeafURL  string `json:"leaf_url,omitempty"`  // for EdgeSync leaves to solicit upstream
+	FossilURL string `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
 }
 
 // projectStateDir returns <cwd>/.sesh/sessions, creating it if needed.

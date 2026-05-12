@@ -74,18 +74,12 @@ func TestMultiSession_SharedProjectRepo(t *testing.T) {
 
 // TestSubLeaf_NoIndependentGitSeed verifies that an edgesync sub-leaf
 // running under a sesh does NOT seed its own Fossil from the cwd's git
-// worktree. The sub-leaf's repo starts empty.
+// worktree. The sub-leaf's repo starts empty; if it receives commits,
+// they come from the parent via NATS sync (verified by
+// TestSubLeaf_SyncsViaProjectCode).
 //
 // What this test verifies (HARD): the sub-leaf does not log a seed
 // line. Only sesh does git seeding; edgesync hub serve doesn't.
-//
-// What this test does NOT verify (yet — see TestSubLeaf_DoesNotSyncToday
-// for the negative finding): the sub-leaf does NOT receive the parent's
-// commits via NATS sync. EdgeSync's fossil sync is subscriber-only
-// (no auto-publish on commit) and is keyed by per-repo project-code
-// (so two repos with different project-codes subscribe to different
-// subjects and can't reach each other). Fixing this is upstream
-// EdgeSync work — see TestSubLeaf_DoesNotSyncToday.
 func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -159,25 +153,19 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 	}
 }
 
-// TestSubLeaf_DoesNotSyncToday documents a remaining gap after the
-// upstream EdgeSync fix: sub-leaves spawned via `edgesync hub serve
-// --leaf-upstream=...` still cannot share a project-code with the
-// parent sesh because EdgeSync's CLI doesn't yet expose
-// --project-code or --seed-from-upstream flags (the Config fields
-// exist; the CLI surface doesn't).
+// TestSubLeaf_SyncsFromSesh verifies that an edgesync sub-leaf spawned
+// with --seed-from-upstream pointing at the parent sesh's fossil HTTP
+// endpoint clones the parent's existing Fossil state (including the
+// worktree seed) and stays in sync via NATS auto-publish.
 //
-// Until that CLI work lands, each sub-leaf's libfossil.Create
-// generates a fresh project-code → a different sync subject from the
-// parent → no propagation.
+// --seed-from-upstream serves two roles at once: it backfills the
+// commits that happened before the sub-leaf joined, AND it inherits
+// the parent's project-code so subsequent commits land on the same
+// fossil-sync subject.
 //
-// Sesh's own session-to-hub sync DOES work (see
-// TestHub_AccumulatesProjectCommits) because sesh threads the
-// project-code through both its own NewHub call and the env var that
-// sesh-spawned hub picks up.
-//
-// This test asserts the sub-leaf gap so we'll notice when the
-// EdgeSync CLI gains the missing flags.
-func TestSubLeaf_DoesNotSyncToday(t *testing.T) {
+// Requires EdgeSync#159 (CLI flag) + libfossil v0.6.1
+// (CreateOpts.ProjectCode).
+func TestSubLeaf_SyncsFromSesh(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -205,11 +193,21 @@ func TestSubLeaf_DoesNotSyncToday(t *testing.T) {
 		t.Fatalf("parent never seeded")
 	}
 
+	// Sub-leaf needs to clone the parent's existing state (the seed
+	// commit happened before the sub-leaf joined the sync subject — pure
+	// auto-publish wouldn't backfill). --seed-from-upstream pulls the
+	// parent's state via HTTP xfer and inherits the parent's
+	// project-code, so subsequent commits propagate via NATS auto-publish.
+	if state.FossilURL == "" {
+		t.Fatalf("parent state missing fossil_url (got %+v)", state)
+	}
+
 	subleafDir := t.TempDir()
 	subleafRepo := filepath.Join(subleafDir, "subleaf.repo")
 	sub := exec.Command(edgesyncBin, "hub", "serve",
 		"--repo="+subleafRepo,
 		"--leaf-upstream="+state.LeafURL,
+		"--seed-from-upstream="+state.FossilURL,
 		"--http-port=0", "--nats-client-port=0", "--nats-leaf-port=0")
 	var subStderr syncBuf
 	sub.Stdout = &subStderr
@@ -224,19 +222,17 @@ func TestSubLeaf_DoesNotSyncToday(t *testing.T) {
 
 	parentCount := countCheckins(t, filepath.Join(project, ".sesh", "project.repo"))
 
-	// Allow a generous settle window. If sync ever starts working
-	// upstream, this test will start failing (and we'll know to
-	// flip its assertion).
-	time.Sleep(5 * time.Second)
-	subCount := countCheckins(t, subleafRepo)
-
-	if subCount == parentCount {
-		t.Fatalf("sync now propagates from sesh to sub-leaf (sub=%d, parent=%d) — upstream EdgeSync fix has landed. Flip this test's assertion and remove the known-limitation doc.", subCount, parentCount)
+	// Sync should converge within a few seconds via auto-publish.
+	deadline := time.Now().Add(15 * time.Second)
+	var subCount int
+	for time.Now().Before(deadline) {
+		subCount = countCheckins(t, subleafRepo)
+		if subCount == parentCount {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	if subCount != 0 {
-		t.Errorf("sub-leaf has unexpected commits (%d) — neither empty nor synced. Investigate.", subCount)
-	}
-	t.Logf("confirmed: sub-leaf has 0 commits, parent has %d — sync does not propagate today (expected)", parentCount)
+	t.Errorf("sub-leaf did not converge to parent within 15s: sub=%d, parent=%d", subCount, parentCount)
 }
 
 // TestHub_AccumulatesProjectCommits verifies that commits made on a
