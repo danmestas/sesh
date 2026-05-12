@@ -22,6 +22,13 @@ type UpCmd struct {
 	HTTPPort       int `help:"Fossil HTTP port (0 = auto)" default:"0"`
 	NATSClientPort int `help:"NATS client port (0 = auto)" default:"0"`
 	NATSLeafPort   int `help:"NATS leafnode port (0 = auto)" default:"0"`
+
+	// Seed controls what gets committed to this session's Fossil repo
+	// at sesh up. Only applies on fresh repos — a session that's been
+	// up before retains whatever commits accumulated. "all" (default)
+	// captures tracked + untracked-but-not-gitignored files; "tracked"
+	// captures only what's in the git index; "none" skips seeding.
+	Seed string `help:"Seed mode for the session's Fossil repo: all|tracked|none" enum:"all,tracked,none" default:"all"`
 }
 
 func (c *UpCmd) Run() error {
@@ -48,6 +55,14 @@ func (c *UpCmd) Run() error {
 	repoPath := filepath.Join(cwd, ".sesh", "sessions", c.Session+".repo")
 	storeDir := filepath.Join(cwd, ".sesh", "sessions", c.Session+".messaging")
 
+	// Track whether the Fossil repo is fresh so we know whether to seed.
+	// Repos that pre-exist were either previously seeded or have agent
+	// commits we shouldn't clobber.
+	freshRepo := false
+	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {
+		freshRepo = true
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -71,6 +86,14 @@ func (c *UpCmd) Run() error {
 	}); err != nil {
 		_ = h.Stop()
 		return fmt.Errorf("publish session URLs: %w", err)
+	}
+
+	if freshRepo {
+		if err := seedFromGitWorktree(ctx, h, cwd, SeedMode(c.Seed)); err != nil {
+			slog.Warn("fossil seed failed (continuing without seed)", "err", err)
+		}
+	} else {
+		slog.Info("fossil repo pre-existed; not re-seeding", "path", repoPath)
 	}
 
 	slog.Info("sesh up running",
