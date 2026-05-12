@@ -90,6 +90,10 @@ generator–verifier, orchestrator–subagent, hierarchical multi-tier, agent
 teams, message bus, and shared-state/blackboard patterns wired against
 NATS subjects, JetStream, and the Fossil repo.
 
+For correlation and tracing across hops, agents should follow the
+[message envelope spec](docs/message-envelope.md) — NATS headers carrying
+W3C `traceparent` (OpenTelemetry-compatible) plus optional sesh metadata.
+
 ## Status
 
 Spike. Designed during a 2026-05-11 brainstorm; see commit messages for the design rationale captured inline. Out of scope today:

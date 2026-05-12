@@ -391,10 +391,12 @@ multi-tenant separation.
 
 ### No distributed tracing
 
-Each sesh writes slog locally. For multi-stage pipelines you'll want a
-`trace_id` header convention on messages and a JetStream stream
-(e.g., `_sys.trace.>`) that captures every published message. A small
-shell or Go helper is enough; no sesh changes required.
+Each sesh writes slog locally. For multi-stage pipelines you'll want
+trace propagation across messages. See
+[message-envelope.md](./message-envelope.md) for the recommended
+convention (NATS headers + W3C `traceparent`). A tracing consumer that
+converts incoming `traceparent` headers to OTLP spans and exports them
+is ~50 lines of Go; no sesh changes required.
 
 ### Single-machine hub
 
