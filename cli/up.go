@@ -44,7 +44,15 @@ func (c *UpCmd) Run() error {
 	}
 	defer release()
 
-	leafURL, err := ensureHubRunning()
+	// Deterministic Fossil project-code from (hostname, project name).
+	// All sesh leaves in this project on this machine arrive at the same
+	// code and therefore subscribe to the same EdgeSync fossil-sync
+	// subject — that's what lets the hub's repo and the session's repo
+	// see each other's commits. Passed to hub.NewHub here and via env
+	// var to the spawned `sesh hub serve` (see spawnHub).
+	projectCode := deriveProjectCode(project)
+
+	leafURL, err := ensureHubRunning(projectCode)
 	if err != nil {
 		return fmt.Errorf("hub bring-up: %w", err)
 	}
@@ -52,12 +60,18 @@ func (c *UpCmd) Run() error {
 	name := fmt.Sprintf("%s-session-%s", project, c.Session)
 
 	cwd, _ := os.Getwd()
-	repoPath := filepath.Join(cwd, ".sesh", "sessions", c.Session+".repo")
+	// Fossil is shared per-project (one repo under .sesh/project.repo),
+	// not per-session — all sessions in the same project commit on the
+	// same trunk. SQLite (libfossil's storage) handles concurrent opens.
+	// Only the FIRST session in a project seeds from the worktree;
+	// subsequent sessions open the existing repo and stack their commits
+	// on top of whatever's there.
+	//
+	// JetStream messaging stays per-session for private durable state.
+	repoPath := filepath.Join(cwd, ".sesh", "project.repo")
 	storeDir := filepath.Join(cwd, ".sesh", "sessions", c.Session+".messaging")
 
-	// Track whether the Fossil repo is fresh so we know whether to seed.
-	// Repos that pre-exist were either previously seeded or have agent
-	// commits we shouldn't clobber.
+	// Fresh = no project repo file yet → seed this once.
 	freshRepo := false
 	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {
 		freshRepo = true
@@ -74,15 +88,17 @@ func (c *UpCmd) Run() error {
 		NATSClientPort: c.NATSClientPort,
 		NATSLeafPort:   c.NATSLeafPort,
 		LeafUpstream:   leafURL,
+		ProjectCode:    projectCode,
 	})
 	if err != nil {
 		return fmt.Errorf("sesh up: %w", err)
 	}
 
 	if err := updateSessionState(c.Session, SessionState{
-		PID:     os.Getpid(),
-		NATSURL: h.NATSURL(),
-		LeafURL: h.LeafURL(),
+		PID:       os.Getpid(),
+		NATSURL:   h.NATSURL(),
+		LeafURL:   h.LeafURL(),
+		FossilURL: "http://" + h.HTTPAddr() + "/",
 	}); err != nil {
 		_ = h.Stop()
 		return fmt.Errorf("publish session URLs: %w", err)
@@ -130,7 +146,7 @@ func (c *UpCmd) Run() error {
 // see the URL is reachable, and return without spawning. Without this,
 // each racer would fork-exec its own hub, contend on the shared fossil +
 // JetStream storage at ~/.sesh, and no hub would stabilize.
-func ensureHubRunning() (string, error) {
+func ensureHubRunning(projectCode string) (string, error) {
 	urlPath, err := hubURLPath()
 	if err != nil {
 		return "", err
@@ -162,7 +178,7 @@ func ensureHubRunning() (string, error) {
 	}
 	_ = os.Remove(urlPath)
 
-	if err := spawnHub(); err != nil {
+	if err := spawnHub(projectCode); err != nil {
 		return "", err
 	}
 
@@ -190,7 +206,7 @@ func readHubURL(path string) (string, error) {
 // spawnHub fork-execs `sesh hub serve` as a detached daemon. Stdout/stderr
 // go to ~/.sesh/hub.log; stdin is /dev/null. setsid detaches from the
 // controlling terminal so the daemon survives parent shutdown.
-func spawnHub() error {
+func spawnHub(projectCode string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("self executable: %w", err)
@@ -208,6 +224,9 @@ func spawnHub() error {
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// SESH_PROJECT_CODE makes the hub's Fossil repo subscribe to the
+	// same EdgeSync sync subject as the spawning project's leaf repos.
+	cmd.Env = append(os.Environ(), "SESH_PROJECT_CODE="+projectCode)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()

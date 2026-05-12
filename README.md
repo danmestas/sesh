@@ -83,11 +83,12 @@ nats --server="$NATS" sub '>'
 
 ## Worktree seeded into Fossil
 
-When `sesh up` runs in a git worktree, the session's Fossil repo
-(`<cwd>/.sesh/sessions/<label>.repo`) gets seeded with the current
-worktree as a single initial commit. Agents in the session commit code
-and notes on top — Fossil's sync engine propagates those commits to
-sub-leaves and the hub for any other sesh that wants them.
+When `sesh up` runs in a git worktree, the project's Fossil repo
+(`<cwd>/.sesh/project.repo`) gets seeded with the current worktree as
+a single initial commit. The repo is **shared by every session in the
+same project** — all sessions read and write the same Fossil trunk.
+Only the first `sesh up` in a project seeds it; subsequent sessions
+open the existing repo and stack their commits on top.
 
 The git worktree itself is untouched. Agents work in Fossil; a human
 or an explicit `sesh promote` (TODO) decides which Fossil commits get
@@ -105,6 +106,40 @@ Sesh's own `.sesh/` runtime state is never seeded.
 
 Recommended: add `.sesh/` to your `.gitignore` so git doesn't notice
 the sesh runtime state.
+
+### How cross-process Fossil sync works
+
+Same-project sessions share the `.sesh/project.repo` file directly
+(SQLite handles concurrent opens) — no network sync needed for
+intra-project commits; readers see writes immediately.
+
+For **hub.repo** at `~/.sesh/`: sesh derives a deterministic
+project-code per project (`sha1("sesh:" + hostname + ":" + project)`)
+and passes it via `hub.Config.ProjectCode` plus `SESH_PROJECT_CODE`
+env to the spawned hub. Both the project's repo and the hub's repo
+subscribe to the same EdgeSync fossil-sync subject, so commits
+propagate over NATS auto-publish. Verified by
+`TestHub_AccumulatesProjectCommits`.
+
+For **sub-leaves** (an `edgesync hub serve --leaf-upstream=...`
+spawned under a sesh): use `--seed-from-upstream=$FOSSIL_URL` where
+`FOSSIL_URL` comes from the parent session's state JSON
+(`.sesh/sessions/<label>.json` → `.fossil_url`). The sub-leaf clones
+the parent's Fossil over HTTP at startup (catching the seed commit
+and any prior agent commits) and inherits the parent's project-code,
+so subsequent commits land via NATS auto-publish. Verified by
+`TestSubLeaf_SyncsFromSesh`.
+
+```sh
+# Attach an edgesync sub-leaf under the running session "morning"
+LEAF=$(jq -r .leaf_url   < .sesh/sessions/morning.json)
+HTTP=$(jq -r .fossil_url < .sesh/sessions/morning.json)
+
+edgesync hub serve \
+  --repo=./.subleaf.repo \
+  --leaf-upstream="$LEAF" \
+  --seed-from-upstream="$HTTP"
+```
 
 ## Coordination patterns
 

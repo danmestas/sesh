@@ -18,6 +18,7 @@ package cli
 
 import (
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -36,9 +37,10 @@ import (
 // the URLs once the hub has bound its ports. Sub-leaves and NATS clients
 // read NATSURL/LeafURL to attach without grepping logs.
 type SessionState struct {
-	PID     int    `json:"pid"`
-	NATSURL string `json:"nats_url,omitempty"` // for NATS clients under this session
-	LeafURL string `json:"leaf_url,omitempty"` // for EdgeSync leaves to solicit upstream
+	PID      int    `json:"pid"`
+	NATSURL  string `json:"nats_url,omitempty"`  // for NATS clients under this session
+	LeafURL  string `json:"leaf_url,omitempty"`  // for EdgeSync leaves to solicit upstream
+	FossilURL string `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
 }
 
 // projectStateDir returns <cwd>/.sesh/sessions, creating it if needed.
@@ -255,6 +257,21 @@ func hubLogPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "hub.log"), nil
+}
+
+// deriveProjectCode produces a deterministic 40-char lowercase hex
+// project-code from (hostname, projectName). All sesh leaves in the same
+// project on the same machine arrive at the same code, so their Fossil
+// repos subscribe to the same NATS sync subject and EdgeSync's
+// cross-leaf sync can propagate commits between them.
+//
+// Hostname is included so different machines' Fossil contents don't
+// conflate when projects happen to share a name. Same-machine remains
+// stable across runs.
+func deriveProjectCode(projectName string) string {
+	host, _ := os.Hostname()
+	sum := sha1.Sum([]byte("sesh:" + host + ":" + projectName))
+	return hex.EncodeToString(sum[:])
 }
 
 // defaultProject returns filepath.Base(cwd) — the convention is "the project

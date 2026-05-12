@@ -89,6 +89,11 @@ func (c *HubServeCmd) Run() error {
 		FossilHTTPPort: c.HTTPPort,
 		NATSClientPort: c.NATSClientPort,
 		NATSLeafPort:   c.NATSLeafPort,
+		// Inherited from `sesh up` so the hub's Fossil subscribes to the
+		// same EdgeSync fossil-sync subject as the project's leaves.
+		// Empty (e.g. hand-launched hub) preserves prior auto-generated
+		// behavior.
+		ProjectCode: os.Getenv("SESH_PROJECT_CODE"),
 	})
 	if err != nil {
 		urlFile.Close()

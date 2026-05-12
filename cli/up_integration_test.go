@@ -97,9 +97,10 @@ func readTrimmed(t *testing.T, path string) string {
 // package cli_test (external) means we can't reference the unexported
 // claim helpers, but the JSON schema is the public contract.
 type stateOnDisk struct {
-	PID     int    `json:"pid"`
-	NATSURL string `json:"nats_url"`
-	LeafURL string `json:"leaf_url"`
+	PID       int    `json:"pid"`
+	NATSURL   string `json:"nats_url"`
+	LeafURL   string `json:"leaf_url"`
+	FossilURL string `json:"fossil_url"`
 }
 
 func waitForURLs(t *testing.T, path string, timeout time.Duration) stateOnDisk {

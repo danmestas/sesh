@@ -117,17 +117,29 @@ sesh_events_<scope>_<scope-id>    append-only event stream
 sesh_blobs_<scope>_<scope-id>     versioned object store
 ```
 
-For Fossil: every sesh leaf has a repo at
-`<cwd>/.sesh/sessions/<label>.repo`; the hub has `~/.sesh/hub.repo`.
-Sync is automatic via EdgeSync. Use Fossil when the artifact has
-identity (a commit) and when other agents should be able to read it at
-a specific revision.
+For Fossil: every project has one shared repo at
+`<cwd>/.sesh/project.repo`. All sessions in that project open the
+same file — SQLite handles concurrent access. The hub has its own
+repo at `~/.sesh/hub.repo`. Use Fossil when the artifact has identity
+(a commit) and when other agents should be able to read it at a
+specific revision.
 
-When `sesh up` runs in a git worktree, the session's Fossil is seeded
-with the worktree as a single initial commit (see the
-[README](../README.md#worktree-seeded-into-fossil) for `--seed` modes).
-The seed gives agents the real codebase as a baseline so commits stack
-on top; the git worktree itself is never modified by the session.
+When the first `sesh up` of a project runs in a git worktree, the
+project's Fossil is seeded with the worktree as a single initial
+commit (see the [README](../README.md#worktree-seeded-into-fossil)
+for `--seed` modes). Subsequent sessions open the existing repo — no
+re-seed.
+
+**Cross-process Fossil sync works.** Same-project sessions share the
+`.repo` file directly. The hub's repo picks up the project's commits
+because sesh threads a deterministic project-code through
+`hub.Config.ProjectCode` (both subscribe to the same EdgeSync
+fossil-sync subject). Sub-leaves spawned via `edgesync hub serve
+--leaf-upstream=... --seed-from-upstream=$FOSSIL_URL` clone the
+parent's Fossil state and inherit its project-code, so they stay
+synced via NATS auto-publish. See the
+[README](../README.md#how-cross-process-fossil-sync-works) for the
+sub-leaf spawn recipe.
 
 ## Lifecycle responsibility
 
