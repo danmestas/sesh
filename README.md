@@ -81,6 +81,15 @@ nats --server="$NATS" sub '>'
 └── <label>.messaging/  ← per-session JetStream storage
 ```
 
+## Coordination patterns
+
+The mesh is a neutral transport — any well-known multi-agent coordination
+pattern maps onto its primitives. See
+[`docs/coordination-patterns.md`](docs/coordination-patterns.md) for
+generator–verifier, orchestrator–subagent, hierarchical multi-tier, agent
+teams, message bus, and shared-state/blackboard patterns wired against
+NATS subjects, JetStream, and the Fossil repo.
+
 ## Status
 
 Spike. Designed during a 2026-05-11 brainstorm; see commit messages for the design rationale captured inline. Out of scope today:
