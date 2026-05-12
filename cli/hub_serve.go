@@ -106,6 +106,20 @@ func (c *HubServeCmd) Run() error {
 	urlFile.Close()
 	defer os.Remove(urlPath)
 
+	// Publish the hub's NATS client URL so clients doing hub/project/
+	// workflow-scoped KV work can connect to the hub's JetStream domain.
+	// Sessions run their own JetStream domains; the hub's is shared.
+	natsURLPath, err := hubNATSURLPath()
+	if err != nil {
+		_ = h.Stop()
+		return fmt.Errorf("hub.nats.url path: %w", err)
+	}
+	if err := writeAtomic(natsURLPath, h.NATSURL()+"\n"); err != nil {
+		_ = h.Stop()
+		return fmt.Errorf("write hub.nats.url: %w", err)
+	}
+	defer os.Remove(natsURLPath)
+
 	slog.Info("sesh hub running",
 		"keepalive", c.Keepalive,
 		"repo", repoPath,

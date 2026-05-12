@@ -55,6 +55,14 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	dial(t, state.NATSURL, "NATSURL")
 	dial(t, state.LeafURL, "LeafURL")
 
+	// hub.nats.url is the hub's client NATS URL — clients doing
+	// hub/project/workflow-scoped KV work connect here so their KV
+	// buckets live in the shared (hub) JetStream domain, not in a
+	// session's domain.
+	hubNATSURLPath := filepath.Join(home, ".sesh", "hub.nats.url")
+	hubNATSURL := readTrimmed(t, hubNATSURLPath)
+	dial(t, hubNATSURL, "hub.nats.url")
+
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("SIGINT: %v", err)
 	}
@@ -65,6 +73,24 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
 		t.Errorf("state file lingered after shutdown: %v", err)
 	}
+	// hub.nats.url is cleaned up by the hub process on its auto-shutdown
+	// (~500ms after sesh up exits), not by sesh up itself — same as
+	// hub.url. Not asserted here; race-prone.
+}
+
+// readTrimmed reads a file and trims trailing whitespace. The hub
+// writes its NATS URL with a trailing newline; clients trim before use.
+func readTrimmed(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	s := string(data)
+	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == ' ' || s[len(s)-1] == '\r' || s[len(s)-1] == '\t') {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // stateOnDisk mirrors cli.SessionState — keeping the integration test in

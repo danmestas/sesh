@@ -53,6 +53,35 @@ identity for agent. Workflow id is the first 8 hex chars of the W3C
 trace-id from the incoming `traceparent` header — unique enough in
 practice and keeps bucket names readable.
 
+## Connection target — which NATS to talk to
+
+Each `sesh up` runs an embedded NATS server with **its own JetStream
+domain** (storage under `<cwd>/.sesh/sessions/<label>.messaging/`). The
+hub also runs its own JetStream domain (`~/.sesh/messaging/`). NATS
+leaf nodes connect the message-routing layer, but JetStream **storage
+is per-domain** — a KV bucket created on one server's JetStream is
+invisible to clients connected to a different server.
+
+So the connection target matters for whether your scope is actually
+shared:
+
+| Scope             | Connect to                                | Why                                       |
+| ----------------- | ----------------------------------------- | ----------------------------------------- |
+| hub               | hub's NATS URL (`~/.sesh/hub.nats.url`)   | Hub is the shared store                   |
+| project           | hub's NATS URL                            | Shared across sessions in the project     |
+| workflow          | hub's NATS URL                            | Shared across sessions in the trace       |
+| session           | session's `nats_url` from state JSON      | Local durable state, session-private      |
+| agent             | session's `nats_url` from state JSON      | Local durable state, agent-private        |
+
+Sesh publishes the hub's client NATS URL at `~/.sesh/hub.nats.url`
+(written atomically when the hub binds, removed on shutdown). Clients
+that need hub/project/workflow-scoped KV connect there; clients that
+want session/agent-scoped state stay on the session's URL from the
+session JSON.
+
+The reference CLI `sesh-ops` does this routing automatically based on
+the `--scope` flag. Hand-rolled clients should follow the same rule.
+
 ## TTL policy
 
 Configured at bucket creation. JetStream KV supports both per-bucket
