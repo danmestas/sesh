@@ -107,23 +107,27 @@ Sesh's own `.sesh/` runtime state is never seeded.
 Recommended: add `.sesh/` to your `.gitignore` so git doesn't notice
 the sesh runtime state.
 
-### Known limitation: cross-process Fossil sync
+### How cross-process Fossil sync works (and what's still gapped)
 
-Multiple sessions in the **same project** share the `.repo` file
-directly (SQLite handles concurrent opens) — no network sync needed,
-commits are immediately visible to all sessions.
+Same-project sessions share the `.sesh/project.repo` file directly
+(SQLite handles concurrent opens) — no network sync needed for
+intra-project commits.
 
-**Sub-leaves** (an `edgesync hub serve --leaf-upstream=...` spawned
-under a sesh) and the **hub.repo** at `~/.sesh/` get their own Fossil
-repos. They subscribe to NATS-based fossil-sync, but the upstream
-EdgeSync sync engine doesn't auto-publish commits today — peers can
-serve xfer requests, but no one publishes them on commit. So sub-leaves
-and the hub stay empty unless an agent explicitly pushes.
+For **hub.repo** at `~/.sesh/`: sesh derives a deterministic
+project-code per project (hostname + project name) and passes it via
+`hub.Config.ProjectCode` plus `SESH_PROJECT_CODE` env to the spawned
+hub. Both the project's repo and the hub's repo subscribe to the same
+EdgeSync fossil-sync subject, so commits propagate. Verified by
+`TestHub_AccumulatesProjectCommits`.
 
-Tracked upstream in [danmestas/EdgeSync#156](https://github.com/danmestas/EdgeSync/issues/156).
-The hard-assertion tests `TestSubLeaf_DoesNotSyncToday` and
-`TestHub_DoesNotAccumulateProjectCommitsToday` will fail when the
-upstream fix lands, which prompts the assertion flip.
+**Still gapped — sub-leaves.** An `edgesync hub serve
+--leaf-upstream=...` spawned by hand can't yet share the parent's
+project-code because EdgeSync's CLI doesn't expose `--project-code`
+or `--seed-from-upstream` flags (the underlying `hub.Config` fields
+exist; the CLI surface doesn't yet). So sub-leaves get a fresh
+project-code and miss the project's sync subject.
+`TestSubLeaf_DoesNotSyncToday` asserts this remaining gap — will fail
+when EdgeSync wires the CLI flags.
 
 ## Coordination patterns
 

@@ -159,27 +159,24 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 	}
 }
 
-// TestSubLeaf_DoesNotSyncToday documents an upstream EdgeSync
-// limitation: Fossil sync over NATS does not auto-propagate commits
-// between sub-leaves and parent sessions today.
+// TestSubLeaf_DoesNotSyncToday documents a remaining gap after the
+// upstream EdgeSync fix: sub-leaves spawned via `edgesync hub serve
+// --leaf-upstream=...` still cannot share a project-code with the
+// parent sesh because EdgeSync's CLI doesn't yet expose
+// --project-code or --seed-from-upstream flags (the Config fields
+// exist; the CLI surface doesn't).
 //
-// Reason (from EdgeSync hub/hub.go startFossilSyncSubscriber):
+// Until that CLI work lands, each sub-leaf's libfossil.Create
+// generates a fresh project-code → a different sync subject from the
+// parent → no propagation.
 //
-//  1. Each Fossil repo's sync subject is "<prefix>.<project-code>.sync"
-//     where project-code is a per-repo UUID set at libfossil.Create()
-//     time. The parent's repo, the sub-leaf's repo, and the hub's repo
-//     each have different project-codes → different subjects.
-//  2. The sync handler is subscribe-only: it dispatches incoming xfer
-//     requests via Repo.HandleSync. There's no auto-publish of local
-//     commits to the sync subject.
+// Sesh's own session-to-hub sync DOES work (see
+// TestHub_AccumulatesProjectCommits) because sesh threads the
+// project-code through both its own NewHub call and the env var that
+// sesh-spawned hub picks up.
 //
-// So today, sub-leaves and the hub start empty and stay empty unless
-// something explicitly publishes an xfer request matching the
-// participants' shared project-code (which they don't share).
-//
-// Fix is upstream-EdgeSync work — see GitHub issue (filed alongside
-// this test). The test asserts the current behavior so we'll notice
-// when the upstream fix lands.
+// This test asserts the sub-leaf gap so we'll notice when the
+// EdgeSync CLI gains the missing flags.
 func TestSubLeaf_DoesNotSyncToday(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -242,15 +239,16 @@ func TestSubLeaf_DoesNotSyncToday(t *testing.T) {
 	t.Logf("confirmed: sub-leaf has 0 commits, parent has %d — sync does not propagate today (expected)", parentCount)
 }
 
-// TestHub_DoesNotAccumulateProjectCommitsToday — same finding as
-// TestSubLeaf_DoesNotSyncToday but for the hub: commits made on a
-// session's project.repo don't reach ~/.sesh/hub.repo via NATS sync
-// today. Same root cause (project-code mismatch + no auto-publish).
+// TestHub_AccumulatesProjectCommits verifies that commits made on a
+// session's project.repo propagate to ~/.sesh/hub.repo over EdgeSync's
+// fossil-sync subject. Coordination works because sesh derives a
+// deterministic project-code per project (hostname + project name) and
+// passes it via hub.Config.ProjectCode + the SESH_PROJECT_CODE env var
+// to the spawned hub, so both repos subscribe to the same sync subject.
 //
-// When the upstream EdgeSync fix lands, this test will fail; flip the
-// assertion to "hub.repo eventually has parentCount commits" at that
-// point.
-func TestHub_DoesNotAccumulateProjectCommitsToday(t *testing.T) {
+// Requires EdgeSync's cross-leaf fossil sync (#157 / merged 2026-05-12)
+// AND libfossil v0.6.1 (CreateOpts.ProjectCode).
+func TestHub_AccumulatesProjectCommits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -278,18 +276,18 @@ func TestHub_DoesNotAccumulateProjectCommitsToday(t *testing.T) {
 		t.Fatalf("hub.repo missing at %s: %v", hubRepo, err)
 	}
 
-	// Generous settle window.
 	want := countCheckins(t, filepath.Join(project, ".sesh", "project.repo"))
-	time.Sleep(5 * time.Second)
-	got := countCheckins(t, hubRepo)
 
-	if got == want {
-		t.Fatalf("hub.repo now syncs from project.repo (hub=%d, project=%d) — upstream EdgeSync fix has landed. Flip this test's assertion.", got, want)
+	deadline := time.Now().Add(15 * time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		got = countCheckins(t, hubRepo)
+		if got == want {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	if got != 0 {
-		t.Errorf("hub.repo has unexpected commits (%d) — neither empty nor synced", got)
-	}
-	t.Logf("confirmed: hub.repo has 0 commits, project has %d — sync does not propagate today (expected)", want)
+	t.Errorf("hub.repo did not converge to project.repo within 15s: hub=%d, project=%d", got, want)
 }
 
 // --- helpers ---

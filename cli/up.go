@@ -44,7 +44,15 @@ func (c *UpCmd) Run() error {
 	}
 	defer release()
 
-	leafURL, err := ensureHubRunning()
+	// Deterministic Fossil project-code from (hostname, project name).
+	// All sesh leaves in this project on this machine arrive at the same
+	// code and therefore subscribe to the same EdgeSync fossil-sync
+	// subject — that's what lets the hub's repo and the session's repo
+	// see each other's commits. Passed to hub.NewHub here and via env
+	// var to the spawned `sesh hub serve` (see spawnHub).
+	projectCode := deriveProjectCode(project)
+
+	leafURL, err := ensureHubRunning(projectCode)
 	if err != nil {
 		return fmt.Errorf("hub bring-up: %w", err)
 	}
@@ -80,6 +88,7 @@ func (c *UpCmd) Run() error {
 		NATSClientPort: c.NATSClientPort,
 		NATSLeafPort:   c.NATSLeafPort,
 		LeafUpstream:   leafURL,
+		ProjectCode:    projectCode,
 	})
 	if err != nil {
 		return fmt.Errorf("sesh up: %w", err)
@@ -136,7 +145,7 @@ func (c *UpCmd) Run() error {
 // see the URL is reachable, and return without spawning. Without this,
 // each racer would fork-exec its own hub, contend on the shared fossil +
 // JetStream storage at ~/.sesh, and no hub would stabilize.
-func ensureHubRunning() (string, error) {
+func ensureHubRunning(projectCode string) (string, error) {
 	urlPath, err := hubURLPath()
 	if err != nil {
 		return "", err
@@ -168,7 +177,7 @@ func ensureHubRunning() (string, error) {
 	}
 	_ = os.Remove(urlPath)
 
-	if err := spawnHub(); err != nil {
+	if err := spawnHub(projectCode); err != nil {
 		return "", err
 	}
 
@@ -196,7 +205,7 @@ func readHubURL(path string) (string, error) {
 // spawnHub fork-execs `sesh hub serve` as a detached daemon. Stdout/stderr
 // go to ~/.sesh/hub.log; stdin is /dev/null. setsid detaches from the
 // controlling terminal so the daemon survives parent shutdown.
-func spawnHub() error {
+func spawnHub(projectCode string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("self executable: %w", err)
@@ -214,6 +223,9 @@ func spawnHub() error {
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// SESH_PROJECT_CODE makes the hub's Fossil repo subscribe to the
+	// same EdgeSync sync subject as the spawning project's leaf repos.
+	cmd.Env = append(os.Environ(), "SESH_PROJECT_CODE="+projectCode)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()

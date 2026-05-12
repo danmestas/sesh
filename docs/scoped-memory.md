@@ -130,12 +130,16 @@ commit (see the [README](../README.md#worktree-seeded-into-fossil)
 for `--seed` modes). Subsequent sessions open the existing repo — no
 re-seed.
 
-**Cross-process Fossil sync is currently incomplete** — same-machine
-sessions sharing the project repo file works fine, but sub-leaves and
-the hub.repo don't receive commits via NATS today (no auto-publish
-upstream). See the
-[README "Known limitation"](../README.md#known-limitation-cross-process-fossil-sync)
-section and [danmestas/EdgeSync#156](https://github.com/danmestas/EdgeSync/issues/156).
+**Cross-process Fossil sync is partial.** Same-project sessions share
+the `.repo` file directly. The hub's repo also picks up the project's
+commits (sesh threads a deterministic project-code through
+`hub.Config.ProjectCode` so both subscribe to the same EdgeSync
+fossil-sync subject). Sub-leaves spawned via `edgesync hub serve
+--leaf-upstream=...` remain isolated until EdgeSync's CLI exposes
+the new `--project-code` / `--seed-from-upstream` flags (the
+underlying Config fields exist; the CLI surface is pending). See
+the [README](../README.md#how-cross-process-fossil-sync-works-and-whats-still-gapped)
+for the current state.
 
 ## Lifecycle responsibility
 
