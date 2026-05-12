@@ -83,11 +83,12 @@ nats --server="$NATS" sub '>'
 
 ## Worktree seeded into Fossil
 
-When `sesh up` runs in a git worktree, the session's Fossil repo
-(`<cwd>/.sesh/sessions/<label>.repo`) gets seeded with the current
-worktree as a single initial commit. Agents in the session commit code
-and notes on top — Fossil's sync engine propagates those commits to
-sub-leaves and the hub for any other sesh that wants them.
+When `sesh up` runs in a git worktree, the project's Fossil repo
+(`<cwd>/.sesh/project.repo`) gets seeded with the current worktree as
+a single initial commit. The repo is **shared by every session in the
+same project** — all sessions read and write the same Fossil trunk.
+Only the first `sesh up` in a project seeds it; subsequent sessions
+open the existing repo and stack their commits on top.
 
 The git worktree itself is untouched. Agents work in Fossil; a human
 or an explicit `sesh promote` (TODO) decides which Fossil commits get
@@ -105,6 +106,24 @@ Sesh's own `.sesh/` runtime state is never seeded.
 
 Recommended: add `.sesh/` to your `.gitignore` so git doesn't notice
 the sesh runtime state.
+
+### Known limitation: cross-process Fossil sync
+
+Multiple sessions in the **same project** share the `.repo` file
+directly (SQLite handles concurrent opens) — no network sync needed,
+commits are immediately visible to all sessions.
+
+**Sub-leaves** (an `edgesync hub serve --leaf-upstream=...` spawned
+under a sesh) and the **hub.repo** at `~/.sesh/` get their own Fossil
+repos. They subscribe to NATS-based fossil-sync, but the upstream
+EdgeSync sync engine doesn't auto-publish commits today — peers can
+serve xfer requests, but no one publishes them on commit. So sub-leaves
+and the hub stay empty unless an agent explicitly pushes.
+
+Tracked upstream in [danmestas/EdgeSync#156](https://github.com/danmestas/EdgeSync/issues/156).
+The hard-assertion tests `TestSubLeaf_DoesNotSyncToday` and
+`TestHub_DoesNotAccumulateProjectCommitsToday` will fail when the
+upstream fix lands, which prompts the assertion flip.
 
 ## Coordination patterns
 

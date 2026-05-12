@@ -117,17 +117,25 @@ sesh_events_<scope>_<scope-id>    append-only event stream
 sesh_blobs_<scope>_<scope-id>     versioned object store
 ```
 
-For Fossil: every sesh leaf has a repo at
-`<cwd>/.sesh/sessions/<label>.repo`; the hub has `~/.sesh/hub.repo`.
-Sync is automatic via EdgeSync. Use Fossil when the artifact has
-identity (a commit) and when other agents should be able to read it at
-a specific revision.
+For Fossil: every project has one shared repo at
+`<cwd>/.sesh/project.repo`. All sessions in that project open the
+same file — SQLite handles concurrent access. The hub has its own
+repo at `~/.sesh/hub.repo`. Use Fossil when the artifact has identity
+(a commit) and when other agents should be able to read it at a
+specific revision.
 
-When `sesh up` runs in a git worktree, the session's Fossil is seeded
-with the worktree as a single initial commit (see the
-[README](../README.md#worktree-seeded-into-fossil) for `--seed` modes).
-The seed gives agents the real codebase as a baseline so commits stack
-on top; the git worktree itself is never modified by the session.
+When the first `sesh up` of a project runs in a git worktree, the
+project's Fossil is seeded with the worktree as a single initial
+commit (see the [README](../README.md#worktree-seeded-into-fossil)
+for `--seed` modes). Subsequent sessions open the existing repo — no
+re-seed.
+
+**Cross-process Fossil sync is currently incomplete** — same-machine
+sessions sharing the project repo file works fine, but sub-leaves and
+the hub.repo don't receive commits via NATS today (no auto-publish
+upstream). See the
+[README "Known limitation"](../README.md#known-limitation-cross-process-fossil-sync)
+section and [danmestas/EdgeSync#156](https://github.com/danmestas/EdgeSync/issues/156).
 
 ## Lifecycle responsibility
 

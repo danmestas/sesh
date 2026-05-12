@@ -52,12 +52,18 @@ func (c *UpCmd) Run() error {
 	name := fmt.Sprintf("%s-session-%s", project, c.Session)
 
 	cwd, _ := os.Getwd()
-	repoPath := filepath.Join(cwd, ".sesh", "sessions", c.Session+".repo")
+	// Fossil is shared per-project (one repo under .sesh/project.repo),
+	// not per-session — all sessions in the same project commit on the
+	// same trunk. SQLite (libfossil's storage) handles concurrent opens.
+	// Only the FIRST session in a project seeds from the worktree;
+	// subsequent sessions open the existing repo and stack their commits
+	// on top of whatever's there.
+	//
+	// JetStream messaging stays per-session for private durable state.
+	repoPath := filepath.Join(cwd, ".sesh", "project.repo")
 	storeDir := filepath.Join(cwd, ".sesh", "sessions", c.Session+".messaging")
 
-	// Track whether the Fossil repo is fresh so we know whether to seed.
-	// Repos that pre-exist were either previously seeded or have agent
-	// commits we shouldn't clobber.
+	// Fresh = no project repo file yet → seed this once.
 	freshRepo := false
 	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {
 		freshRepo = true
