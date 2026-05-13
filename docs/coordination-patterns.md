@@ -20,6 +20,8 @@ Six patterns covered, deduplicated from current sources:
 Snippets below are illustrative pseudocode using the [`nats` CLI](https://github.com/nats-io/natscli);
 they encode the wire shape, not copy-paste-runnable scripts.
 
+For a concrete adapter that maps the **orchestrator–subagent** pattern below onto [`orch`](https://github.com/danmestas/orch)'s tmux-pane orchestration verbs (spawn, tell, listen) via NATS, see [`orch-bridge.md`](orch-bridge.md).
+
 ---
 
 ## Sesh primitives at a glance
