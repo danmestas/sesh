@@ -124,7 +124,7 @@ robustness story.
 | Mode                  | Repo path                                    | Cross-session writes                  | Contention                                                       |
 | --------------------- | -------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------- |
 | `session` (default)   | `<cwd>/.sesh/sessions/<label>.repo`          | Eventual via NATS autosync (~0.24s)   | None — every session is the sole writer to its own file          |
-| `project` (opt-in)    | `<cwd>/.sesh/project.repo`                   | Synchronous via shared SQLite WAL     | Concurrent writers queue on the WAL lock (busy_timeout queued)   |
+| `project` (opt-in)    | `<cwd>/.sesh/project.repo`                   | Synchronous via shared SQLite WAL     | Today: SHARED→RESERVED race can return `SQLITE_BUSY` (see note + [libfossil#33](https://github.com/danmestas/libfossil/issues/33)); post-fix: queued via `busy_timeout` |
 
 Both modes coexist in the same project. A `--scope=session` session
 and a `--scope=project` session can run side-by-side and still

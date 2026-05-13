@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/danmestas/EdgeSync/hub"
-	_ "github.com/danmestas/libfossil/db/driver/modernc"
+	// modernc/sqlite driver registration is provided by the sibling
+	// multi_session_integration_test.go's blank import; package cli_test
+	// inherits it. Re-importing here is redundant.
 )
 
 // TestScope_Session_Default verifies that omitting --scope leaves the

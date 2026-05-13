@@ -13,10 +13,13 @@ import "path/filepath"
 //   - ScopeProject: shared repo at <cwd>/.sesh/project.repo. All
 //     sessions in the project open the same SQLite file. Cross-session
 //     commits are visible synchronously to readers on the same file
-//     (no autosync round-trip needed for cohabiting sessions), but
-//     concurrent writers contend on the SQLite WAL lock. busy_timeout
-//     (set by EdgeSync hub via applySQLiteTuning) makes contending
-//     writers queue rather than fail fast.
+//     (no autosync round-trip needed for cohabiting sessions). Concurrent
+//     writers SHOULD queue on the SQLite WAL lock via busy_timeout (set
+//     by both EdgeSync hub and libfossil core), but TODAY two concurrent
+//     writers can hit SQLite's SHARED→RESERVED upgrade race which bypasses
+//     busy_timeout — see https://github.com/danmestas/libfossil/issues/33.
+//     Safe for single-writer-at-a-time workloads; not yet safe for
+//     symmetric concurrent commits.
 //
 // Modes can mix in the same project: a --scope=project session and a
 // --scope=session session co-exist on different repo files. NATS
