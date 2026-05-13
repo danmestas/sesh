@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -30,6 +29,17 @@ type UpCmd struct {
 	// captures tracked + untracked-but-not-gitignored files; "tracked"
 	// captures only what's in the git index; "none" skips seeding.
 	Seed string `help:"Seed mode for the session's Fossil repo: all|tracked|none" enum:"all,tracked,none" default:"all"`
+
+	// Scope selects the Fossil repo path. "session" (default) gives
+	// each session its own repo at .sesh/sessions/<label>.repo;
+	// commits propagate cross-session via NATS autosync. "project"
+	// shares one repo at .sesh/project.repo across all sessions in the
+	// project; cross-session writes are synchronous via SQLite, with
+	// the trade-off that concurrent writers contend on the WAL lock
+	// (queued by busy_timeout, set automatically by EdgeSync). Modes
+	// can mix in the same project — see cli/scope.go for the full
+	// trade-off rationale.
+	Scope string `help:"Fossil repo scope: session (per-session repo) or project (shared file)" enum:"session,project" default:"session"`
 }
 
 func (c *UpCmd) Run() error {
@@ -70,15 +80,19 @@ func (c *UpCmd) Run() error {
 	}
 
 	name := fmt.Sprintf("%s-session-%s", project, c.Session)
-	// Per-session Fossil. Each session owns its own repo at
-	// .sesh/sessions/<label>.repo so the publish hook fires natively
-	// from the session's own in-process hub on every commit. The hub at
-	// ~/.sesh/hub.repo collects from all sessions over the existing
-	// EdgeSync NATS autosync subject (project-code keyed, pinned in
-	// .sesh/project-code), and propagates back out to peer sessions —
-	// no shared SQLite, no cross-process publish-hook gap.
-	repoPath := filepath.Join(cwd, ".sesh", "sessions", c.Session+".repo")
-	storeDir := filepath.Join(cwd, ".sesh", "sessions", c.Session+".messaging")
+	// Fossil repo path forks on --scope. Default (session): each
+	// session owns its own repo at .sesh/sessions/<label>.repo so the
+	// publish hook fires natively from the session's own in-process
+	// hub on every commit; cross-session convergence happens via NATS
+	// autosync on the project-code subject. Opt-in (project): all
+	// sessions in this project open the same .sesh/project.repo — one
+	// SQLite file, synchronous cross-session reads, write contention
+	// queued by busy_timeout. JetStream store stays per-session
+	// regardless: each sesh up runs its own embedded NATS server and
+	// can't share its store dir with peers.
+	scope := SeshScope(c.Scope)
+	repoPath := repoPathFor(scope, cwd, c.Session)
+	storeDir := storeDirFor(cwd, c.Session)
 
 	// Fresh = no per-session repo file yet → bootstrap this once.
 	freshRepo := false

@@ -117,11 +117,26 @@ sesh_events_<scope>_<scope-id>    append-only event stream
 sesh_blobs_<scope>_<scope-id>     versioned object store
 ```
 
-For Fossil: every session has its own repo at
+For Fossil: by default every session has its own repo at
 `<cwd>/.sesh/sessions/<label>.repo`. The hub has its own repo at
 `~/.sesh/hub.repo` and acts as a passive collector / mirror. Use
 Fossil when the artifact has identity (a commit) and when other
 agents should be able to read it at a specific revision.
+
+Fossil itself has **two scope modes** controlled by `sesh up --scope`:
+
+| Mode                | Repo path                                | Cross-session writes               |
+| ------------------- | ---------------------------------------- | ---------------------------------- |
+| `session` (default) | `<cwd>/.sesh/sessions/<label>.repo`      | Eventual via NATS autosync         |
+| `project` (opt-in)  | `<cwd>/.sesh/project.repo`               | Synchronous via shared SQLite WAL  |
+
+See the [README's Fossil scope
+section](../README.md#fossil-scope-session-vs-project) for the full
+trade-off table, mixed-scope behaviour, and the upstream gate on
+robust contention handling. Within this document's vocabulary, both
+modes provide the same project-level visibility surface to readers —
+the difference is convergence semantics and which file the bytes
+land in.
 
 When the first `sesh up` of a project runs in a git worktree, that
 session's Fossil is seeded with the worktree as a single initial
