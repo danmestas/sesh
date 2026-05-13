@@ -124,7 +124,7 @@ robustness story.
 | Mode                  | Repo path                                    | Cross-session writes                  | Contention                                                       |
 | --------------------- | -------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------- |
 | `session` (default)   | `<cwd>/.sesh/sessions/<label>.repo`          | Eventual via NATS autosync (~0.24s)   | None — every session is the sole writer to its own file          |
-| `project` (opt-in)    | `<cwd>/.sesh/project.repo`                   | Synchronous via shared SQLite WAL     | Today: SHARED→RESERVED race can return `SQLITE_BUSY` (see note + [libfossil#33](https://github.com/danmestas/libfossil/issues/33)); post-fix: queued via `busy_timeout` |
+| `project` (opt-in)    | `<cwd>/.sesh/project.repo`                   | Synchronous via shared SQLite WAL     | Writers serialize at `BEGIN IMMEDIATE`; queued via `busy_timeout`                  |
 
 Both modes coexist in the same project. A `--scope=session` session
 and a `--scope=project` session can run side-by-side and still
@@ -159,21 +159,6 @@ When to pick which:
   autosync hop). Trade off: concurrent commits queue on the SQLite
   write lock, and one badly-behaved session affects the file every
   other session is reading.
-
-> **Note on `--scope=project` robustness under contention:** the
-> queueing behaviour relies on SQLite's `busy_timeout` retrying on
-> `SQLITE_BUSY`. libfossil's current `WithTx` opens DEFERRED
-> transactions, which race on `SHARED→RESERVED` upgrade — SQLite's
-> deadlock-avoidance bypasses `busy_timeout` for that specific path.
-> Tracked upstream at
-> [danmestas/libfossil#33](https://github.com/danmestas/libfossil/issues/33).
-> Until that fix lands, concurrent writes from two `--scope=project`
-> sessions have a real chance of one failing with `SQLITE_BUSY`. The
-> mode is shippable for single-writer workloads (one active session
-> committing at a time) and for the synchronous-cross-session-reads
-> use case; it is **not** yet safe for symmetric concurrent commit
-> patterns. `--scope=session` (default) is unaffected by this issue
-> because each session is the only writer to its own file.
 
 ### How cross-process Fossil sync works
 
