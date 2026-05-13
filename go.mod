@@ -10,7 +10,7 @@ require (
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
-	github.com/danmestas/libfossil v0.6.1 // indirect
+	github.com/danmestas/libfossil v0.6.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect

@@ -37,6 +37,11 @@ func (c *UpCmd) Run() error {
 		return err
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getwd: %w", err)
+	}
+
 	// Atomic same-machine same-name guard.
 	release, err := claimSessionState(c.Session, os.Getpid())
 	if err != nil {
@@ -44,13 +49,19 @@ func (c *UpCmd) Run() error {
 	}
 	defer release()
 
-	// Deterministic Fossil project-code from (hostname, project name).
-	// All sesh leaves in this project on this machine arrive at the same
-	// code and therefore subscribe to the same EdgeSync fossil-sync
-	// subject — that's what lets the hub's repo and the session's repo
-	// see each other's commits. Passed to hub.NewHub here and via env
-	// var to the spawned `sesh hub serve` (see spawnHub).
-	projectCode := deriveProjectCode(project)
+	// Fossil project-code: pinned at <cwd>/.sesh/project-code on first
+	// `sesh up`, read back on subsequent runs. All sesh leaves in this
+	// project arrive at the same code and therefore subscribe to the same
+	// EdgeSync fossil-sync subject — that's what lets the hub's repo and
+	// the session's repo see each other's commits. Pinning (rather than
+	// re-deriving from hostname every run) means cross-leaf sync survives
+	// VM clones, container migrations, dotfiles sync to a new laptop, and
+	// manual hostname renames. Passed to hub.NewHub here and via env var
+	// to the spawned `sesh hub serve` (see spawnHub).
+	projectCode, err := loadOrCreateProjectCode(cwd, project)
+	if err != nil {
+		return fmt.Errorf("project-code: %w", err)
+	}
 
 	leafURL, err := ensureHubRunning(projectCode)
 	if err != nil {
@@ -58,8 +69,6 @@ func (c *UpCmd) Run() error {
 	}
 
 	name := fmt.Sprintf("%s-session-%s", project, c.Session)
-
-	cwd, _ := os.Getwd()
 	// Fossil is shared per-project (one repo under .sesh/project.repo),
 	// not per-session — all sessions in the same project commit on the
 	// same trunk. SQLite (libfossil's storage) handles concurrent opens.

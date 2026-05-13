@@ -237,10 +237,11 @@ func TestSubLeaf_SyncsFromSesh(t *testing.T) {
 
 // TestHub_AccumulatesProjectCommits verifies that commits made on a
 // session's project.repo propagate to ~/.sesh/hub.repo over EdgeSync's
-// fossil-sync subject. Coordination works because sesh derives a
-// deterministic project-code per project (hostname + project name) and
-// passes it via hub.Config.ProjectCode + the SESH_PROJECT_CODE env var
-// to the spawned hub, so both repos subscribe to the same sync subject.
+// fossil-sync subject. Coordination works because sesh pins a
+// per-project project-code (seeded from hostname + project name on
+// first run; read from .sesh/project-code thereafter) and passes it
+// via hub.Config.ProjectCode + the SESH_PROJECT_CODE env var to the
+// spawned hub, so both repos subscribe to the same sync subject.
 //
 // Requires EdgeSync's cross-leaf fossil sync (#157 / merged 2026-05-12)
 // AND libfossil v0.6.1 (CreateOpts.ProjectCode).
