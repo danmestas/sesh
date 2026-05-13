@@ -3,8 +3,6 @@ package main
 import (
 	"github.com/alecthomas/kong"
 
-	_ "github.com/danmestas/libfossil/db/driver/modernc"
-
 	seshcli "github.com/danmestas/sesh/cli"
 )
 

@@ -4,13 +4,13 @@ go 1.26.0
 
 require (
 	github.com/alecthomas/kong v1.15.0
-	github.com/danmestas/EdgeSync v0.0.0
-	github.com/danmestas/libfossil/db/driver/modernc v0.2.0
+	github.com/danmestas/EdgeSync v0.0.19
 )
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
 	github.com/danmestas/libfossil v0.6.3 // indirect
+	github.com/danmestas/libfossil/db/driver/modernc v0.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect

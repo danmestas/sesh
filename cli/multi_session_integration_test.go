@@ -14,11 +14,6 @@ import (
 	"time"
 
 	"github.com/danmestas/EdgeSync/hub"
-	// Register the modernc/sqlite driver with libfossil's db package so
-	// in-process hubs constructed in this test (TestCrossSessionAutosync)
-	// can open their Fossil repos. Production wires this up in
-	// cmd/sesh/main.go; the test binary doesn't include that file.
-	_ "github.com/danmestas/libfossil/db/driver/modernc"
 )
 
 // TestPerSessionRepos verifies the per-session Fossil model: every
