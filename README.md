@@ -230,9 +230,12 @@ W3C `traceparent` (OpenTelemetry-compatible) plus optional sesh metadata.
 For shared state across agents, see
 [`docs/scoped-memory.md`](docs/scoped-memory.md) (five scopes — hub,
 project, session, workflow, agent — with bucket conventions and TTL
-policy) and
+policy),
 [`docs/task-management.md`](docs/task-management.md) (task schema and
-pull protocol built on scoped memory).
+pull protocol built on scoped memory), and
+[`docs/goal-management.md`](docs/goal-management.md) (long-horizon
+goal records, hierarchical composition, and task linkage — the
+durable-intent companion to tasks).
 
 ## Status
 
