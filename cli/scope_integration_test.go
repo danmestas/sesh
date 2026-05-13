@@ -182,21 +182,13 @@ func TestScope_Mixed_Coexistence(t *testing.T) {
 
 // TestScope_Project_ConcurrentCommits exercises the SQLite contention
 // path that --scope=project reintroduces: two libfossil handles on
-// .sesh/project.repo issue commits concurrently. Without busy_timeout
-// honouring (or BEGIN IMMEDIATE), the second writer's first INSERT
-// returns SQLITE_BUSY immediately because SQLite's deadlock-avoidance
-// bypasses busy_timeout on SHARED→RESERVED upgrade races.
-//
-// Currently SKIPPED, pending libfossil upstream fix:
-// https://github.com/danmestas/libfossil/issues/33
-//
-// Root cause is in libfossil's db.WithTx — it opens transactions with
-// d.conn.Begin() (DEFERRED). The DEFERRED + read-then-write shape of
-// manifest.Checkin races on the SHARED→RESERVED upgrade. Fix is
-// upstream (add _txlock=immediate to the DSN) per the upstream-fix
-// policy; we deliberately do NOT work around it from sesh. Once #33
-// lands and the dependency bumps, un-skip this test and the
-// --scope=project mode becomes safe under contention.
+// .sesh/project.repo issue commits concurrently. Without BEGIN
+// IMMEDIATE, the second writer's first INSERT returns SQLITE_BUSY
+// immediately because SQLite's deadlock-avoidance bypasses
+// busy_timeout on SHARED→RESERVED upgrade races. The libfossil
+// modernc/ncruces drivers now prepend _txlock=immediate to the DSN
+// (libfossil#33), so concurrent writers serialize at BEGIN where
+// busy_timeout applies.
 //
 // In-process via hub.NewHub (mirrors TestCrossSessionAutosync) because
 // driving concurrent commits from subprocesses requires a sesh commit
@@ -205,7 +197,6 @@ func TestScope_Project_ConcurrentCommits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	t.Skip("blocked on libfossil#33 — DEFERRED tx upgrade race bypasses busy_timeout; un-skip when upstream lands _txlock=immediate")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

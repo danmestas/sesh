@@ -132,11 +132,10 @@ Fossil itself has **two scope modes** controlled by `sesh up --scope`:
 
 See the [README's Fossil scope
 section](../README.md#fossil-scope-session-vs-project) for the full
-trade-off table, mixed-scope behaviour, and the upstream gate on
-robust contention handling. Within this document's vocabulary, both
-modes provide the same project-level visibility surface to readers —
-the difference is convergence semantics and which file the bytes
-land in.
+trade-off table and mixed-scope behaviour. Within this document's
+vocabulary, both modes provide the same project-level visibility
+surface to readers — the difference is convergence semantics and
+which file the bytes land in.
 
 When the first `sesh up` of a project runs in a git worktree, that
 session's Fossil is seeded with the worktree as a single initial
