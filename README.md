@@ -20,7 +20,7 @@ Dependency arrow goes one way: sesh depends on EdgeSync, never the reverse.
 
 ## Commands
 
-- `sesh up --session=<label>` — bring a session up. Cwd-derived project name. Foreground; blocks until SIGINT. Auto-spawns the hub if none is running.
+- `sesh up --session=<label> [--scope=session|project]` — bring a session up. Cwd-derived project name. Foreground; blocks until SIGINT. Auto-spawns the hub if none is running. See [Fossil scope](#fossil-scope-session-vs-project) for `--scope`.
 - `sesh down --session=<label>` — SIGINT the matching `sesh up` and wait for it to exit.
 - `sesh hub serve` — run the hub daemon directly. Normally auto-spawned by `sesh up`; visible for power users. `--keepalive` keeps it running past the last leaf disconnect (default: exit when last session closes).
 
@@ -109,6 +109,71 @@ Sesh's own `.sesh/` runtime state is never seeded.
 
 Recommended: add `.sesh/` to your `.gitignore` so git doesn't notice
 the sesh runtime state.
+
+## Fossil scope: session vs project
+
+`sesh up` accepts `--scope=session|project` to control where the
+session's Fossil repo lives on disk. The default is `session` — the
+PR #20 model where every session owns its own repo at
+`.sesh/sessions/<label>.repo` and cross-session convergence happens
+via NATS autosync on the shared project-code subject. `--scope=project`
+opts into a single shared file at `.sesh/project.repo` for cases where
+synchronous cross-session visibility matters more than the autosync
+robustness story.
+
+| Mode                  | Repo path                                    | Cross-session writes                  | Contention                                                       |
+| --------------------- | -------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------- |
+| `session` (default)   | `<cwd>/.sesh/sessions/<label>.repo`          | Eventual via NATS autosync (~0.24s)   | None — every session is the sole writer to its own file          |
+| `project` (opt-in)    | `<cwd>/.sesh/project.repo`                   | Synchronous via shared SQLite WAL     | Today: SHARED→RESERVED race can return `SQLITE_BUSY` (see note + [libfossil#33](https://github.com/danmestas/libfossil/issues/33)); post-fix: queued via `busy_timeout` |
+
+Both modes coexist in the same project. A `--scope=session` session
+and a `--scope=project` session can run side-by-side and still
+exchange commits via the shared project-code autosync subject — the
+publish-hook wiring is scope-agnostic. The JetStream message store
+stays per-session in both modes (each `sesh up` runs its own embedded
+NATS server with its own on-disk store).
+
+```sh
+# Default — per-session repo; same as before this flag existed.
+sesh up --session=alpha
+
+# Opt in to the shared file. All same-project sessions launched with
+# --scope=project write to .sesh/project.repo directly.
+sesh up --session=beta --scope=project
+
+# Mixed-scope is fine — autosync still propagates across the
+# project-code subject between the two repo files.
+sesh up --session=alpha --scope=session   # writes .sesh/sessions/alpha.repo
+sesh up --session=beta  --scope=project   # writes .sesh/project.repo
+```
+
+When to pick which:
+
+- **`session` (default)** — almost always the right choice. No SQLite
+  contention; convergence latency under typical load is well below a
+  human round-trip; survives the case of a session crashing
+  mid-commit without affecting peers' repos.
+- **`project`** — when you genuinely need a single shared file (e.g.,
+  external tooling that opens `.sesh/project.repo` directly and
+  expects to see commits from all sessions instantly without an
+  autosync hop). Trade off: concurrent commits queue on the SQLite
+  write lock, and one badly-behaved session affects the file every
+  other session is reading.
+
+> **Note on `--scope=project` robustness under contention:** the
+> queueing behaviour relies on SQLite's `busy_timeout` retrying on
+> `SQLITE_BUSY`. libfossil's current `WithTx` opens DEFERRED
+> transactions, which race on `SHARED→RESERVED` upgrade — SQLite's
+> deadlock-avoidance bypasses `busy_timeout` for that specific path.
+> Tracked upstream at
+> [danmestas/libfossil#33](https://github.com/danmestas/libfossil/issues/33).
+> Until that fix lands, concurrent writes from two `--scope=project`
+> sessions have a real chance of one failing with `SQLITE_BUSY`. The
+> mode is shippable for single-writer workloads (one active session
+> committing at a time) and for the synchronous-cross-session-reads
+> use case; it is **not** yet safe for symmetric concurrent commit
+> patterns. `--scope=session` (default) is unaffected by this issue
+> because each session is the only writer to its own file.
 
 ### How cross-process Fossil sync works
 
