@@ -230,6 +230,19 @@ func hubNATSURLPath() (string, error) {
 	return filepath.Join(dir, "hub.nats.url"), nil
 }
 
+// hubFossilURLPath returns ~/.sesh/hub.fossil.url — the hub's Fossil
+// HTTP xfer endpoint, written by the hub at bind. Sessions read this
+// to decide whether to seed-from-cwd (hub empty) or
+// --seed-from-upstream=<this> (hub has content from earlier sessions
+// in the project).
+func hubFossilURLPath() (string, error) {
+	dir, err := seshHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "hub.fossil.url"), nil
+}
+
 // hubRepoPath returns ~/.sesh/hub.repo.
 func hubRepoPath() (string, error) {
 	dir, err := seshHome()

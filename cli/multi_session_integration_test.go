@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,14 +12,100 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/danmestas/EdgeSync/hub"
+	// Register the modernc/sqlite driver with libfossil's db package so
+	// in-process hubs constructed in this test (TestCrossSessionAutosync)
+	// can open their Fossil repos. Production wires this up in
+	// cmd/sesh/main.go; the test binary doesn't include that file.
+	_ "github.com/danmestas/libfossil/db/driver/modernc"
 )
 
-// TestMultiSession_SharedProjectRepo verifies the project-level Fossil
-// model: multiple sessions in the same cwd share `.sesh/project.repo`,
-// the first session seeds it from the worktree, subsequent sessions
-// open the existing repo without re-seeding. Counts check-in events
-// directly from SQLite to confirm there is exactly one seed commit.
-func TestMultiSession_SharedProjectRepo(t *testing.T) {
+// TestPerSessionRepos verifies the per-session Fossil model: every
+// session in a project owns its own repo at
+// `.sesh/sessions/<label>.repo`, and the legacy shared
+// `.sesh/project.repo` is not created. With the architectural pivot to
+// per-session repos + NATS autosync (and away from a shared SQLite
+// file), divergence of repo files is the new invariant — convergence
+// happens at the publish-hook level, not the storage layer.
+func TestPerSessionRepos(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	bin := buildSesh(t)
+	home := t.TempDir()
+	project := t.TempDir()
+	setupGitWorktree(t, project)
+
+	alpha, alphaStderr := startSesh(t, bin, home, project, "alpha")
+	defer killAndWait(t, alpha, alphaStderr)
+	waitForURLs(t, filepath.Join(project, ".sesh", "sessions", "alpha.json"), 15*time.Second)
+
+	beta, betaStderr := startSesh(t, bin, home, project, "beta")
+	defer killAndWait(t, beta, betaStderr)
+	waitForURLs(t, filepath.Join(project, ".sesh", "sessions", "beta.json"), 15*time.Second)
+
+	// Per-session repo files exist and are distinct.
+	alphaRepo := filepath.Join(project, ".sesh", "sessions", "alpha.repo")
+	betaRepo := filepath.Join(project, ".sesh", "sessions", "beta.repo")
+	for _, p := range []string{alphaRepo, betaRepo} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected per-session repo at %s: %v", p, err)
+		}
+	}
+	if sameFile(t, alphaRepo, betaRepo) {
+		t.Errorf("alpha.repo and beta.repo resolve to the same inode — want distinct files")
+	}
+
+	// The legacy shared project.repo must NOT be created.
+	legacy := filepath.Join(project, ".sesh", "project.repo")
+	if _, err := os.Stat(legacy); err == nil {
+		t.Errorf("legacy %s exists — pivot to per-session repos was incomplete", legacy)
+	}
+}
+
+// TestSeedFromCwdForFirstSession verifies that the first sesh up in a
+// fresh project (hub holds no commits) bootstraps its Fossil repo from
+// the cwd's git worktree. With the per-session model, the first session
+// is the only path through which the worktree snapshot enters the
+// Fossil mesh; subsequent sessions clone from the hub (see
+// TestSeedFromHubForSubsequentSession).
+func TestSeedFromCwdForFirstSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	bin := buildSesh(t)
+	home := t.TempDir()
+	project := t.TempDir()
+	setupGitWorktree(t, project)
+
+	alpha, alphaStderr := startSesh(t, bin, home, project, "alpha")
+	defer killAndWait(t, alpha, alphaStderr)
+	waitForURLs(t, filepath.Join(project, ".sesh", "sessions", "alpha.json"), 15*time.Second)
+
+	if !waitForSlog(t, alphaStderr, "seeded fossil from worktree", 10*time.Second) {
+		t.Fatalf("first session did not seed from cwd:\n%s", alphaStderr.String())
+	}
+	if line := findSlogLine(alphaStderr.String(), "fossil repo cloned from hub"); line != "" {
+		t.Errorf("first session unexpectedly cloned from hub (hub should be empty): %s", line)
+	}
+}
+
+// TestSeedFromHubForSubsequentSession verifies that once the hub has
+// content (from a peer session's autosync), a new session bootstraps
+// by cloning from the hub rather than re-seeding from cwd. Re-seeding
+// from cwd would fork the history with two divergent root commits at
+// the same content, defeating the point of having a shared
+// fossil-sync subject.
+func TestSeedFromHubForSubsequentSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -34,52 +121,141 @@ func TestMultiSession_SharedProjectRepo(t *testing.T) {
 	project := t.TempDir()
 	setupGitWorktree(t, project)
 
-	repoPath := filepath.Join(project, ".sesh", "project.repo")
-
-	// 1. Alpha first: should seed.
+	// Alpha: first session, seeds from cwd, propagates to hub.
 	alpha, alphaStderr := startSesh(t, bin, home, project, "alpha")
 	defer killAndWait(t, alpha, alphaStderr)
 	waitForURLs(t, filepath.Join(project, ".sesh", "sessions", "alpha.json"), 15*time.Second)
 	if !waitForSlog(t, alphaStderr, "seeded fossil from worktree", 10*time.Second) {
-		t.Fatalf("alpha did not seed:\n%s", alphaStderr.String())
+		t.Fatalf("alpha never seeded:\n%s", alphaStderr.String())
 	}
 
-	// 2. Beta second: should NOT seed; should log pre-existed.
+	// Wait for autosync to propagate alpha's seed commit to the hub.
+	hubRepo := filepath.Join(home, ".sesh", "hub.repo")
+	if !waitForCheckins(t, hubRepo, 1, 15*time.Second) {
+		t.Fatalf("hub.repo never received alpha's seed commit (count=%d)", countCheckins(t, hubRepo))
+	}
+
+	// Beta: spawns after hub has content. Should clone from hub, not
+	// re-seed from cwd.
 	beta, betaStderr := startSesh(t, bin, home, project, "beta")
 	defer killAndWait(t, beta, betaStderr)
 	waitForURLs(t, filepath.Join(project, ".sesh", "sessions", "beta.json"), 15*time.Second)
-	if !waitForSlog(t, betaStderr, "fossil repo pre-existed", 10*time.Second) {
-		t.Fatalf("beta did not skip seed:\n%s", betaStderr.String())
+
+	if !waitForSlog(t, betaStderr, "fossil repo cloned from hub", 10*time.Second) {
+		t.Fatalf("beta did not clone from hub:\n%s", betaStderr.String())
 	}
-	if found := findSlogLine(betaStderr.String(), "seeded fossil from worktree"); found != "" {
-		t.Errorf("beta should not have seeded; got: %s", found)
+	if line := findSlogLine(betaStderr.String(), "seeded fossil from worktree"); line != "" {
+		t.Errorf("beta unexpectedly re-seeded from cwd; would fork history: %s", line)
 	}
 
-	// 3. Repo file at the project level exists; per-session repo paths do not.
-	if _, err := os.Stat(repoPath); err != nil {
-		t.Fatalf("project repo missing: %v", err)
+	// Beta's repo should match alpha's commit count (post-clone).
+	betaRepo := filepath.Join(project, ".sesh", "sessions", "beta.repo")
+	alphaRepo := filepath.Join(project, ".sesh", "sessions", "alpha.repo")
+	wantCount := countCheckins(t, alphaRepo)
+	if !waitForCheckins(t, betaRepo, wantCount, 5*time.Second) {
+		t.Errorf("beta.repo has %d check-ins, want %d (alpha's count post-clone)",
+			countCheckins(t, betaRepo), wantCount)
 	}
-	for _, label := range []string{"alpha", "beta"} {
-		stale := filepath.Join(project, ".sesh", "sessions", label+".repo")
-		if _, err := os.Stat(stale); err == nil {
-			t.Errorf("unexpected per-session repo at %s — should be project-level only", stale)
-		}
+}
+
+// TestCrossSessionAutosync is the load-bearing test for the
+// per-session model: a commit landing in one session's hub propagates
+// to a peer session's hub in the same project via the EdgeSync NATS
+// fossil-sync subject (keyed on the pinned project-code), not via
+// shared SQLite. The architecture's whole point is that the publish
+// hook fires natively from the in-process hub on every commit and
+// peer hubs subscribed to the same subject pull the artifact in.
+//
+// Topology: two session-level hubs at distinct .sesh/sessions/<label>.repo
+// paths, leaf-linked directly (B as leaf of A), both pinned to the
+// same project-code. This is the minimum that exercises the
+// publish→pull pipeline; in production sesh constructs A→central←B
+// via the user-level hub at ~/.sesh/hub.repo, but the central is a
+// passive collector — the wiring under test is the per-session
+// publish/pull symmetry, not the leaf-mesh fan-out.
+//
+// Constructed in-process via EdgeSync's hub package rather than
+// spawning sesh up subprocesses because injecting a commit into a
+// running sesh up's per-session repo from the test process requires
+// either the publish hook fire from THAT process (impossible across
+// process boundaries — that's the spike's finding) or a sesh commit
+// RPC verb that we deliberately deferred to a follow-up PR.
+func TestCrossSessionAutosync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
 	}
 
-	// 4. Exactly one check-in commit (the seed).
-	if got := countCheckins(t, repoPath); got != 1 {
-		t.Errorf("project.repo has %d check-ins, want 1 (seed only)", got)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const projectCode = "abcdef0123456789abcdef0123456789abcdef01"
+	project := t.TempDir()
+	sessionsDir := filepath.Join(project, ".sesh", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
 	}
+
+	// Session A hub.
+	hubA, err := hub.NewHub(ctx, hub.Config{
+		RepoPath:     filepath.Join(sessionsDir, "alpha.repo"),
+		ServerName:   "session-alpha",
+		NATSStoreDir: filepath.Join(sessionsDir, "alpha.messaging"),
+		ProjectCode:  projectCode,
+		NobodyCaps:   "gio",
+	})
+	if err != nil {
+		t.Fatalf("session A hub: %v", err)
+	}
+	t.Cleanup(func() { _ = hubA.Stop() })
+	go func() { _ = hubA.ServeHTTP(ctx) }()
+
+	// Session B hub leaf-linked to A.
+	hubB, err := hub.NewHub(ctx, hub.Config{
+		RepoPath:     filepath.Join(sessionsDir, "beta.repo"),
+		ServerName:   "session-beta",
+		NATSStoreDir: filepath.Join(sessionsDir, "beta.messaging"),
+		LeafUpstream: hubA.LeafURL(),
+		ProjectCode:  projectCode,
+		NobodyCaps:   "gio",
+	})
+	if err != nil {
+		t.Fatalf("session B hub: %v", err)
+	}
+	t.Cleanup(func() { _ = hubB.Stop() })
+	go func() { _ = hubB.ServeHTTP(ctx) }()
+
+	// Wait for the leaf link to come up.
+	waitFor(t, 10*time.Second, "leaf link B → A", func() bool {
+		return hubA.NumLeafs() >= 1
+	})
+
+	// Commit a unique payload on session A's hub. Publishes natively
+	// because it's the same process that owns A's repo handle.
+	const fileName = "from-alpha.txt"
+	payload := []byte("hello-from-alpha\n")
+	if _, err := hubA.Commit(ctx, hub.CommitOpts{
+		Files:   []hub.FileToCommit{{Name: fileName, Content: payload}},
+		Message: "cross-session autosync probe",
+		Author:  "test",
+	}); err != nil {
+		t.Fatalf("hubA.Commit: %v", err)
+	}
+
+	// Within the bounded window, session B's repo should hold the file.
+	// Read goes through B's libfossil handle, which reflects whatever
+	// the autosync pipeline pulled in. The 10s budget matches the
+	// EdgeSync cross-leaf propagation test (TestCrossLeaf_SharedProjectCode_PropagatesCommit).
+	waitFor(t, 10*time.Second, "session B sees from-alpha.txt at trunk", func() bool {
+		got, readErr := hubB.Read(ctx, fileName)
+		return readErr == nil && bytes.Equal(got, payload)
+	})
 }
 
 // TestSubLeaf_NoIndependentGitSeed verifies that an edgesync sub-leaf
 // running under a sesh does NOT seed its own Fossil from the cwd's git
 // worktree. The sub-leaf's repo starts empty; if it receives commits,
 // they come from the parent via NATS sync (verified by
-// TestSubLeaf_SyncsViaProjectCode).
-//
-// What this test verifies (HARD): the sub-leaf does not log a seed
-// line. Only sesh does git seeding; edgesync hub serve doesn't.
+// TestSubLeaf_SyncsFromSesh).
 func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -101,7 +277,7 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 	project := t.TempDir()
 	setupGitWorktree(t, project)
 
-	// Parent: sesh up — seeds the project.repo.
+	// Parent: sesh up — seeds the per-session repo.
 	parent, parentStderr := startSesh(t, bin, home, project, "alpha")
 	defer killAndWait(t, parent, parentStderr)
 	statePath := filepath.Join(project, ".sesh", "sessions", "alpha.json")
@@ -110,10 +286,10 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 		t.Fatalf("parent never seeded:\n%s", parentStderr.String())
 	}
 
-	parentRepo := filepath.Join(project, ".sesh", "project.repo")
+	parentRepo := filepath.Join(project, ".sesh", "sessions", "alpha.repo")
 	parentCount := countCheckins(t, parentRepo)
 	if parentCount != 1 {
-		t.Fatalf("parent project.repo has %d check-ins, want 1", parentCount)
+		t.Fatalf("parent alpha.repo has %d check-ins, want 1", parentCount)
 	}
 
 	// Sub-leaf: edgesync hub serve --leaf-upstream=<parent leaf URL>.
@@ -131,7 +307,6 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 	}
 	defer killAndWait(t, sub, &subStderr)
 
-	// Wait for sub-leaf to bind.
 	if !waitForSlog(t, &subStderr, "edgesync hub running", 10*time.Second) {
 		t.Fatalf("subleaf never bound:\n%s", subStderr.String())
 	}
@@ -143,13 +318,13 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 		t.Errorf("sub-leaf logged independent seed — should not happen: %s", line)
 	}
 
-	// Hard assertion: sub-leaf has NOT independently seeded. Either 0
-	// (no sync happened) or matches parent (sync happened). It must
-	// NEVER be a different non-zero number, which would indicate the
-	// sub-leaf created its own seed.
+	// Sub-leaf has NOT independently seeded. Either 0 (no sync) or
+	// matches parent (sync happened). It must NEVER be a different
+	// non-zero number, which would indicate an independent seed.
 	subCount := countCheckins(t, subleafRepo)
 	if subCount != 0 && subCount != parentCount {
-		t.Errorf("sub-leaf check-ins = %d; want 0 (no sync) or %d (synced). A different non-zero value would indicate an independent seed.", subCount, parentCount)
+		t.Errorf("sub-leaf check-ins = %d; want 0 (no sync) or %d (synced).",
+			subCount, parentCount)
 	}
 }
 
@@ -157,14 +332,6 @@ func TestSubLeaf_NoIndependentGitSeed(t *testing.T) {
 // with --seed-from-upstream pointing at the parent sesh's fossil HTTP
 // endpoint clones the parent's existing Fossil state (including the
 // worktree seed) and stays in sync via NATS auto-publish.
-//
-// --seed-from-upstream serves two roles at once: it backfills the
-// commits that happened before the sub-leaf joined, AND it inherits
-// the parent's project-code so subsequent commits land on the same
-// fossil-sync subject.
-//
-// Requires EdgeSync#159 (CLI flag) + libfossil v0.6.1
-// (CreateOpts.ProjectCode).
 func TestSubLeaf_SyncsFromSesh(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -193,11 +360,6 @@ func TestSubLeaf_SyncsFromSesh(t *testing.T) {
 		t.Fatalf("parent never seeded")
 	}
 
-	// Sub-leaf needs to clone the parent's existing state (the seed
-	// commit happened before the sub-leaf joined the sync subject — pure
-	// auto-publish wouldn't backfill). --seed-from-upstream pulls the
-	// parent's state via HTTP xfer and inherits the parent's
-	// project-code, so subsequent commits propagate via NATS auto-publish.
 	if state.FossilURL == "" {
 		t.Fatalf("parent state missing fossil_url (got %+v)", state)
 	}
@@ -220,9 +382,8 @@ func TestSubLeaf_SyncsFromSesh(t *testing.T) {
 		t.Fatalf("subleaf never bound")
 	}
 
-	parentCount := countCheckins(t, filepath.Join(project, ".sesh", "project.repo"))
+	parentCount := countCheckins(t, filepath.Join(project, ".sesh", "sessions", "alpha.repo"))
 
-	// Sync should converge within a few seconds via auto-publish.
 	deadline := time.Now().Add(15 * time.Second)
 	var subCount int
 	for time.Now().Before(deadline) {
@@ -236,15 +397,11 @@ func TestSubLeaf_SyncsFromSesh(t *testing.T) {
 }
 
 // TestHub_AccumulatesProjectCommits verifies that commits made on a
-// session's project.repo propagate to ~/.sesh/hub.repo over EdgeSync's
-// fossil-sync subject. Coordination works because sesh pins a
-// per-project project-code (seeded from hostname + project name on
-// first run; read from .sesh/project-code thereafter) and passes it
-// via hub.Config.ProjectCode + the SESH_PROJECT_CODE env var to the
-// spawned hub, so both repos subscribe to the same sync subject.
-//
-// Requires EdgeSync's cross-leaf fossil sync (#157 / merged 2026-05-12)
-// AND libfossil v0.6.1 (CreateOpts.ProjectCode).
+// session's per-session repo propagate to ~/.sesh/hub.repo over
+// EdgeSync's fossil-sync subject. With the per-session model the hub
+// is a passive collector: every session commit fires its in-process
+// publish hook, the hub subscribes to the same project-code subject,
+// and the hub's own libfossil pulls the artifact in.
 func TestHub_AccumulatesProjectCommits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -273,18 +430,11 @@ func TestHub_AccumulatesProjectCommits(t *testing.T) {
 		t.Fatalf("hub.repo missing at %s: %v", hubRepo, err)
 	}
 
-	want := countCheckins(t, filepath.Join(project, ".sesh", "project.repo"))
-
-	deadline := time.Now().Add(15 * time.Second)
-	var got int
-	for time.Now().Before(deadline) {
-		got = countCheckins(t, hubRepo)
-		if got == want {
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
+	want := countCheckins(t, filepath.Join(project, ".sesh", "sessions", "alpha.repo"))
+	if !waitForCheckins(t, hubRepo, want, 15*time.Second) {
+		t.Errorf("hub.repo did not converge to alpha.repo within 15s: hub=%d, alpha=%d",
+			countCheckins(t, hubRepo), want)
 	}
-	t.Errorf("hub.repo did not converge to project.repo within 15s: hub=%d, project=%d", got, want)
 }
 
 // --- helpers ---
@@ -336,6 +486,54 @@ func waitForSlog(t *testing.T, sb *syncBuf, needle string, timeout time.Duration
 	return false
 }
 
+// waitForCheckins polls a Fossil repo until its check-in count reaches
+// at least `want`, returning true on success and false on timeout. Used
+// to bound autosync convergence tests so we surface "did the
+// publish→pull pipeline actually fire" rather than racing a fixed
+// sleep.
+func waitForCheckins(t *testing.T, repoPath string, want int, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countCheckins(t, repoPath) >= want {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
+}
+
+// waitFor calls fn periodically until it returns true or timeout
+// elapses. On timeout, fails the test with the supplied label so the
+// failure message points at the unmet condition.
+func waitFor(t *testing.T, timeout time.Duration, label string, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timeout (%s) waiting for: %s", timeout, label)
+}
+
+// sameFile reports whether two paths resolve to the same inode. With
+// per-session repo files, this catches the regression case where a
+// future change accidentally points two sessions at one file.
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	infoA, err := os.Stat(a)
+	if err != nil {
+		t.Fatalf("stat %s: %v", a, err)
+	}
+	infoB, err := os.Stat(b)
+	if err != nil {
+		t.Fatalf("stat %s: %v", b, err)
+	}
+	return os.SameFile(infoA, infoB)
+}
+
 // countCheckins counts type='ci' events in a Fossil repo (SQLite file).
 // Returns 0 if the file doesn't exist yet.
 func countCheckins(t *testing.T, repoPath string) int {
@@ -362,8 +560,7 @@ func countCheckins(t *testing.T, repoPath string) int {
 }
 
 // buildEdgeSync builds the edgesync binary from a sibling ../EdgeSync
-// repo or returns "" if not available. Mirrors resolveSeshBinary's
-// approach.
+// repo or returns "" if not available.
 func buildEdgeSync(t *testing.T) string {
 	t.Helper()
 	if env := os.Getenv("EDGESYNC_BINARY"); env != "" {
@@ -389,7 +586,6 @@ func siblingRepo(t *testing.T, name string) string {
 	if err != nil {
 		return ""
 	}
-	// from cli/ → repo root → parent → sibling
 	candidate := filepath.Join(cwd, "..", "..", name)
 	abs, _ := filepath.Abs(candidate)
 	if _, err := os.Stat(filepath.Join(abs, "go.mod")); err == nil {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -69,35 +70,54 @@ func (c *UpCmd) Run() error {
 	}
 
 	name := fmt.Sprintf("%s-session-%s", project, c.Session)
-	// Fossil is shared per-project (one repo under .sesh/project.repo),
-	// not per-session — all sessions in the same project commit on the
-	// same trunk. SQLite (libfossil's storage) handles concurrent opens.
-	// Only the FIRST session in a project seeds from the worktree;
-	// subsequent sessions open the existing repo and stack their commits
-	// on top of whatever's there.
-	//
-	// JetStream messaging stays per-session for private durable state.
-	repoPath := filepath.Join(cwd, ".sesh", "project.repo")
+	// Per-session Fossil. Each session owns its own repo at
+	// .sesh/sessions/<label>.repo so the publish hook fires natively
+	// from the session's own in-process hub on every commit. The hub at
+	// ~/.sesh/hub.repo collects from all sessions over the existing
+	// EdgeSync NATS autosync subject (project-code keyed, pinned in
+	// .sesh/project-code), and propagates back out to peer sessions —
+	// no shared SQLite, no cross-process publish-hook gap.
+	repoPath := filepath.Join(cwd, ".sesh", "sessions", c.Session+".repo")
 	storeDir := filepath.Join(cwd, ".sesh", "sessions", c.Session+".messaging")
 
-	// Fresh = no project repo file yet → seed this once.
+	// Fresh = no per-session repo file yet → bootstrap this once.
 	freshRepo := false
 	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {
 		freshRepo = true
+	}
+
+	// Bootstrap fork: when the hub already has content from a peer
+	// session's earlier autosync, this session's Fossil clones from the
+	// hub via SeedFromUpstream so per-session repos start convergent.
+	// When the hub is empty (this is the first session in the project),
+	// SeedFromUpstream stays empty and we seed-from-cwd after NewHub.
+	// Always-pass would be wrong: cloning from an empty hub would still
+	// succeed but leave us seeding the same cwd snapshot from multiple
+	// sessions, producing divergent commits with the same content.
+	seedFromUpstream := ""
+	if freshRepo {
+		hubFossilURL, hubHasContent, hcErr := detectHubContent()
+		if hcErr != nil {
+			slog.Warn("hub-content probe failed; falling back to seed-from-cwd",
+				"err", hcErr)
+		} else if hubHasContent {
+			seedFromUpstream = hubFossilURL
+		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	h, err := hub.NewHub(ctx, hub.Config{
-		RepoPath:       repoPath,
-		ServerName:     name,
-		NATSStoreDir:   storeDir,
-		FossilHTTPPort: c.HTTPPort,
-		NATSClientPort: c.NATSClientPort,
-		NATSLeafPort:   c.NATSLeafPort,
-		LeafUpstream:   leafURL,
-		ProjectCode:    projectCode,
+		RepoPath:         repoPath,
+		ServerName:       name,
+		NATSStoreDir:     storeDir,
+		FossilHTTPPort:   c.HTTPPort,
+		NATSClientPort:   c.NATSClientPort,
+		NATSLeafPort:     c.NATSLeafPort,
+		LeafUpstream:     leafURL,
+		ProjectCode:      projectCode,
+		SeedFromUpstream: seedFromUpstream,
 	})
 	if err != nil {
 		return fmt.Errorf("sesh up: %w", err)
@@ -113,12 +133,16 @@ func (c *UpCmd) Run() error {
 		return fmt.Errorf("publish session URLs: %w", err)
 	}
 
-	if freshRepo {
+	switch {
+	case !freshRepo:
+		slog.Info("fossil repo pre-existed; not re-seeding", "path", repoPath)
+	case seedFromUpstream != "":
+		slog.Info("fossil repo cloned from hub upstream",
+			"path", repoPath, "upstream", seedFromUpstream)
+	default:
 		if err := seedFromGitWorktree(ctx, h, cwd, SeedMode(c.Seed)); err != nil {
 			slog.Warn("fossil seed failed (continuing without seed)", "err", err)
 		}
-	} else {
-		slog.Info("fossil repo pre-existed; not re-seeding", "path", repoPath)
 	}
 
 	slog.Info("sesh up running",
@@ -201,6 +225,64 @@ func ensureHubRunning(projectCode string) (string, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "", errors.New("hub didn't come up within 15s")
+}
+
+// detectHubContent reads ~/.sesh/hub.fossil.url and queries the hub's
+// Fossil for any check-in events. Returns the hub URL plus whether the
+// hub already holds at least one commit. Sessions use this to choose
+// between two bootstrap paths:
+//
+//   - hubHasContent=false → first session in the project; seed-from-cwd
+//     after NewHub.
+//   - hubHasContent=true  → peer session has already committed and the
+//     hub mirrored it via autosync; clone-from-hub via SeedFromUpstream
+//     so the new session starts in convergent state.
+//
+// SQLite WAL mode allows the read here to coexist with the hub's open
+// writer; the read-only flag avoids any contention. Errors are
+// non-fatal: caller falls back to seed-from-cwd, the safer default
+// (worst case is a duplicate seed that the autosync layer reconciles).
+func detectHubContent() (hubURL string, hasContent bool, err error) {
+	urlPath, err := hubFossilURLPath()
+	if err != nil {
+		return "", false, err
+	}
+	urlBytes, err := os.ReadFile(urlPath)
+	if err != nil {
+		return "", false, fmt.Errorf("read hub.fossil.url: %w", err)
+	}
+	hubURL = stringTrim(urlBytes)
+	if hubURL == "" {
+		return "", false, errors.New("hub.fossil.url is empty")
+	}
+
+	repoPath, err := hubRepoPath()
+	if err != nil {
+		return hubURL, false, err
+	}
+	if _, err := os.Stat(repoPath); err != nil {
+		// Hub URL is published but repo file missing — treat as empty
+		// and let the bootstrap fall back to seed-from-cwd.
+		return hubURL, false, nil
+	}
+
+	// Read-only open via the modernc/sqlite driver registered in
+	// cmd/sesh/main.go. WAL mode lets us read while the hub's writer
+	// holds the file. Schema is libfossil's; event.type='ci' marks a
+	// check-in row.
+	db, err := sql.Open("sqlite", "file:"+repoPath+"?_pragma=mode(ro)")
+	if err != nil {
+		return hubURL, false, fmt.Errorf("open hub repo: %w", err)
+	}
+	defer db.Close()
+
+	var count int
+	if err := db.QueryRow(
+		"SELECT count(*) FROM event WHERE type='ci'",
+	).Scan(&count); err != nil {
+		return hubURL, false, fmt.Errorf("count check-ins: %w", err)
+	}
+	return hubURL, count > 0, nil
 }
 
 // readHubURL reads and trims hub.url.
