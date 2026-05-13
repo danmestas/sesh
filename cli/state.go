@@ -21,7 +21,9 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -260,18 +262,90 @@ func hubLogPath() (string, error) {
 }
 
 // deriveProjectCode produces a deterministic 40-char lowercase hex
-// project-code from (hostname, projectName). All sesh leaves in the same
-// project on the same machine arrive at the same code, so their Fossil
-// repos subscribe to the same NATS sync subject and EdgeSync's
-// cross-leaf sync can propagate commits between them.
-//
-// Hostname is included so different machines' Fossil contents don't
-// conflate when projects happen to share a name. Same-machine remains
-// stable across runs.
+// project-code from (hostname, projectName). Used only as a SEED for
+// loadOrCreateProjectCode on the first sesh up in a project — the
+// returned code is pinned to <cwd>/.sesh/project-code and subsequent
+// runs read the pinned value back, so the project-code survives
+// hostname changes (VM clones, container migrations, dotfiles sync to
+// a new laptop) that would otherwise silently break Fossil cross-leaf
+// sync. See loadOrCreateProjectCode for the pinning dance.
 func deriveProjectCode(projectName string) string {
 	host, _ := os.Hostname()
+	return deriveProjectCodeFromHost(host, projectName)
+}
+
+// deriveProjectCodeFromHost is the pure form of deriveProjectCode — the
+// hostname is passed in rather than read from the OS. Factored out so
+// tests can verify behavior across hostname changes without needing to
+// shell out or mock os.Hostname.
+func deriveProjectCodeFromHost(host, projectName string) string {
 	sum := sha1.Sum([]byte("sesh:" + host + ":" + projectName))
 	return hex.EncodeToString(sum[:])
+}
+
+// projectCodePath returns <cwd>/.sesh/project-code — the pinned
+// project-code file written on first sesh up.
+func projectCodePath(cwd string) string {
+	return filepath.Join(cwd, ".sesh", "project-code")
+}
+
+// loadOrCreateProjectCode returns the project-code for cwd, reading
+// the pinned value from <cwd>/.sesh/project-code when present, or
+// deriving a fresh one via deriveProjectCode(projectName) and atomically
+// writing it to disk for future runs. Pinning the code at first sesh up
+// means subsequent invocations survive hostname changes — VM clones,
+// container migrations, dotfiles sync, manual rename — which would
+// otherwise re-derive a different hash and silently break Fossil
+// cross-leaf sync for the project. The file is plain text: the 40-hex
+// code plus a trailing newline.
+//
+// Backward-compat: existing projects already running (no project-code
+// file yet) get seeded from deriveProjectCode(projectName), which is
+// exactly what the previous run computed — the hub.repo subscription
+// keeps working without disruption.
+//
+// If the file is present but doesn't validate as 40 lowercase hex
+// chars, returns an error rather than silently overwriting. A mangled
+// project-code file signals something else is wrong and the user
+// should see it.
+func loadOrCreateProjectCode(cwd, projectName string) (string, error) {
+	path := projectCodePath(cwd)
+
+	data, err := os.ReadFile(path)
+	if err == nil {
+		code := strings.TrimSpace(string(data))
+		if !isValidProjectCode(code) {
+			return "", fmt.Errorf("invalid project-code in %s: expected 40 lowercase hex chars", path)
+		}
+		return code, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("read project-code %s: %w", path, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+
+	code := deriveProjectCode(projectName)
+	if err := writeAtomic(path, code+"\n"); err != nil {
+		return "", fmt.Errorf("seed project-code %s: %w", path, err)
+	}
+	return code, nil
+}
+
+// isValidProjectCode checks that s is exactly 40 lowercase hex chars,
+// matching the output shape of deriveProjectCode.
+func isValidProjectCode(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultProject returns filepath.Base(cwd) — the convention is "the project
