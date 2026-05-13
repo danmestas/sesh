@@ -117,27 +117,29 @@ sesh_events_<scope>_<scope-id>    append-only event stream
 sesh_blobs_<scope>_<scope-id>     versioned object store
 ```
 
-For Fossil: every project has one shared repo at
-`<cwd>/.sesh/project.repo`. All sessions in that project open the
-same file — SQLite handles concurrent access. The hub has its own
-repo at `~/.sesh/hub.repo`. Use Fossil when the artifact has identity
-(a commit) and when other agents should be able to read it at a
-specific revision.
+For Fossil: every session has its own repo at
+`<cwd>/.sesh/sessions/<label>.repo`. The hub has its own repo at
+`~/.sesh/hub.repo` and acts as a passive collector / mirror. Use
+Fossil when the artifact has identity (a commit) and when other
+agents should be able to read it at a specific revision.
 
-When the first `sesh up` of a project runs in a git worktree, the
-project's Fossil is seeded with the worktree as a single initial
+When the first `sesh up` of a project runs in a git worktree, that
+session's Fossil is seeded with the worktree as a single initial
 commit (see the [README](../README.md#worktree-seeded-into-fossil)
-for `--seed` modes). Subsequent sessions open the existing repo — no
-re-seed.
+for `--seed` modes). Subsequent sessions detect the hub already has
+content and clone from the hub instead of re-seeding from the
+worktree, so per-session repos start in convergent state.
 
-**Cross-process Fossil sync works.** Same-project sessions share the
-`.repo` file directly. The hub's repo picks up the project's commits
-because sesh threads a deterministic project-code through
-`hub.Config.ProjectCode` (both subscribe to the same EdgeSync
-fossil-sync subject). Sub-leaves spawned via `edgesync hub serve
---leaf-upstream=... --seed-from-upstream=$FOSSIL_URL` clone the
-parent's Fossil state and inherit its project-code, so they stay
-synced via NATS auto-publish. See the
+**Cross-process Fossil sync works** via NATS rather than shared
+SQLite. Each session's in-process hub fires the EdgeSync publish
+hook natively on commit; the hub at `~/.sesh/` mirrors via the same
+fossil-sync subject; peer sessions subscribed to the subject pull
+the commit into their own repos. Sesh threads a deterministic
+project-code through `hub.Config.ProjectCode` so all participants
+land on the same subject. Sub-leaves spawned via `edgesync hub
+serve --leaf-upstream=... --seed-from-upstream=$FOSSIL_URL` clone
+the parent's Fossil state and inherit its project-code, so they
+stay synced via NATS auto-publish. See the
 [README](../README.md#how-cross-process-fossil-sync-works) for the
 sub-leaf spawn recipe.
 

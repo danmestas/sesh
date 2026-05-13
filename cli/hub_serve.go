@@ -125,6 +125,24 @@ func (c *HubServeCmd) Run() error {
 	}
 	defer os.Remove(natsURLPath)
 
+	// Publish the hub's Fossil HTTP xfer endpoint. Sessions read this at
+	// `sesh up` to decide bootstrap path: when the hub is empty (no
+	// peer session has committed yet), fall back to seed-from-cwd; when
+	// the hub already has content from a peer session's autosync, the
+	// new session's Fossil clones from this URL instead so the per-session
+	// repos start in convergent state rather than diverging from the
+	// cwd snapshot.
+	fossilURLPath, err := hubFossilURLPath()
+	if err != nil {
+		_ = h.Stop()
+		return fmt.Errorf("hub.fossil.url path: %w", err)
+	}
+	if err := writeAtomic(fossilURLPath, "http://"+h.HTTPAddr()+"/\n"); err != nil {
+		_ = h.Stop()
+		return fmt.Errorf("write hub.fossil.url: %w", err)
+	}
+	defer os.Remove(fossilURLPath)
+
 	slog.Info("sesh hub running",
 		"keepalive", c.Keepalive,
 		"repo", repoPath,

@@ -83,12 +83,15 @@ nats --server="$NATS" sub '>'
 
 ## Worktree seeded into Fossil
 
-When `sesh up` runs in a git worktree, the project's Fossil repo
-(`<cwd>/.sesh/project.repo`) gets seeded with the current worktree as
-a single initial commit. The repo is **shared by every session in the
-same project** — all sessions read and write the same Fossil trunk.
-Only the first `sesh up` in a project seeds it; subsequent sessions
-open the existing repo and stack their commits on top.
+When `sesh up` runs in a git worktree, the session's Fossil repo
+(`<cwd>/.sesh/sessions/<label>.repo`) gets seeded with the current
+worktree as a single initial commit. Each session owns its own repo
+— same-project sessions converge via NATS autosync rather than a
+shared SQLite file. Only the **first** session in a fresh project
+seeds from the worktree; later sessions detect the hub already has
+content (from the first session's commit propagating through
+autosync) and clone from the hub instead, so per-session repos start
+in convergent state.
 
 The git worktree itself is untouched. Agents work in Fossil; a human
 or an explicit `sesh promote` (TODO) decides which Fossil commits get
@@ -109,17 +112,22 @@ the sesh runtime state.
 
 ### How cross-process Fossil sync works
 
-Same-project sessions share the `.sesh/project.repo` file directly
-(SQLite handles concurrent opens) — no network sync needed for
-intra-project commits; readers see writes immediately.
+Each same-project session owns its own `.sesh/sessions/<label>.repo`
+and the hub at `~/.sesh/hub.repo` is a passive collector / mirror.
+Commits propagate session-to-session via the EdgeSync fossil-sync
+subject keyed on the project-code (pinned at
+`<cwd>/.sesh/project-code` on first run): a commit landing in
+session A's in-process hub fires the publish hook natively, the hub
+picks it up over NATS, and peer sessions subscribed to the same
+subject pull it into their own repos. No shared SQLite file, no
+cross-process write coordination.
 
-For **hub.repo** at `~/.sesh/`: sesh derives a deterministic
-project-code per project (`sha1("sesh:" + hostname + ":" + project)`)
-and passes it via `hub.Config.ProjectCode` plus `SESH_PROJECT_CODE`
-env to the spawned hub. Both the project's repo and the hub's repo
-subscribe to the same EdgeSync fossil-sync subject, so commits
-propagate over NATS auto-publish. Verified by
-`TestHub_AccumulatesProjectCommits`.
+The project-code is derived as `sha1("sesh:" + hostname + ":" +
+project)` on first run and persisted, so it survives hostname
+changes (VM clones, container migration). It's passed via
+`hub.Config.ProjectCode` plus the `SESH_PROJECT_CODE` env var to the
+spawned hub. Verified by `TestHub_AccumulatesProjectCommits` and
+`TestCrossSessionAutosync`.
 
 For **sub-leaves** (an `edgesync hub serve --leaf-upstream=...`
 spawned under a sesh): use `--seed-from-upstream=$FOSSIL_URL` where
