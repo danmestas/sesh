@@ -43,21 +43,53 @@ underscore because NATS KV bucket names disallow them).
 
 **Default scope is `project`** for long-running agentic work — goals
 typically outlive any single trace and benefit from project-level
-durability (no TTL). Workflow scope is valid for short-horizon goals
-bound to one trace's lifetime (24h TTL). Hub / session / agent scopes
-are unusual and discouraged for goals.
+durability (no TTL). Every other scope sesh defines is valid and has
+distinct use cases:
 
-| Scope | Bucket | Use when… |
-| --- | --- | --- |
-| `project` | `sesh_goals_project_<project>` | Default — long-running agentic objectives that may span days |
-| `workflow` | `sesh_goals_workflow_<trace-id-8hex>` | Goal lifetime equals one trace's lifetime |
+| Scope | Bucket | TTL | Best for | Notes |
+| --- | --- | --- | --- | --- |
+| `hub` ("global") | `sesh_goals_hub` | forever | Cross-project meta-goals ("ship 3 features this week"), operator-level ambient intent across all projects | One-machine global. Cross-machine global needs NATS clustering or a shared upstream hub — not free today. |
+| `project` (default) | `sesh_goals_project_<project>` | forever | Long-running project objectives ("migrate auth to OAuth2") | Most common scope. |
+| `workflow` | `sesh_goals_workflow_<trace-id-8hex>` | 24h after last write | Trace-bound goal; distributed coordination on one objective across many sessions in one trace | Lifetime ≈ trace lifetime. |
+| `session` | `sesh_goals_session_<project>_<session>` | 1h after last write | Bounded-sitting goals ("review every file in this PR") | TTL refreshes on each write, so active pursuit keeps it alive. Dies with the session on graceful exit. |
+| sub-leaf | `sesh_goals_session_<project>_<subleaf-label>` | 1h after last write | Hierarchical multi-tier — a child leaf has its own session bucket, can hold its own sub-goal under a parent's | Mechanically identical to session scope, at the sub-leaf's session. Pairs with [coordination-patterns.md hierarchical pattern](./coordination-patterns.md#pattern-3-hierarchical-multi-tier). |
+| `agent` | `sesh_goals_agent_<role>_<id>` | process lifetime | **Anti-pattern for goal records** — record dies with the agent, defeating persistence. **Useful for an agent-local current-goal-id pointer**: a small KV value pointing at the real goal record at a wider scope. | If the record itself lived here, agent crash = goal lost. |
 
 Each goal's KV key is its ID (a ULID). The KV value is the record
 described below.
 
 Connection target follows the [scoped-memory routing rule](./scoped-memory.md#connection-target--which-nats-to-talk-to):
-goals in project or workflow scope live on the hub's NATS URL
-(`~/.sesh/hub.nats.url`).
+goals in hub / project / workflow scope live on the hub's NATS URL
+(`~/.sesh/hub.nats.url`); goals in session / sub-leaf / agent scope
+live on the session's NATS URL from `<cwd>/.sesh/sessions/<label>.json`.
+
+### On "global" scope
+
+Hub scope is per-machine. Two machines on iroh leaf each have their
+own hub with separate JetStream KV stores; they don't share
+automatically. Truly cross-machine global goals require either NATS
+clustering with a shared JetStream domain or a designated upstream hub
+that other machines leaf into. These topologies are out of scope for
+v1.
+
+### The current-goal-id pointer pattern
+
+When an agent pursues a goal that lives at a wider scope (project,
+workflow, hub), it can store a small pointer in its agent-scope KV so
+its own runtime can find its current focus quickly:
+
+```sh
+# Goal record lives at project scope (durable across agent restarts)
+goal_id=$(sesh-ops goal create --objective "..." --scope=project)
+
+# Pointer lives at agent scope, refreshed on each turn
+agent_bucket="sesh_agent_orchestrator_agent-001"
+nats kv put "$agent_bucket" current_goal_id "$goal_id"
+```
+
+The pointer dies with the agent (process lifetime on agent scope); the
+goal record persists at the wider scope. This is the **correct** use
+of agent scope for goals — store the pointer, not the record.
 
 ## Record schema (v1)
 
@@ -75,6 +107,8 @@ goals in project or workflow scope live on the hub's NATS URL
   "updated_at": "2026-05-13T10:00:00Z",
   "completed_at": null,
   "trace_id": null,
+  "parent_goal_id": null,
+  "subgoals": [],
   "tasks": [],
   "checkpoints": [],
   "result": null,
@@ -98,14 +132,18 @@ Field meanings:
 | `updated_at`             | ISO8601   | Last modification time                                               |
 | `completed_at`           | ISO8601?  | When the goal entered a terminal state                               |
 | `trace_id`               | string?   | W3C trace-id this goal is bound to, if any (workflow-scope goals)    |
+| `parent_goal_id`         | string?   | This goal's parent (any scope); null = root-goal                     |
+| `subgoals`               | string[]  | Best-effort denormalized list of child goal IDs                      |
 | `tasks`                  | string[]  | Best-effort denormalized list of task IDs linked to this goal        |
 | `checkpoints`            | object[]  | Optional progress markers; free-form per harness                     |
 | `result`                 | object?   | Populated in terminal states (`achieved` payload or abandon reason)  |
 | `metadata`               | object    | Free-form agent-specific data                                        |
 
-The `tasks[]` array is **best-effort denormalized**. The authoritative
-linkage is each task's `metadata.goal_id` (see [Tasks linked to a goal](#tasks-linked-to-a-goal)
-below). If they diverge, trust the tasks.
+Both `tasks[]` and `subgoals[]` are **best-effort denormalized**. The
+authoritative linkage is each child's reference up: tasks via
+`metadata.goal_id` (see [Tasks linked to a goal](#tasks-linked-to-a-goal)),
+sub-goals via `parent_goal_id` (see [Hierarchical composition](#hierarchical-composition)).
+If a parent's array and the children disagree, trust the children.
 
 ## State machine
 
@@ -377,6 +415,113 @@ Operators decide:
 The substrate defaults to leaving the tasks in place — explicit
 opt-in to cascading.
 
+## Hierarchical composition
+
+A goal may declare a `parent_goal_id` linking it to a parent goal at
+the same or wider scope. This builds multi-tier objectives: a
+hub-scope meta-goal can have project-scope sub-goals; a project-scope
+goal can have session-scope or sub-leaf sub-goals; etc.
+
+### When to use hierarchy vs flat goals
+
+| Use hierarchy when… | Stay flat when… |
+| --- | --- |
+| The high-level objective spans multiple bounded contexts (projects, traces, sessions) | One goal owns the work end-to-end |
+| Different owners are responsible for different tiers | One owner pursues alone |
+| The parent's completion criterion is "all sub-goals achieved" | Completion is a single audit |
+| You want operator-level dashboards aggregating progress across tiers | You only care about one record |
+
+Most goals are flat. Hierarchy is for genuinely multi-tier work
+(typically pairs with the [hierarchical pattern](./coordination-patterns.md#pattern-3-hierarchical-multi-tier)).
+
+### Creating a sub-goal
+
+```sh
+hub_url=$(cat ~/.sesh/hub.nats.url)
+
+# Parent meta-goal already exists at hub scope as meta_id=01HXX...
+# Create a sub-goal at project scope, pointing up
+sub_id=$(ulid)
+project_bucket="sesh_goals_project_${project_id}"
+
+nats --server "$hub_url" kv create "$project_bucket" "$sub_id" "$(jq -n \
+  --arg id "$sub_id" \
+  --arg obj "Ship feature A in project X" \
+  --arg parent "$meta_id" \
+  --arg owner "engineer:agent-007" '
+  {id:$id, v:1, objective:$obj, status:"pursuing", owner:$owner,
+   token_budget:100000, used_tokens:0, wall_clock_budget_sec:null,
+   started_at:now|todateiso8601, updated_at:now|todateiso8601,
+   completed_at:null, trace_id:null,
+   parent_goal_id:$parent, subgoals:[],
+   tasks:[], checkpoints:[], result:null, metadata:{}}')"
+
+# Concurrently, denormalize on the parent (best-effort)
+hub_bucket="sesh_goals_hub"
+record=$(nats --server "$hub_url" kv get "$hub_bucket" "$meta_id" --raw)
+rev=$(nats   --server "$hub_url" kv revision "$hub_bucket" "$meta_id")
+new=$(jq --arg s "$sub_id" '.subgoals += [$s]' <<<"$record")
+nats --server "$hub_url" kv put "$hub_bucket" "$meta_id" "$new" --revision="$rev"
+```
+
+`sesh-ops goal create --parent=<id>` does both writes with a single
+command.
+
+### State cascade policy (default: none)
+
+Parent and sub-goal statuses are **independent** by default. A parent
+in `pursuing` can have any mix of sub-goal statuses; a parent's
+transition to `achieved` does NOT auto-cascade to sub-goals (and vice
+versa). Operators wire any cascade policy they want via watchers on
+KV change events or the optional lifecycle subjects.
+
+Common operator policies:
+
+- **Bottom-up achievement**: parent transitions to `achieved` only
+  when all sub-goals are `achieved`. A watcher subscribes to the
+  parent's `subgoals[]`; on each child transition, scans them and
+  CAS-updates the parent if all are done.
+- **Top-down abandon**: parent transitions to `unmet` cascades to
+  pending sub-goals. Operator runs `sesh-ops goal abandon <parent>
+  --cascade-subgoals`.
+- **No cascade**: each tier completes independently. Useful when
+  sub-goals have value even if the parent is abandoned (e.g., the
+  meta-goal was reframed but the work toward sub-goals is still
+  valuable).
+
+The substrate does not encode any of these — they're [coordination
+patterns](./coordination-patterns.md) layered on top.
+
+### Hierarchical pursuit and the "one active per owner" rule
+
+The "one active per owner" convention is **per root-goal**, not
+absolute. An owner can have:
+
+- At most one `pursuing` root-goal (one with `parent_goal_id == null`)
+- Plus any number of `pursuing` sub-goals beneath it
+
+Sub-goals are typically owned by **different agents** (sub-leaves,
+worker-pool members) — the parent owner orchestrates while the child
+owners pursue their tiers. When the **same** owner pursues both a
+parent and a child (rare but legal), its continuation engine focuses
+on one at a time via an agent-scope `current_goal_id` pointer (see
+the [current-goal-id pointer pattern](#the-current-goal-id-pointer-pattern)).
+
+### Cleanup on parent termination
+
+When a parent transitions to a terminal state, its sub-goals are
+**not** automatically affected. Operators choose:
+
+- **Leave** sub-goals (default). They continue independently — useful
+  when sub-goal work has value even if the parent's framing changed.
+- **Abandon** pending sub-goals: `sesh-ops goal abandon <parent>
+  --cascade-subgoals` transitions them to `unmet`.
+- **Hard delete**: `sesh-ops goal clear <parent> --with-subgoals`
+  removes the parent plus its `pursuing` / `paused` sub-goals.
+
+Same defensive defaults as task cleanup: opt in to cascading; never
+silent.
+
 ## Watching for changes
 
 NATS KV publishes change events. Subscribe to react in real time:
@@ -474,6 +619,11 @@ CLI, claude-code, custom agent runtime) that drives a model:
 - **Model tool registration.** The asymmetric tool surface (model can
   only call `update_goal(complete)`) is enforced by each harness's
   tool registration. Sesh defines the convention; harnesses enforce.
+- **Parent / sub-goal cascade policies.** Whether parent achievement
+  bubbles up from child completions, or parent abandonment cascades
+  down, is operator-defined via watchers (see
+  [State cascade policy](#state-cascade-policy-default-none)). Substrate
+  doesn't encode cascade rules.
 
 Reference continuation prompts and continuation-engine recipes will
 appear in each harness's own docs (e.g. orch's `multi-executor-workers.md`
@@ -484,19 +634,24 @@ specifies how its executors wire the loop).
 Operator and system commands wrap the raw protocol. `sesh-ops` provides:
 
 ```
-sesh-ops goal create --objective "..." [--budget=N] [--wall-clock=Ns] [--scope=project|workflow]
+sesh-ops goal create --objective "..." [--budget=N] [--wall-clock=Ns]
+                     [--scope=hub|project|workflow|session] [--parent=<goal-id>]
 sesh-ops goal get [--id=<goal-id>] [--owner=<role:id>]
-sesh-ops goal list [--status=pursuing|paused|achieved|unmet|budget_limited] [--owner=<role:id>]
+sesh-ops goal list [--status=pursuing|paused|achieved|unmet|budget_limited]
+                   [--owner=<role:id>] [--scope=<scope>] [--root-only]
+sesh-ops goal tree <root-goal-id>                       # render hierarchy
 sesh-ops goal status <goal-id>
 sesh-ops goal pause <goal-id>
 sesh-ops goal resume <goal-id>
 sesh-ops goal complete <goal-id> [--result='{...}']     # operator-confirmed completion
-sesh-ops goal abandon <goal-id> --reason "..."
-sesh-ops goal clear <goal-id> [--with-tasks]
+sesh-ops goal abandon <goal-id> --reason "..." [--cascade-subgoals]
+sesh-ops goal clear <goal-id> [--with-tasks] [--with-subgoals]
 sesh-ops goal account <goal-id> <tokens>                # system-only; usually runtime-driven
 sesh-ops goal link-task <goal-id> <task-id>             # tag task + update goal.tasks[]
 sesh-ops goal unlink-task <goal-id> <task-id>
 sesh-ops goal cleanup-tasks <goal-id>                   # cancel pending linked tasks
+sesh-ops goal link-subgoal <parent-id> <child-id>       # set child.parent_goal_id + update parent.subgoals[]
+sesh-ops goal unlink-subgoal <parent-id> <child-id>
 sesh-ops goal sweep [--budget-warning-threshold=0.75]   # one-shot budget enforcement pass
 sesh-ops goal sweep --daemon                            # long-running sweeper loop
 ```
@@ -511,15 +666,20 @@ expose only `update_goal(complete)`.
 ## One active per owner
 
 To avoid multi-active-goal confusion, sesh enforces by convention:
-**at most one `pursuing` goal per `owner` at a time**.
+**at most one `pursuing` root-goal per `owner` at a time** (a root-goal
+is one with `parent_goal_id == null`). Sub-goals beneath that root are
+unrestricted — an owner may pursue any number of sub-goals
+simultaneously, since they share a common parent that coordinates them.
 
 The harness's `create_goal` tool implementation MUST scan the bucket
-for existing pursuing goals owned by the caller and refuse creation
-(or transition the existing one) if found. `sesh-ops goal create` does
-this scan by default.
+for existing pursuing root-goals owned by the caller (records where
+`parent_goal_id == null && owner == self && status == "pursuing"`) and
+refuse creation if any is found. `sesh-ops goal create` does this scan
+by default; passing `--parent=<id>` creates a sub-goal and skips the
+scan (sub-goals are unrestricted).
 
-Operators can override via `sesh-ops goal create --allow-multiple` if a
-genuine multi-pursuit use case exists.
+Operators can override via `sesh-ops goal create --allow-multiple-roots`
+if a genuine concurrent-root-pursuit use case exists.
 
 ## Example flow: long-running migration
 
@@ -601,9 +761,16 @@ Bump the `v` field on new fields. Readers tolerate higher versions
 (don't write back unknown fields); writers refuse to downgrade. Same
 pattern as task and envelope specs.
 
-A planned v2 candidate: making `goal_id` a first-class field on tasks
-(currently in `metadata.goal_id`). Until then, treat the metadata
-convention as the contract.
+Planned v2 candidates:
+
+- **First-class `goal_id` on tasks** (currently in `task.metadata.goal_id`).
+  Until v2 ships, treat the metadata convention as the contract.
+- **Substrate-side ACLs** for the asymmetric tool surface (currently
+  enforced by harness tool registration). Future: per-role NATS users
+  with scoped subject permissions enforce "only complete is callable
+  by model" at the wire layer rather than the harness layer.
+- **First-class cascade-policy declaration** on the goal record so
+  watchers don't reinvent it (currently entirely operator-driven).
 
 ## Further reading
 
