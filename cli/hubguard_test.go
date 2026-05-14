@@ -59,14 +59,14 @@ func TestAcquireOrReuse_FastPath(t *testing.T) {
 	if lease.IsSpawner() {
 		t.Errorf("fast path returned spawner lease; want non-spawner")
 	}
-	if urls.Primary != primary {
-		t.Errorf("Primary = %q, want %q", urls.Primary, primary)
+	if urls.PrimaryURL != primary {
+		t.Errorf("PrimaryURL = %q, want %q", urls.PrimaryURL, primary)
 	}
-	if urls.NATS != natsURL {
-		t.Errorf("NATS = %q, want %q", urls.NATS, natsURL)
+	if urls.NATSURL != natsURL {
+		t.Errorf("NATSURL = %q, want %q", urls.NATSURL, natsURL)
 	}
-	if urls.Fossil != fossilURL {
-		t.Errorf("Fossil = %q, want %q", urls.Fossil, fossilURL)
+	if urls.FossilURL != fossilURL {
+		t.Errorf("FossilURL = %q, want %q", urls.FossilURL, fossilURL)
 	}
 
 	// Sanity: hub.spawn.lock should not have been created on the fast path.
@@ -88,12 +88,12 @@ func TestAcquireOrReuse_SlowPathBlocksUntilRelease(t *testing.T) {
 	if !lease1.IsSpawner() {
 		t.Fatalf("first lease IsSpawner=false on empty stateDir; want true")
 	}
-	if urls1.Primary != "" {
-		t.Errorf("spawner got non-empty Primary=%q; want empty", urls1.Primary)
+	if urls1.PrimaryURL != "" {
+		t.Errorf("spawner got non-empty PrimaryURL=%q; want empty", urls1.PrimaryURL)
 	}
 
 	type acquireResult struct {
-		urls  HubURLs
+		urls  HubInfo
 		lease *Lease
 		err   error
 	}
@@ -123,8 +123,8 @@ func TestAcquireOrReuse_SlowPathBlocksUntilRelease(t *testing.T) {
 		if r.lease.IsSpawner() {
 			t.Errorf("second lease IsSpawner=true after URL was published; want false")
 		}
-		if r.urls.Primary != primary {
-			t.Errorf("second Primary = %q, want %q", r.urls.Primary, primary)
+		if r.urls.PrimaryURL != primary {
+			t.Errorf("second PrimaryURL = %q, want %q", r.urls.PrimaryURL, primary)
 		}
 		if err := r.lease.Release(); err != nil {
 			t.Errorf("release lease2: %v", err)
@@ -166,8 +166,8 @@ func TestAcquireOrReuse_ExactlyOneSpawnerAmongRacers(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			} else {
 				nonSpawnerCount.Add(1)
-				if urls.Primary != primary {
-					t.Errorf("non-spawner Primary = %q, want %q", urls.Primary, primary)
+				if urls.PrimaryURL != primary {
+					t.Errorf("non-spawner PrimaryURL = %q, want %q", urls.PrimaryURL, primary)
 				}
 			}
 			if err := lease.Release(); err != nil {

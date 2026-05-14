@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -223,7 +222,7 @@ func ensureHubRunning(projectCode string) (string, error) {
 	}
 	if !lease.IsSpawner() {
 		_ = lease.Release()
-		return urls.Primary, nil
+		return urls.PrimaryURL, nil
 	}
 	defer lease.Release()
 
@@ -236,24 +235,15 @@ func ensureHubRunning(projectCode string) (string, error) {
 	// kept alive until we return — racing AcquireOrReuse callers block
 	// here, so they wake up to a published URL rather than racing into a
 	// second spawn.
-	urlPath := filepath.Join(stateDir, "hub.url")
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if url, err := readHubURL(urlPath); err == nil && reachable(url) {
-			return url, nil
+		info, exists, err := ReadHubInfo(stateDir)
+		if err == nil && exists && info.PrimaryURL != "" && reachable(info.PrimaryURL) {
+			return info.PrimaryURL, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "", errors.New("hub didn't come up within 15s")
-}
-
-// readHubURL reads and trims hub.url.
-func readHubURL(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return stringTrim(data), nil
 }
 
 // spawnHub fork-execs `sesh hub serve` as a detached daemon. Stdout/stderr

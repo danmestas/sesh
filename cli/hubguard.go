@@ -8,23 +8,6 @@ import (
 	"syscall"
 )
 
-// HubURLs is the published-state surface of a running hub:
-//   - Primary: the hub's leaf-NATS URL (~/.sesh/hub.url), the URL `sesh up`
-//     solicits its session's leaf into.
-//   - NATS:    the hub's NATS client URL (~/.sesh/hub.nats.url), the entry
-//     point for hub-scoped JetStream operations.
-//   - Fossil:  the hub's Fossil HTTP xfer endpoint (~/.sesh/hub.fossil.url),
-//     read by `sesh up` to decide bootstrap path (clone-from-hub vs.
-//     seed-from-cwd).
-//
-// NATS and Fossil are best-effort: when the daemon is mid-boot and has
-// published Primary only, those fields come back empty rather than blocking.
-type HubURLs struct {
-	Primary string
-	NATS    string
-	Fossil  string
-}
-
 // leaseKind discriminates the three flavors of HubGuard claim. It is
 // internal; callers read it through IsSpawner / Publish / Release.
 type leaseKind int
@@ -107,30 +90,28 @@ func (l *Lease) Publish(leafURL string) error {
 // The bind-vs-accept race from #15 is closed daemon-side: hub_serve.go
 // gates URL publication on EdgeSync's hub.Ready() channel, so consumers
 // only see hub.url / hub.fossil.url after the HTTP listener is accepting.
-func AcquireOrReuse(stateDir string) (HubURLs, *Lease, error) {
-	urlPath := filepath.Join(stateDir, "hub.url")
-
-	if urls, ok := readURLsIfReachable(stateDir, urlPath); ok {
-		return urls, &Lease{kind: leaseNone}, nil
+func AcquireOrReuse(stateDir string) (HubInfo, *Lease, error) {
+	if info, ok := readURLsIfReachable(stateDir); ok {
+		return info, &Lease{kind: leaseNone}, nil
 	}
 
 	lockPath := filepath.Join(stateDir, "hub.spawn.lock")
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return HubURLs{}, nil, fmt.Errorf("open hub spawn lock: %w", err)
+		return HubInfo{}, nil, fmt.Errorf("open hub spawn lock: %w", err)
 	}
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		_ = lockFile.Close()
-		return HubURLs{}, nil, fmt.Errorf("flock hub spawn lock: %w", err)
+		return HubInfo{}, nil, fmt.Errorf("flock hub spawn lock: %w", err)
 	}
 
-	if urls, ok := readURLsIfReachable(stateDir, urlPath); ok {
+	if info, ok := readURLsIfReachable(stateDir); ok {
 		_ = lockFile.Close()
-		return urls, &Lease{kind: leaseNone}, nil
+		return info, &Lease{kind: leaseNone}, nil
 	}
 
-	_ = os.Remove(urlPath)
-	return HubURLs{}, &Lease{kind: leaseSpawner, handle: lockFile}, nil
+	_ = os.Remove(filepath.Join(stateDir, "hub.url"))
+	return HubInfo{}, &Lease{kind: leaseSpawner, handle: lockFile}, nil
 }
 
 // RegisterDaemon claims hub.url for the calling daemon via O_EXCL. The
@@ -187,27 +168,16 @@ func daemonLease(file *os.File, urlPath string) *Lease {
 	}
 }
 
-// readURLsIfReachable returns the published URL set if hub.url is present
+// readURLsIfReachable returns the published HubInfo if hub.url is present
 // and its host:port is currently reachable. NATS / Fossil URLs are
-// best-effort: missing files just leave those fields empty.
-func readURLsIfReachable(stateDir, urlPath string) (HubURLs, bool) {
-	data, err := os.ReadFile(urlPath)
-	if err != nil {
-		return HubURLs{}, false
+// best-effort: missing files just leave those fields empty via ReadHubInfo.
+func readURLsIfReachable(stateDir string) (HubInfo, bool) {
+	info, exists, err := ReadHubInfo(stateDir)
+	if err != nil || !exists || info.PrimaryURL == "" {
+		return HubInfo{}, false
 	}
-	primary := stringTrim(data)
-	if primary == "" || !reachable(primary) {
-		return HubURLs{}, false
+	if !reachable(info.PrimaryURL) {
+		return HubInfo{}, false
 	}
-	natsURL, _ := readTrimmed(filepath.Join(stateDir, "hub.nats.url"))
-	fossilURL, _ := readTrimmed(filepath.Join(stateDir, "hub.fossil.url"))
-	return HubURLs{Primary: primary, NATS: natsURL, Fossil: fossilURL}, true
-}
-
-func readTrimmed(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return stringTrim(data), nil
+	return info, true
 }
