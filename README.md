@@ -199,6 +199,30 @@ edgesync hub serve \
   --seed-from-upstream="$HTTP"
 ```
 
+For **worker processes** that need to read or write Fossil state,
+the supported pattern is HTTP clone-push via `$fossil_url`:
+
+```sh
+HTTP=$(jq -r .fossil_url < .sesh/sessions/morning.json)
+
+# Worker bootstrap (once per worker)
+fossil clone "$HTTP" /tmp/worker.repo
+fossil open /tmp/worker.repo --workdir /tmp/work
+fossil user default worker --repo /tmp/worker.repo
+fossil settings autosync on --repo /tmp/worker.repo
+
+# Per-commit
+cd /tmp/work
+fossil add notes.md && fossil commit -m "..."   # autosync pushes back
+```
+
+Workers must **not** `fossil open` the session repo at
+`.sesh/sessions/<label>.repo` directly — commits made via that path
+land locally but do not propagate. The clone-push pattern via
+`$fossil_url` is the supported way; EdgeSync's auto-publish on the
+HTTP xfer push handler is what carries the commit to peers (see
+`TestCrossLeaf_HTTPPush_PropagatesCommit` upstream).
+
 ## Coordination patterns
 
 The mesh is a neutral transport — any well-known multi-agent coordination
