@@ -146,16 +146,27 @@ worktree, so per-session repos start in convergent state.
 
 **Cross-process Fossil sync works** via NATS rather than shared
 SQLite. Each session's in-process hub fires the EdgeSync publish
-hook natively on commit; the hub at `~/.sesh/` mirrors via the same
+hook natively on commits made through its Go API; commits arriving
+via the session's HTTP xfer push endpoint fire the same publish
+hook on receive. Either way, the hub at `~/.sesh/` mirrors via the
 fossil-sync subject; peer sessions subscribed to the subject pull
 the commit into their own repos. Sesh threads a deterministic
 project-code through `hub.Config.ProjectCode` so all participants
 land on the same subject. Sub-leaves spawned via `edgesync hub
-serve --leaf-upstream=... --seed-from-upstream=$FOSSIL_URL` clone
+serve --leaf-upstream=... --seed-from-upstream=$fossil_url` clone
 the parent's Fossil state and inherit its project-code, so they
 stay synced via NATS auto-publish. See the
 [README](../README.md#how-cross-process-fossil-sync-works) for the
 sub-leaf spawn recipe.
+
+The worker-facing surface for Fossil is `$fossil_url` (HTTP), not
+the on-disk session repo file. Workers clone their working
+checkout from `$fossil_url` and push commits back via fossil's
+HTTP xfer (or with `fossil settings autosync on`, which does the
+push transparently on every commit). Commits made via raw
+`fossil open <session-repo-path>` against the on-disk file do not
+fire the publish hook and will not propagate — the clone-push path
+is the supported worker pattern.
 
 ## Lifecycle responsibility
 

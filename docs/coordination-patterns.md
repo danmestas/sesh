@@ -341,17 +341,30 @@ right now."
 
 ### Fossil repo — content-addressable artifacts
 
-Every sesh leaf has a Fossil repo at `<cwd>/.sesh/sessions/<label>.repo`.
-The hub has `~/.sesh/hub.repo`. EdgeSync syncs them over NATS. Agents
-commit artifacts (research docs, code, diffs, datasets) to their local
-repo; the change syncs to the hub and to any interested leaf.
+Every sesh session exposes a Fossil HTTP endpoint at `$fossil_url`
+(read from `.sesh/sessions/<label>.json`). The hub at `~/.sesh/hub.repo`
+mirrors. Agents clone a working checkout from `$fossil_url`, edit, and
+push commits back — EdgeSync's auto-publish on the HTTP push handler
+wires up cross-session propagation from there.
 
-Pattern: commit the artifact to Fossil, announce the pointer on NATS.
+Pattern: clone-and-push via `$fossil_url`, then announce the pointer
+on NATS.
 
 ```sh
-# Agent A commits research output
-fossil commit -m "research findings" research.md
-revid=$(fossil info | grep checkout | awk '{print $2}')
+fossil_url=$(jq -r .fossil_url < .sesh/sessions/${session}.json)
+
+# Agent A: one-time bootstrap — clone a working checkout
+fossil clone "$fossil_url" /tmp/agent-a.repo
+fossil open /tmp/agent-a.repo --workdir /tmp/agent-a-work
+fossil user default agent-a --repo /tmp/agent-a.repo
+fossil settings autosync on --repo /tmp/agent-a.repo
+
+# Per-commit
+cd /tmp/agent-a-work
+echo "..." > research.md
+fossil add research.md
+fossil commit -m "research findings"          # autosync pushes to $fossil_url
+revid=$(fossil info | awk '/^checkout:/{print $2}')
 
 # Announce the pointer
 nats pub blackboard.update.research \
@@ -359,8 +372,13 @@ nats pub blackboard.update.research \
 
 # Agent B subscribes
 nats sub 'blackboard.update.>'
-# On message: fossil pull, then read research.md at $rev
+# On message: fossil pull from $fossil_url, then read research.md at $rev
 ```
+
+Workers must **not** `fossil open` the session repo file at
+`<cwd>/.sesh/sessions/<label>.repo` directly — commits made via that
+path land locally but do not propagate. Always go through
+`$fossil_url`.
 
 Use Fossil when shared state is content-addressed and history matters.
 Most multi-agent systems hand-roll this on S3 or Postgres; sesh has it
