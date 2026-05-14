@@ -7,8 +7,22 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
+
+// SessionState is the project-local JSON at <cwd>/.sesh/sessions/<label>.json.
+//
+// Written in two phases by the Session module: ClaimSession creates the file
+// O_EXCL with PID only (the atomic ownership claim), then Session.Publish
+// overwrites with the URLs once the hub has bound its ports. Sub-leaves and
+// NATS clients read NATSURL/LeafURL to attach without grepping logs.
+type SessionState struct {
+	PID       int    `json:"pid"`
+	NATSURL   string `json:"nats_url,omitempty"`   // for NATS clients under this session
+	LeafURL   string `json:"leaf_url,omitempty"`   // for EdgeSync leaves to solicit upstream
+	FossilURL string `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
+}
 
 // Session owns a project-local state file at <stateDir>/<label>.json. It
 // represents the lifecycle of a single `sesh up` between claim and release:
@@ -176,4 +190,15 @@ func readSessionFile(path string) (SessionState, error) {
 		return SessionState{}, fmt.Errorf("parse session state: %w", err)
 	}
 	return s, nil
+}
+
+// alive returns true if a process with pid is reachable by signal 0.
+// Used to discriminate stale state files (dead PID; reap silently) from
+// live sessions (active PID; refuse re-claim, signal on Terminate).
+func alive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }

@@ -31,9 +31,9 @@ const (
 // repoPathFor returns the Fossil repo path for the given scope.
 func repoPathFor(scope SeshScope, cwd, session string) string {
 	if scope == ScopeProject {
-		return filepath.Join(cwd, ".sesh", "project.repo")
+		return filepath.Join(projectSeshDir(cwd), "project.repo")
 	}
-	return filepath.Join(cwd, ".sesh", "sessions", session+".repo")
+	return filepath.Join(projectSeshDir(cwd), "sessions", session+".repo")
 }
 
 // storeDirFor returns the JetStream store directory for this session.
@@ -41,5 +41,5 @@ func repoPathFor(scope SeshScope, cwd, session string) string {
 // sesh up runs its own embedded NATS server in its own process and
 // JetStream's on-disk layout cannot be shared across processes.
 func storeDirFor(cwd, session string) string {
-	return filepath.Join(cwd, ".sesh", "sessions", session+".messaging")
+	return filepath.Join(projectSeshDir(cwd), "sessions", session+".messaging")
 }

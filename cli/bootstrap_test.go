@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,11 +145,12 @@ func TestMakePlan_HubURLWithoutCode(t *testing.T) {
 	}
 }
 
-// TestExecute_AdoptsHubProjectCode is the issue #34 acceptance test:
-// given a local pin = A and a hub project-code = B, Execute writes B
-// into <cwd>/.sesh/project-code so EdgeSync's seedFromUpstream sees
-// agreement on the next hub.NewHub call.
-func TestExecute_AdoptsHubProjectCode(t *testing.T) {
+// TestResolveProjectCode_AdoptsOnDrift is the issue #34 acceptance:
+// given a local pin = A and an authoritative hub code = B,
+// ResolveProjectCode writes B into <cwd>/.sesh/project-code and returns
+// B so EdgeSync's SeedFromUpstream sees agreement on the next
+// hub.NewHub call.
+func TestResolveProjectCode_AdoptsOnDrift(t *testing.T) {
 	const (
 		localCode = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		hubCode   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -156,10 +158,12 @@ func TestExecute_AdoptsHubProjectCode(t *testing.T) {
 	cwd := t.TempDir()
 	seedProjectCodeFile(t, cwd, localCode)
 
-	plan := Plan{Source: SourceHub, HubFossilURL: "http://hub.example/"}
-	err := Execute(plan, Deps{Cwd: cwd, RepoPath: "", HubProjectCode: hubCode})
+	active, err := ResolveProjectCode(cwd, localCode, hubCode)
 	if err != nil {
-		t.Fatalf("Execute: %v", err)
+		t.Fatalf("ResolveProjectCode: %v", err)
+	}
+	if active != hubCode {
+		t.Errorf("active = %q, want %q", active, hubCode)
 	}
 
 	got := readProjectCodeFile(t, cwd)
@@ -168,19 +172,22 @@ func TestExecute_AdoptsHubProjectCode(t *testing.T) {
 	}
 }
 
-// TestExecute_AdoptionIdempotent confirms repeat invocations with a
-// matching local file are no-ops — file unchanged, no error. This is
-// the property that lets us call Execute unconditionally at the
-// SourceHub branch in up.go without re-writing on every sesh up.
-func TestExecute_AdoptionIdempotent(t *testing.T) {
+// TestResolveProjectCode_Idempotent confirms repeat invocations with a
+// matching pin are no-ops — file unchanged, no error, active=local.
+// Lets up.go's Starter call ResolveProjectCode unconditionally at the
+// SourceHub branch without re-writing on every sesh up.
+func TestResolveProjectCode_Idempotent(t *testing.T) {
 	const hubCode = "cccccccccccccccccccccccccccccccccccccccc"
 	cwd := t.TempDir()
 	seedProjectCodeFile(t, cwd, hubCode)
 
-	plan := Plan{Source: SourceHub, HubFossilURL: "http://hub.example/"}
 	for i := range 2 {
-		if err := Execute(plan, Deps{Cwd: cwd, RepoPath: "", HubProjectCode: hubCode}); err != nil {
-			t.Fatalf("Execute (call %d): %v", i+1, err)
+		active, err := ResolveProjectCode(cwd, hubCode, hubCode)
+		if err != nil {
+			t.Fatalf("ResolveProjectCode (call %d): %v", i+1, err)
+		}
+		if active != hubCode {
+			t.Errorf("call %d: active = %q, want %q", i+1, active, hubCode)
 		}
 	}
 	if got := readProjectCodeFile(t, cwd); got != hubCode {
@@ -188,20 +195,76 @@ func TestExecute_AdoptionIdempotent(t *testing.T) {
 	}
 }
 
-// TestExecute_NoAdoptWhenHubCodeEmpty covers the probe-invariant edge
-// for Execute: an empty HubProjectCode (hub has no content yet) leaves
-// the local pin alone.
-func TestExecute_NoAdoptWhenHubCodeEmpty(t *testing.T) {
+// TestResolveProjectCode_NoAdoptWhenHubCodeEmpty covers the
+// probe-invariant edge: an empty hubCode (hub has no content yet)
+// leaves the local pin alone and returns localCode.
+func TestResolveProjectCode_NoAdoptWhenHubCodeEmpty(t *testing.T) {
 	const localCode = "dddddddddddddddddddddddddddddddddddddddd"
 	cwd := t.TempDir()
 	seedProjectCodeFile(t, cwd, localCode)
 
-	plan := Plan{Source: SourceHub, HubFossilURL: "http://hub.example/"}
-	if err := Execute(plan, Deps{Cwd: cwd, RepoPath: "", HubProjectCode: ""}); err != nil {
-		t.Fatalf("Execute: %v", err)
+	active, err := ResolveProjectCode(cwd, localCode, "")
+	if err != nil {
+		t.Fatalf("ResolveProjectCode: %v", err)
+	}
+	if active != localCode {
+		t.Errorf("active = %q, want %q", active, localCode)
 	}
 	if got := readProjectCodeFile(t, cwd); got != localCode {
 		t.Errorf("project-code = %q, want %q (unchanged)", got, localCode)
+	}
+}
+
+// TestResolveProjectCode_NoAdoptWhenCodesMatch is the "agree-already"
+// shortcut: matching codes skip the file write entirely. Cheap path
+// for the common steady-state where hub and local agreed all along.
+func TestResolveProjectCode_NoAdoptWhenCodesMatch(t *testing.T) {
+	const code = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	cwd := t.TempDir()
+	// Deliberately do NOT seed the file. If ResolveProjectCode
+	// short-circuits on matching codes (as it should), no write
+	// happens and the absent file stays absent.
+	active, err := ResolveProjectCode(cwd, code, code)
+	if err != nil {
+		t.Fatalf("ResolveProjectCode: %v", err)
+	}
+	if active != code {
+		t.Errorf("active = %q, want %q", active, code)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".sesh", "project-code")); !os.IsNotExist(err) {
+		t.Errorf("project-code file created on no-drift path (stat err=%v)", err)
+	}
+}
+
+// TestApply_SourceNone exercises the no-bootstrap branch: the session's
+// repo file pre-existed, so Apply just logs and returns nil. The hub
+// argument can be nil because no commit goes through it.
+func TestApply_SourceNone(t *testing.T) {
+	plan := Plan{Source: SourceNone}
+	if err := Apply(context.Background(), plan, nil, Deps{Cwd: t.TempDir(), RepoPath: "/x/y.repo"}); err != nil {
+		t.Fatalf("Apply(SourceNone): %v", err)
+	}
+}
+
+// TestApply_SourceHub exercises the clone-already-done branch: the
+// SourceHub clone fired inside hub.NewHub's SeedFromUpstream before
+// Apply was called, so Apply just logs and returns nil. The hub
+// argument is unused for this case.
+func TestApply_SourceHub(t *testing.T) {
+	plan := Plan{Source: SourceHub, HubFossilURL: "http://hub.example/"}
+	if err := Apply(context.Background(), plan, nil, Deps{Cwd: t.TempDir(), RepoPath: "/x/y.repo"}); err != nil {
+		t.Fatalf("Apply(SourceHub): %v", err)
+	}
+}
+
+// TestApply_UnknownSource guards the switch: an unrecognized Source
+// value yields an error rather than a silent no-op. Defends against
+// a future Source const that forgets to add an Apply case.
+func TestApply_UnknownSource(t *testing.T) {
+	plan := Plan{Source: Source(99)}
+	err := Apply(context.Background(), plan, nil, Deps{Cwd: t.TempDir()})
+	if err == nil {
+		t.Fatal("Apply with unknown source: want error, got nil")
 	}
 }
 

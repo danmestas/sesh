@@ -15,6 +15,13 @@ import (
 )
 
 // UpCmd brings a session up. Cwd-derived project; --session required.
+//
+// Run is intentionally thin: it constructs a Starter (which holds every
+// piece of session-derived state and the lifecycle of the session
+// claim) and asks it to Start. The phase pipeline lives behind Starter's
+// methods so adding a new pipeline step (goal-management bootstrap,
+// agent attach, etc.) means registering a step on Starter rather than
+// editing this method.
 type UpCmd struct {
 	Session string `required:"" help:"Session label (free-form)"`
 
@@ -42,162 +49,262 @@ type UpCmd struct {
 }
 
 func (c *UpCmd) Run() error {
+	s, err := NewStarter(c)
+	if err != nil {
+		return err
+	}
+	defer s.Release()
+	return s.Start(context.Background())
+}
+
+// Starter owns the bring-up of one `sesh up`. It captures everything
+// derived from UpCmd + the project on disk, and exposes Start as the
+// single entry point for the phase pipeline.
+//
+// Phase ordering (Start):
+//
+//  1. pre-hub bootstrap: probe the user-wide hub, decide MakePlan's
+//     source, reconcile project-code drift via ResolveProjectCode.
+//  2. hub-acquire: AcquireOrReuse → spawn-if-needed → return the leaf
+//     URL the session's local hub will solicit into.
+//  3. bind: hub.NewHub binds this session's libfossil + NATS + leaf.
+//     SeedFromUpstream is keyed off the resolved project-code so the
+//     SourceHub clone-from-upstream works without project-code
+//     disagreement.
+//  4. post-hub bootstrap: Apply commits seed-from-cwd through the
+//     bound hub (SourceGitWorktree). SourceNone and SourceHub are
+//     log-only at this point.
+//  5. publish-session: Session.Publish writes the bound URLs into the
+//     project-local state JSON so sub-leaves and `sesh down` can
+//     reach this session.
+//  6. serve: HTTP serve loop until ctx cancels (SIGINT / SIGTERM).
+//
+// The session claim is acquired by NewStarter and released by
+// Release; Run defers Release so the claim never outlives the
+// process.
+type Starter struct {
+	cmd     *UpCmd
+	project string
+	cwd     string
+
+	stateDir    string   // <cwd>/.sesh/sessions
+	sessHandle  *Session // claimed in NewStarter
+	scope       SeshScope
+	name        string // EdgeSync server name; e.g. "myproj-session-alpha"
+	repoPath    string
+	storeDir    string
+	freshRepo   bool
+	projectCode string
+
+	probe HubProbe
+	plan  Plan
+
+	leafURL string
+	h       *hub.Hub
+}
+
+// NewStarter prepares the session start: derives project + cwd + paths,
+// claims the project-local session state slot via O_EXCL, and loads
+// (or seeds) the project-code pin. No hub work, no network — failures
+// here mean the caller can retry without leaking resources beyond what
+// Release cleans up.
+//
+// Callers MUST defer s.Release() when NewStarter returns nil error.
+func NewStarter(c *UpCmd) (*Starter, error) {
 	project, err := defaultProject()
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
+		return nil, fmt.Errorf("getwd: %w", err)
 	}
-
-	// Atomic same-machine same-name guard. The Session module owns the
-	// state file lifecycle from claim through release; up.Run consumes
-	// it via Publish once the hub binds its URLs.
 	stateDir, err := projectStateDir()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sess, err := ClaimSession(stateDir, c.Session)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer sess.Release()
-
-	// Fossil project-code: pinned at <cwd>/.sesh/project-code on first
-	// `sesh up`, read back on subsequent runs. All sesh leaves in this
-	// project arrive at the same code and therefore subscribe to the same
-	// EdgeSync fossil-sync subject — that's what lets the hub's repo and
-	// the session's repo see each other's commits. Pinning (rather than
-	// re-deriving from hostname every run) means cross-leaf sync survives
-	// VM clones, container migrations, dotfiles sync to a new laptop, and
-	// manual hostname renames. Passed to hub.NewHub here and via env var
-	// to the spawned `sesh hub serve` (see spawnHub).
 	projectCode, err := loadOrCreateProjectCode(cwd, project)
 	if err != nil {
-		return fmt.Errorf("project-code: %w", err)
+		_ = sess.Release()
+		return nil, fmt.Errorf("project-code: %w", err)
 	}
 
-	name := fmt.Sprintf("%s-session-%s", project, c.Session)
-	// Fossil repo path forks on --scope. Default (session): each
-	// session owns its own repo at .sesh/sessions/<label>.repo so the
-	// publish hook fires natively from the session's own in-process
-	// hub on every commit; cross-session convergence happens via NATS
-	// autosync on the project-code subject. Opt-in (project): all
-	// sessions in this project open the same .sesh/project.repo — one
-	// SQLite file, synchronous cross-session reads, write contention
-	// queued by busy_timeout. JetStream store stays per-session
-	// regardless: each sesh up runs its own embedded NATS server and
-	// can't share its store dir with peers.
 	scope := SeshScope(c.Scope)
 	repoPath := repoPathFor(scope, cwd, c.Session)
-	storeDir := storeDirFor(cwd, c.Session)
-
-	// Fresh = no per-session repo file yet → bootstrap this once.
 	freshRepo := false
 	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {
 		freshRepo = true
 	}
 
-	// Bootstrap planning happens before the hub bring-up. Probing the
-	// hub for content tells MakePlan whether to clone-from-hub or seed
-	// from cwd. When the hub published a project-code that disagrees
-	// with the local pin (issue #26 / #34), the hub wins: a SourceHub
-	// plan flows into Execute below, which adopts the hub's value into
-	// <cwd>/.sesh/project-code before hub.NewHub fires EdgeSync's
-	// seed-from-upstream. Probe failures degrade to "no hub content" —
-	// the safer default, since autosync reconciles any duplicate seed.
-	hubFossilURL, hubProjectCode, probeErr := ProbeHub()
-	if probeErr != nil {
-		slog.Warn("hub-content probe failed; falling back to seed-from-cwd", "err", probeErr)
-		hubFossilURL, hubProjectCode = "", ""
+	return &Starter{
+		cmd:         c,
+		project:     project,
+		cwd:         cwd,
+		stateDir:    stateDir,
+		sessHandle:  sess,
+		scope:       scope,
+		name:        fmt.Sprintf("%s-session-%s", project, c.Session),
+		repoPath:    repoPath,
+		storeDir:    storeDirFor(cwd, c.Session),
+		freshRepo:   freshRepo,
+		projectCode: projectCode,
+	}, nil
+}
+
+// Release frees resources NewStarter / Start acquired. Currently the
+// session-claim file; safe on nil / already-released starter.
+func (s *Starter) Release() {
+	if s == nil || s.sessHandle == nil {
+		return
 	}
+	_ = s.sessHandle.Release()
+}
+
+// Start runs the phase pipeline described in the Starter doc. parent
+// scopes the signal-listening ctx that all hub-bound work observes.
+func (s *Starter) Start(parent context.Context) error {
+	if err := s.preHubBootstrap(); err != nil {
+		return err
+	}
+	if err := s.acquireHub(); err != nil {
+		return err
+	}
+
+	ctx, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := s.bindHub(ctx); err != nil {
+		return err
+	}
+	s.postHubBootstrap(ctx)
+	if err := s.publishSession(); err != nil {
+		return err
+	}
+	return s.serve(ctx)
+}
+
+// preHubBootstrap probes the hub for content, plans the bootstrap, and
+// reconciles project-code drift. Runs BEFORE hub.NewHub so the
+// SeedFromUpstream path sees agreement between the local pin and the
+// hub's libfossil project-code.
+//
+// Probe errors surface to the operator rather than silently degrade —
+// a corrupt hub.repo reported as "no content" would let seed-from-cwd
+// overwrite state. probe.Present=false on a clean "no hub yet" case is
+// the expected steady-state.
+func (s *Starter) preHubBootstrap() error {
+	probe, err := ProbeHub()
+	if err != nil {
+		return fmt.Errorf("probe hub: %w", err)
+	}
+	s.probe = probe
 	plan, err := MakePlan(World{
-		LocalProjectCode: projectCode,
-		HubFossilURL:     hubFossilURL,
-		HubProjectCode:   hubProjectCode,
-		FreshRepo:        freshRepo,
-		SeedMode:         SeedMode(c.Seed),
+		LocalProjectCode: s.projectCode,
+		HubFossilURL:     probe.FossilURL,
+		HubProjectCode:   probe.ProjectCode,
+		FreshRepo:        s.freshRepo,
+		SeedMode:         SeedMode(s.cmd.Seed),
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap plan: %w", err)
 	}
+	s.plan = plan
 
-	// SourceHub may need to adopt the hub's project-code into
-	// <cwd>/.sesh/project-code before hub.NewHub's seed-from-upstream
-	// path runs — EdgeSync's clone refuses to mix repos with disagreeing
-	// project-codes. Adoption is idempotent; the no-drift case is a
-	// no-op. SourceGitWorktree's Execute branch needs the bound hub and
-	// runs after hub.NewHub instead (see below).
 	if plan.Source == SourceHub {
-		if err := Execute(plan, Deps{
-			Cwd:            cwd,
-			RepoPath:       repoPath,
-			HubProjectCode: hubProjectCode,
-		}); err != nil {
-			return fmt.Errorf("bootstrap: %w", err)
+		active, err := ResolveProjectCode(s.cwd, s.projectCode, probe.ProjectCode)
+		if err != nil {
+			return fmt.Errorf("resolve project-code: %w", err)
 		}
-		if hubProjectCode != "" {
-			projectCode = hubProjectCode
-		}
+		s.projectCode = active
 	}
+	return nil
+}
 
-	leafURL, err := ensureHubRunning(projectCode)
+// acquireHub uses HubGuard's fast/slow path to find or spawn the
+// user-wide hub daemon, then captures the leaf URL the session will
+// solicit into.
+func (s *Starter) acquireHub() error {
+	leafURL, err := ensureHubRunning(s.projectCode)
 	if err != nil {
 		return fmt.Errorf("hub bring-up: %w", err)
 	}
+	s.leafURL = leafURL
+	return nil
+}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
+// bindHub binds the session's libfossil + NATS server + leafnode
+// solicit. EdgeSync's SeedFromUpstream fires here for SourceHub plans.
+func (s *Starter) bindHub(ctx context.Context) error {
 	h, err := hub.NewHub(ctx, hub.Config{
-		RepoPath:         repoPath,
-		ServerName:       name,
-		NATSStoreDir:     storeDir,
-		FossilHTTPPort:   c.HTTPPort,
-		NATSClientPort:   c.NATSClientPort,
-		NATSLeafPort:     c.NATSLeafPort,
-		LeafUpstream:     leafURL,
-		ProjectCode:      projectCode,
-		SeedFromUpstream: plan.HubFossilURL,
+		RepoPath:         s.repoPath,
+		ServerName:       s.name,
+		NATSStoreDir:     s.storeDir,
+		FossilHTTPPort:   s.cmd.HTTPPort,
+		NATSClientPort:   s.cmd.NATSClientPort,
+		NATSLeafPort:     s.cmd.NATSLeafPort,
+		LeafUpstream:     s.leafURL,
+		ProjectCode:      s.projectCode,
+		SeedFromUpstream: s.plan.HubFossilURL,
 	})
 	if err != nil {
 		return fmt.Errorf("sesh up: %w", err)
 	}
+	s.h = h
+	return nil
+}
 
-	if err := sess.Publish(SessionState{
+// postHubBootstrap dispatches the post-hub side of the bootstrap plan
+// via Apply. SourceGitWorktree commits the worktree through the bound
+// hub; SourceNone and SourceHub log and return. Seed failures are
+// logged and swallowed — the session can run without seed; the
+// alternative (refusing to start) is worse UX for a recoverable error.
+func (s *Starter) postHubBootstrap(ctx context.Context) {
+	if err := Apply(ctx, s.plan, s.h, Deps{Cwd: s.cwd, RepoPath: s.repoPath}); err != nil {
+		slog.Warn("fossil seed failed (continuing without seed)", "err", err)
+	}
+}
+
+// publishSession writes the bound URLs into the session state JSON so
+// sub-leaves and `sesh down` can reach this session. The atomic claim
+// from ClaimSession (in NewStarter) gates this write: the underlying
+// file must still exist (i.e. the claim wasn't externally removed) or
+// Publish refuses, protecting against writing for a session no live
+// process owns.
+func (s *Starter) publishSession() error {
+	if err := s.sessHandle.Publish(SessionState{
 		PID:       os.Getpid(),
-		NATSURL:   h.NATSURL(),
-		LeafURL:   h.LeafURL(),
-		FossilURL: "http://" + h.HTTPAddr() + "/",
+		NATSURL:   s.h.NATSURL(),
+		LeafURL:   s.h.LeafURL(),
+		FossilURL: "http://" + s.h.HTTPAddr() + "/",
 	}); err != nil {
-		_ = h.Stop()
+		_ = s.h.Stop()
 		return fmt.Errorf("publish session URLs: %w", err)
 	}
+	return nil
+}
 
-	// SourceHub already ran Execute pre-hub (for project-code adoption).
-	// SourceGitWorktree and SourceNone run here because the seed-from-cwd
-	// branch commits through the just-bound session hub.
-	if plan.Source != SourceHub {
-		if err := Execute(plan, Deps{Ctx: ctx, Hub: h, Cwd: cwd, RepoPath: repoPath}); err != nil {
-			slog.Warn("fossil seed failed (continuing without seed)", "err", err)
-		}
-	}
-
+// serve runs the HTTP serve loop. Returns when ctx cancels (SIGINT /
+// SIGTERM from the operator) or the serve goroutine reports an error.
+// h.Stop is called in either path so the hub's NATS server, leaf, and
+// JetStream WAL all shut down cleanly.
+func (s *Starter) serve(ctx context.Context) error {
 	slog.Info("sesh up running",
-		"name", h.ServerName(),
-		"project", project,
-		"session", c.Session,
+		"name", s.h.ServerName(),
+		"project", s.project,
+		"session", s.cmd.Session,
 		"pid", os.Getpid(),
-		"repo", repoPath,
-		"hub_url", leafURL,
-		"nats", h.NATSURL(),
-		"http", "http://"+h.HTTPAddr(),
+		"repo", s.repoPath,
+		"hub_url", s.leafURL,
+		"nats", s.h.NATSURL(),
+		"http", "http://"+s.h.HTTPAddr(),
 	)
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- h.ServeHTTP(ctx) }()
+	go func() { serveErr <- s.h.ServeHTTP(ctx) }()
 
 	select {
 	case <-ctx.Done():
@@ -207,28 +314,28 @@ func (c *UpCmd) Run() error {
 		}
 	}
 
-	slog.Info("sesh up shutting down", "name", name)
-	return h.Stop()
+	slog.Info("sesh up shutting down", "name", s.name)
+	return s.h.Stop()
 }
 
 // ensureHubRunning returns the hub's leaf URL. Reuses any existing hub via
 // HubGuard's fast/slow path; on a spawner lease it fork-execs `sesh hub
 // serve` then polls for the daemon's published URL. The flock-serialized
 // spawn dance (so concurrent `sesh up` invocations never fork-exec
-// competing hubs) lives entirely inside HubGuard now.
+// competing hubs) lives entirely inside HubGuard.
 func ensureHubRunning(projectCode string) (string, error) {
 	stateDir, err := seshHome()
 	if err != nil {
 		return "", err
 	}
 
-	urls, lease, err := AcquireOrReuse(stateDir)
+	leafURL, lease, err := AcquireOrReuse(stateDir)
 	if err != nil {
 		return "", err
 	}
 	if !lease.IsSpawner() {
 		_ = lease.Release()
-		return urls.PrimaryURL, nil
+		return leafURL, nil
 	}
 	defer lease.Release()
 
@@ -243,9 +350,9 @@ func ensureHubRunning(projectCode string) (string, error) {
 	// second spawn.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		info, exists, err := ReadHubInfo(stateDir)
-		if err == nil && exists && info.PrimaryURL != "" && reachable(info.PrimaryURL) {
-			return info.PrimaryURL, nil
+		url, exists, err := ReadPrimaryURL(stateDir)
+		if err == nil && exists && url != "" && reachable(url) {
+			return url, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -260,11 +367,11 @@ func spawnHub(projectCode string) error {
 	if err != nil {
 		return fmt.Errorf("self executable: %w", err)
 	}
-	logPath, err := hubLogPath()
+	stateDir, err := seshHome()
 	if err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(hubLogPath(stateDir), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open hub log: %w", err)
 	}

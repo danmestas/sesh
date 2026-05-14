@@ -40,7 +40,9 @@ func writeURLFile(t *testing.T, stateDir, name, contents string) {
 }
 
 // Fast path: hub.url published and reachable. AcquireOrReuse returns the
-// existing URLs and a non-spawner lease without touching the flock.
+// daemon's leaf URL and a non-spawner lease without touching the flock.
+// nats/fossil URLs travel on the parallel HubInfo channel — verified
+// separately via ReadHubInfo so the channel boundary stays explicit.
 func TestAcquireOrReuse_FastPath(t *testing.T) {
 	stateDir := t.TempDir()
 	primary := startReachable(t)
@@ -50,7 +52,7 @@ func TestAcquireOrReuse_FastPath(t *testing.T) {
 	writeURLFile(t, stateDir, "hub.nats.url", natsURL)
 	writeURLFile(t, stateDir, "hub.fossil.url", fossilURL)
 
-	urls, lease, err := AcquireOrReuse(stateDir)
+	leafURL, lease, err := AcquireOrReuse(stateDir)
 	if err != nil {
 		t.Fatalf("AcquireOrReuse: %v", err)
 	}
@@ -59,14 +61,19 @@ func TestAcquireOrReuse_FastPath(t *testing.T) {
 	if lease.IsSpawner() {
 		t.Errorf("fast path returned spawner lease; want non-spawner")
 	}
-	if urls.PrimaryURL != primary {
-		t.Errorf("PrimaryURL = %q, want %q", urls.PrimaryURL, primary)
+	if leafURL != primary {
+		t.Errorf("leafURL = %q, want %q", leafURL, primary)
 	}
-	if urls.NATSURL != natsURL {
-		t.Errorf("NATSURL = %q, want %q", urls.NATSURL, natsURL)
+
+	info, err := ReadHubInfo(stateDir)
+	if err != nil {
+		t.Fatalf("ReadHubInfo: %v", err)
 	}
-	if urls.FossilURL != fossilURL {
-		t.Errorf("FossilURL = %q, want %q", urls.FossilURL, fossilURL)
+	if info.NATSURL != natsURL {
+		t.Errorf("NATSURL = %q, want %q", info.NATSURL, natsURL)
+	}
+	if info.FossilURL != fossilURL {
+		t.Errorf("FossilURL = %q, want %q", info.FossilURL, fossilURL)
 	}
 
 	// Sanity: hub.spawn.lock should not have been created on the fast path.
@@ -76,31 +83,31 @@ func TestAcquireOrReuse_FastPath(t *testing.T) {
 }
 
 // Slow path: no hub running. First caller returns a spawner lease with
-// empty URLs and holds the flock. A second concurrent caller blocks on
+// empty URL and holds the flock. A second concurrent caller blocks on
 // the flock until the spawner publishes hub.url and releases.
 func TestAcquireOrReuse_SlowPathBlocksUntilRelease(t *testing.T) {
 	stateDir := t.TempDir()
 
-	urls1, lease1, err := AcquireOrReuse(stateDir)
+	leafURL1, lease1, err := AcquireOrReuse(stateDir)
 	if err != nil {
 		t.Fatalf("first AcquireOrReuse: %v", err)
 	}
 	if !lease1.IsSpawner() {
 		t.Fatalf("first lease IsSpawner=false on empty stateDir; want true")
 	}
-	if urls1.PrimaryURL != "" {
-		t.Errorf("spawner got non-empty PrimaryURL=%q; want empty", urls1.PrimaryURL)
+	if leafURL1 != "" {
+		t.Errorf("spawner got non-empty leafURL=%q; want empty", leafURL1)
 	}
 
 	type acquireResult struct {
-		urls  HubInfo
+		url   string
 		lease *Lease
 		err   error
 	}
 	resCh := make(chan acquireResult, 1)
 	go func() {
 		u, l, err := AcquireOrReuse(stateDir)
-		resCh <- acquireResult{urls: u, lease: l, err: err}
+		resCh <- acquireResult{url: u, lease: l, err: err}
 	}()
 
 	select {
@@ -123,8 +130,8 @@ func TestAcquireOrReuse_SlowPathBlocksUntilRelease(t *testing.T) {
 		if r.lease.IsSpawner() {
 			t.Errorf("second lease IsSpawner=true after URL was published; want false")
 		}
-		if r.urls.PrimaryURL != primary {
-			t.Errorf("second PrimaryURL = %q, want %q", r.urls.PrimaryURL, primary)
+		if r.url != primary {
+			t.Errorf("second leafURL = %q, want %q", r.url, primary)
 		}
 		if err := r.lease.Release(); err != nil {
 			t.Errorf("release lease2: %v", err)
@@ -153,7 +160,7 @@ func TestAcquireOrReuse_ExactlyOneSpawnerAmongRacers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			urls, lease, err := AcquireOrReuse(stateDir)
+			leafURL, lease, err := AcquireOrReuse(stateDir)
 			if err != nil {
 				t.Errorf("AcquireOrReuse: %v", err)
 				return
@@ -166,8 +173,8 @@ func TestAcquireOrReuse_ExactlyOneSpawnerAmongRacers(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			} else {
 				nonSpawnerCount.Add(1)
-				if urls.PrimaryURL != primary {
-					t.Errorf("non-spawner PrimaryURL = %q, want %q", urls.PrimaryURL, primary)
+				if leafURL != primary {
+					t.Errorf("non-spawner leafURL = %q, want %q", leafURL, primary)
 				}
 			}
 			if err := lease.Release(); err != nil {

@@ -23,26 +23,18 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
-// SessionState is the project-local JSON at <cwd>/.sesh/sessions/<label>.json.
-//
-// Written in two phases by the Session module (see session.go): ClaimSession
-// creates the file O_EXCL with PID only (the atomic ownership claim), then
-// Session.Publish overwrites with the URLs once the hub has bound its ports.
-// Sub-leaves and NATS clients read NATSURL/LeafURL to attach without
-// grepping logs.
-type SessionState struct {
-	PID      int    `json:"pid"`
-	NATSURL  string `json:"nats_url,omitempty"`  // for NATS clients under this session
-	LeafURL  string `json:"leaf_url,omitempty"`  // for EdgeSync leaves to solicit upstream
-	FossilURL string `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
+// projectSeshDir returns <cwd>/.sesh — the project-local hidden state
+// dir, mirror of seshHome for project-scoped state.
+func projectSeshDir(cwd string) string {
+	return filepath.Join(cwd, ".sesh")
 }
 
 // projectStateDir returns <cwd>/.sesh/sessions, creating it if needed.
@@ -51,7 +43,7 @@ func projectStateDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(cwd, ".sesh", "sessions")
+	dir := filepath.Join(projectSeshDir(cwd), "sessions")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
 	}
@@ -83,15 +75,6 @@ func writeAtomic(path, content string) error {
 	return nil
 }
 
-// alive returns true if a process with pid is reachable by signal 0.
-func alive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
-}
-
 // newSessionID returns a time-prefixed random id. Sortable by start time.
 // Used internally if a future flag wants auto-generated session labels;
 // today --session is required by the CLI.
@@ -114,35 +97,55 @@ func seshHome() (string, error) {
 	return dir, nil
 }
 
-// hubRepoPath returns ~/.sesh/hub.repo.
-func hubRepoPath() (string, error) {
-	dir, err := seshHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "hub.repo"), nil
+// Hub-state path helpers. All take the hub's stateDir (typically the
+// result of seshHome()) and return a fully-qualified path. Centralizing
+// every hub-state filename here makes "what files does sesh own under
+// ~/.sesh/" answerable by reading one file; the alternative — inline
+// filepath.Join calls — left the filenames scattered across hubinfo,
+// hubguard, hub_serve, and up.
+
+// hubRepoPath returns <stateDir>/hub.repo — the hub's libfossil repo file.
+func hubRepoPath(stateDir string) string {
+	return filepath.Join(stateDir, "hub.repo")
 }
 
-// hubSpawnLockPath returns ~/.sesh/hub.spawn.lock — the flock target that
-// serializes concurrent `sesh up` invocations so only one ever fork-execs
-// a hub. The file content is irrelevant; flock semantics operate on the
-// inode.
-func hubSpawnLockPath() (string, error) {
-	dir, err := seshHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "hub.spawn.lock"), nil
+// hubURLPath returns <stateDir>/hub.url — the daemon's leafnode URL,
+// owned O_EXCL by HubGuard's daemon lease.
+func hubURLPath(stateDir string) string {
+	return filepath.Join(stateDir, "hub.url")
 }
 
-// hubLogPath returns ~/.sesh/hub.log — where the auto-spawned hub's stderr
-// goes for debugging.
-func hubLogPath() (string, error) {
-	dir, err := seshHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "hub.log"), nil
+// hubNATSURLPath returns <stateDir>/hub.nats.url — the hub's NATS client
+// URL, written via WriteHubInfo's temp-then-rename.
+func hubNATSURLPath(stateDir string) string {
+	return filepath.Join(stateDir, "hub.nats.url")
+}
+
+// hubFossilURLPath returns <stateDir>/hub.fossil.url — the hub's Fossil
+// HTTP xfer endpoint, written via WriteHubInfo's temp-then-rename.
+func hubFossilURLPath(stateDir string) string {
+	return filepath.Join(stateDir, "hub.fossil.url")
+}
+
+// hubSpawnLockPath returns <stateDir>/hub.spawn.lock — the flock target
+// that serializes concurrent `sesh up` invocations so only one ever
+// fork-execs a hub. The file content is irrelevant; flock semantics
+// operate on the inode.
+func hubSpawnLockPath(stateDir string) string {
+	return filepath.Join(stateDir, "hub.spawn.lock")
+}
+
+// hubLogPath returns <stateDir>/hub.log — where the auto-spawned hub's
+// stderr goes for debugging.
+func hubLogPath(stateDir string) string {
+	return filepath.Join(stateDir, "hub.log")
+}
+
+// hubStoreDir returns <stateDir>/messaging — the hub daemon's JetStream
+// store directory. Session JetStream stores live elsewhere
+// (see scope.storeDirFor); this one is the shared user-wide hub store.
+func hubStoreDir(stateDir string) string {
+	return filepath.Join(stateDir, "messaging")
 }
 
 // deriveProjectCode produces a deterministic 40-char lowercase hex
@@ -170,7 +173,7 @@ func deriveProjectCodeFromHost(host, projectName string) string {
 // projectCodePath returns <cwd>/.sesh/project-code — the pinned
 // project-code file written on first sesh up.
 func projectCodePath(cwd string) string {
-	return filepath.Join(cwd, ".sesh", "project-code")
+	return filepath.Join(projectSeshDir(cwd), "project-code")
 }
 
 // loadOrCreateProjectCode returns the project-code for cwd, reading
@@ -216,6 +219,33 @@ func loadOrCreateProjectCode(cwd, projectName string) (string, error) {
 		return "", fmt.Errorf("seed project-code %s: %w", path, err)
 	}
 	return code, nil
+}
+
+// ResolveProjectCode reconciles the local pin at <cwd>/.sesh/project-code
+// against an authoritative upstream value (typically the hub's
+// project-code from ReadHubProjectCode). If hubCode is empty (no hub
+// content yet) or already agrees with localCode, returns localCode
+// untouched. Otherwise the hub wins: ResolveProjectCode rewrites the
+// pin to match hubCode and returns hubCode so EdgeSync's
+// SeedFromUpstream sees agreement on both sides of the clone.
+//
+// Idempotent: a second call with the same args is a no-op. A missing
+// or unreadable local file is treated the same as "current value is
+// empty," which triggers a write to seed the pin.
+//
+// This is the pre-hub side of project-code resolution. The hub is
+// shared across all sessions in the project and is the natural source
+// of truth (issue #26 / #34); local pins follow.
+func ResolveProjectCode(cwd, localCode, hubCode string) (string, error) {
+	if hubCode == "" || hubCode == localCode {
+		return localCode, nil
+	}
+	slog.Info("adopting hub project-code",
+		"hub", hubCode, "was_pinned_to", localCode, "path", projectCodePath(cwd))
+	if err := writeAtomic(projectCodePath(cwd), hubCode+"\n"); err != nil {
+		return "", fmt.Errorf("adopt hub project-code: %w", err)
+	}
+	return hubCode, nil
 }
 
 // isValidProjectCode checks that s is exactly 40 lowercase hex chars,

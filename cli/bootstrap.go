@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 
 	"github.com/danmestas/EdgeSync/hub"
 )
@@ -20,17 +18,18 @@ import (
 //   - the per-session repo file pre-existed → no bootstrap, retain
 //     whatever commits already accumulated.
 //
-// MakePlan is the pure decision tree, Execute is the effectful runner.
+// MakePlan is the pure decision tree; Apply is the effectful runner.
 // Splitting them keeps the fork unit-testable without spinning up hubs.
-// When the hub's on-disk project-code disagrees with the local pin
-// (issue #26 / #34), Execute adopts the hub's value into
-// <cwd>/.sesh/project-code before EdgeSync's seed-from-upstream runs —
-// the hub is shared across all sessions in the project and is the
-// natural source of truth.
 //
-// ProbeHub composes ReadHubInfo + ProjectCode (cli/hubinfo.go) — the
-// atomic file I/O and libfossil read both live behind that module so
-// adding a new published URL is a one-line struct change.
+// Project-code reconciliation (adopt the hub's value into the local
+// pin when they drift; issue #26 / #34) is a separate concern handled
+// by ResolveProjectCode in paths.go. It runs BEFORE the hub binds; by
+// the time Apply is called the hub already exists and the project-code
+// is settled, so Apply only handles the in-session content bootstrap.
+//
+// ProbeHub composes ReadHubInfo + ReadHubProjectCode (cli/hubinfo.go)
+// — the atomic file I/O and libfossil read both live behind that module
+// so adding a new published URL is a one-line struct change.
 
 // Source is the chosen bootstrap source for a fresh repo.
 type Source int
@@ -97,113 +96,95 @@ func MakePlan(w World) (Plan, error) {
 	return Plan{Source: SourceGitWorktree, SeedMode: w.SeedMode}, nil
 }
 
-// Deps carries the I/O Execute needs. Ctx scopes any commit operations
-// to the session's lifetime; Hub is the already-bound session hub
-// (NewHub has returned, only required by the SourceGitWorktree branch);
-// Cwd is the working directory the seed snapshot is taken from.
-// RepoPath is informational, surfaced in slog so the operator can
-// locate the affected file. HubProjectCode is the project-code probed
-// from the hub's on-disk repo and is consulted by the SourceHub branch
-// to adopt-on-drift into <cwd>/.sesh/project-code; empty means "no hub
-// content / nothing to adopt".
+// Deps carries the I/O Apply needs. Cwd is the working directory the
+// seed snapshot is taken from. RepoPath is informational, surfaced in
+// slog so the operator can locate the affected file.
 type Deps struct {
-	Ctx            context.Context
-	Hub            *hub.Hub
-	Cwd            string
-	RepoPath       string
-	HubProjectCode string
+	Cwd      string
+	RepoPath string
 }
 
-// Execute runs the action MakePlan chose.
+// Apply runs the post-hub action MakePlan chose. The hub is a required
+// parameter — Apply only runs after NewHub returns, when the session
+// has a bound libfossil writer to commit through (SourceGitWorktree)
+// and the SourceHub clone has already been performed by hub.NewHub's
+// SeedFromUpstream path.
 //
-// For SourceHub, if the hub published a project-code that differs from
-// the local pin at <cwd>/.sesh/project-code, Execute adopts the hub's
-// value before EdgeSync's seed-from-upstream runs — the hub is shared
-// across all sessions in the project and is the natural source of
-// truth. This means Execute must run BEFORE hub.NewHub for SourceHub.
-// The actual clone happens inside hub.NewHub's SeedFromUpstream; that
-// step is keyed off the now-adopted project-code so the upstream
-// project-code agrees with what the session's Fossil repo expects.
+// Source dispatch:
 //
-// For SourceGitWorktree, the session's hub must already be bound
-// (d.Hub != nil) because the seed commits through it.
-//
-// Adoption is idempotent: if the file already matches the hub's code,
-// Execute is a no-op.
-func Execute(p Plan, d Deps) error {
+//   - SourceNone: the session's repo file pre-existed; log and return.
+//   - SourceHub: hub.NewHub's clone-from-upstream already ran; log and
+//     return. Project-code reconciliation (adopting the hub's value
+//     when it differed from the local pin) happened earlier in
+//     ResolveProjectCode, before this Apply call.
+//   - SourceGitWorktree: commit the cwd worktree as the initial Fossil
+//     check-in via h.Commit.
+func Apply(ctx context.Context, p Plan, h *hub.Hub, d Deps) error {
 	switch p.Source {
 	case SourceNone:
 		slog.Info("fossil repo pre-existed; not re-seeding", "path", d.RepoPath)
 		return nil
 	case SourceHub:
-		if err := adoptHubProjectCode(d.Cwd, d.HubProjectCode); err != nil {
-			return err
-		}
 		slog.Info("fossil repo cloned from hub upstream",
 			"path", d.RepoPath, "upstream", p.HubFossilURL)
 		return nil
 	case SourceGitWorktree:
-		return seedFromGitWorktree(d.Ctx, d.Hub, d.Cwd, p.SeedMode)
+		return seedFromGitWorktree(ctx, h, d.Cwd, p.SeedMode)
 	}
 	return fmt.Errorf("bootstrap: unknown source %d", p.Source)
 }
 
-// adoptHubProjectCode updates <cwd>/.sesh/project-code to hubCode iff
-// the file currently disagrees with it. Empty hubCode is a no-op — the
-// hub probe surfaces "" when the hub has no content yet, and there's
-// nothing to adopt from. A missing-or-unreadable local file is treated
-// as "current value is empty," which triggers a write to seed the pin.
-func adoptHubProjectCode(cwd, hubCode string) error {
-	if hubCode == "" {
-		return nil
-	}
-	path := projectCodePath(cwd)
-	currentBytes, _ := os.ReadFile(path)
-	current := strings.TrimSpace(string(currentBytes))
-	if current == hubCode {
-		return nil
-	}
-	slog.Info("adopting hub project-code",
-		"hub", hubCode, "was_pinned_to", current, "path", path)
-	if err := writeAtomic(path, hubCode+"\n"); err != nil {
-		return fmt.Errorf("adopt hub project-code: %w", err)
-	}
-	return nil
+// HubProbe is the result of ProbeHub. Present=true means the hub has
+// both a reachable Fossil HTTP xfer URL AND at least one check-in (the
+// project-code is settled). Both are needed for clone-from-hub to
+// succeed; Present=false short-circuits to seed-from-cwd in MakePlan.
+//
+// FossilURL and ProjectCode are populated iff Present=true.
+type HubProbe struct {
+	Present     bool
+	FossilURL   string
+	ProjectCode string
 }
 
 // ProbeHub reads the hub's published Fossil URL and on-disk project-code
 // so MakePlan can decide between hub-clone and seed-from-cwd. Returns
-// ("","",nil) for any "hub absent or empty" case — the caller treats
-// that as "no hub content" and proceeds to seed-from-cwd.
+// HubProbe{Present: false} on the expected "no usable hub content yet"
+// case (no hub running, hub mid-boot, or hub bound but never committed) —
+// the caller proceeds to seed-from-cwd.
+//
+// err != nil is reserved for real I/O failures: a present-but-unreadable
+// hub.fossil.url file, a SQL error reading the libfossil config, etc.
+// The caller MUST surface these to the operator rather than silently
+// degrade to seed-from-cwd. A corrupt hub.repo masquerading as "no hub
+// content" would overwrite state the operator wanted preserved.
 //
 // Composition: ReadHubInfo surfaces the atomically-published URLs;
-// ProjectCode reads the hub's libfossil config. Either coming back
-// empty short-circuits to ("","",nil) because the caller needs BOTH a
-// reachable Fossil URL AND a settled project-code to clone-from-hub
-// safely.
-//
-// Errors are reserved for unexpected I/O failures (a present-but-
-// unreadable URL file, a SQL error). The caller logs and treats those
-// as "no hub content" — the safer default, since any duplicate seed
-// gets reconciled by autosync.
-func ProbeHub() (hubURL, hubProjectCode string, err error) {
+// ReadHubProjectCode reads the hub's libfossil config. Either coming
+// back empty short-circuits to Present=false because the caller needs
+// BOTH a reachable Fossil URL AND a settled project-code to
+// clone-from-hub safely.
+func ProbeHub() (HubProbe, error) {
 	stateDir, err := seshHome()
 	if err != nil {
-		return "", "", err
+		return HubProbe{}, err
 	}
-	info, _, err := ReadHubInfo(stateDir)
+	info, err := ReadHubInfo(stateDir)
 	if err != nil {
-		return "", "", fmt.Errorf("read hub info: %w", err)
+		return HubProbe{}, fmt.Errorf("read hub info: %w", err)
 	}
 	if info.FossilURL == "" {
-		return "", "", nil
+		return HubProbe{}, nil
 	}
-	code, err := ProjectCode(stateDir)
+	code, err := ReadHubProjectCode(stateDir)
 	if err != nil {
-		return "", "", err
+		return HubProbe{}, fmt.Errorf("read hub project-code: %w", err)
 	}
 	if code == "" {
-		return "", "", nil
+		return HubProbe{}, nil
 	}
-	return info.FossilURL, code, nil
+	return HubProbe{
+		Present:     true,
+		FossilURL:   info.FossilURL,
+		ProjectCode: code,
+	}, nil
 }

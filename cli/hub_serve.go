@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,14 +37,11 @@ type HubServeCmd struct {
 }
 
 func (c *HubServeCmd) Run() error {
-	repoPath, err := hubRepoPath()
-	if err != nil {
-		return err
-	}
 	seshDir, err := seshHome()
 	if err != nil {
 		return err
 	}
+	repoPath := hubRepoPath(seshDir)
 
 	// HubGuard owns the O_EXCL claim on hub.url plus the stale-takeover
 	// dance; failure here means another hub is already running or
@@ -61,7 +57,7 @@ func (c *HubServeCmd) Run() error {
 	h, err := hub.NewHub(ctx, hub.Config{
 		RepoPath:       repoPath,
 		ServerName:     "sesh-hub",
-		NATSStoreDir:   filepath.Join(seshDir, "messaging"),
+		NATSStoreDir:   hubStoreDir(seshDir),
 		FossilHTTPPort: c.HTTPPort,
 		NATSClientPort: c.NATSClientPort,
 		NATSLeafPort:   c.NATSLeafPort,
@@ -111,8 +107,8 @@ func (c *HubServeCmd) Run() error {
 	// is the hub's JetStream entry point (sessions run their own domains;
 	// the hub's is the shared one). Fossil is the HTTP xfer endpoint
 	// peer sessions read at `sesh up` to decide clone-from-hub vs.
-	// seed-from-cwd. hub.url is owned by urlLease (above); WriteHubInfo
-	// skips PrimaryURL even if populated.
+	// seed-from-cwd. hub.url is on the parallel ownership channel —
+	// urlLease.Publish above — and is not part of WriteHubInfo's surface.
 	if err := WriteHubInfo(seshDir, HubInfo{
 		NATSURL:   h.NATSURL(),
 		FossilURL: "http://" + h.HTTPAddr() + "/",
@@ -152,6 +148,18 @@ func (c *HubServeCmd) Run() error {
 // connected at least once, exits the moment the count returns to zero. If
 // no leaf connects within startupGrace, exits anyway (the spawning sesh up
 // died before connecting, or this hub was started in error).
+//
+// Deliberately has NO idle-after-first-leaf timeout: once a leaf has
+// connected, the hub stays alive across arbitrarily long
+// connect/disconnect cycles as long as at least one leaf is currently
+// present. A leaf that flap-cycles (connects, disconnects, reconnects
+// forever) keeps the hub running indefinitely. This is the intended
+// behavior because sesh sessions are long-lived: an operator suspending
+// their laptop and resuming hours later should find the hub still
+// running so the session reattaches cleanly. The cost (a flapping leaf
+// pins the hub) is preferred over the alternative (an idle timeout that
+// races a slow editor restart and kills the hub mid-flap, forcing every
+// session to fork-exec a fresh daemon).
 func autoShutdownLoop(ctx context.Context, cancel context.CancelFunc, h *hub.Hub, startupGrace time.Duration) {
 	var hadLeaf atomic.Bool
 	startupDeadline := time.Now().Add(startupGrace)
