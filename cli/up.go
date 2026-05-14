@@ -95,12 +95,14 @@ func (c *UpCmd) Run() error {
 		freshRepo = true
 	}
 
-	// Bootstrap planning happens before the hub bring-up so a
-	// project-code drift between the local pin and the hub's on-disk
-	// repo (issue #26) aborts with an actionable message rather than
-	// fatal-ing inside EdgeSync's clone path. Probe failures degrade
-	// to "no hub content" — the safer default, since autosync
-	// reconciles any duplicate seed.
+	// Bootstrap planning happens before the hub bring-up. Probing the
+	// hub for content tells MakePlan whether to clone-from-hub or seed
+	// from cwd. When the hub published a project-code that disagrees
+	// with the local pin (issue #26 / #34), the hub wins: a SourceHub
+	// plan flows into Execute below, which adopts the hub's value into
+	// <cwd>/.sesh/project-code before hub.NewHub fires EdgeSync's
+	// seed-from-upstream. Probe failures degrade to "no hub content" —
+	// the safer default, since autosync reconciles any duplicate seed.
 	hubFossilURL, hubProjectCode, probeErr := ProbeHub()
 	if probeErr != nil {
 		slog.Warn("hub-content probe failed; falling back to seed-from-cwd", "err", probeErr)
@@ -116,8 +118,24 @@ func (c *UpCmd) Run() error {
 	if err != nil {
 		return fmt.Errorf("bootstrap plan: %w", err)
 	}
-	if plan.Conflict != nil {
-		return errors.New(plan.Conflict.Message)
+
+	// SourceHub may need to adopt the hub's project-code into
+	// <cwd>/.sesh/project-code before hub.NewHub's seed-from-upstream
+	// path runs — EdgeSync's clone refuses to mix repos with disagreeing
+	// project-codes. Adoption is idempotent; the no-drift case is a
+	// no-op. SourceGitWorktree's Execute branch needs the bound hub and
+	// runs after hub.NewHub instead (see below).
+	if plan.Source == SourceHub {
+		if err := Execute(plan, Deps{
+			Cwd:            cwd,
+			RepoPath:       repoPath,
+			HubProjectCode: hubProjectCode,
+		}); err != nil {
+			return fmt.Errorf("bootstrap: %w", err)
+		}
+		if hubProjectCode != "" {
+			projectCode = hubProjectCode
+		}
 	}
 
 	leafURL, err := ensureHubRunning(projectCode)
@@ -153,8 +171,13 @@ func (c *UpCmd) Run() error {
 		return fmt.Errorf("publish session URLs: %w", err)
 	}
 
-	if err := Execute(plan, Deps{Ctx: ctx, Hub: h, Cwd: cwd, RepoPath: repoPath}); err != nil {
-		slog.Warn("fossil seed failed (continuing without seed)", "err", err)
+	// SourceHub already ran Execute pre-hub (for project-code adoption).
+	// SourceGitWorktree and SourceNone run here because the seed-from-cwd
+	// branch commits through the just-bound session hub.
+	if plan.Source != SourceHub {
+		if err := Execute(plan, Deps{Ctx: ctx, Hub: h, Cwd: cwd, RepoPath: repoPath}); err != nil {
+			slog.Warn("fossil seed failed (continuing without seed)", "err", err)
+		}
 	}
 
 	slog.Info("sesh up running",
