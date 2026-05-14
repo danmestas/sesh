@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -185,52 +186,37 @@ func (c *UpCmd) Run() error {
 	return h.Stop()
 }
 
-// ensureHubRunning returns the hub's leaf URL, spawning the hub via
-// fork-exec of `sesh hub serve` if no hub is currently running.
-//
-// Concurrent `sesh up` invocations serialize on hub.spawn.lock (flock) so
-// only one ever fork-execs a hub. The losers block on the lock, wake up,
-// see the URL is reachable, and return without spawning. Without this,
-// each racer would fork-exec its own hub, contend on the shared fossil +
-// JetStream storage at ~/.sesh, and no hub would stabilize.
+// ensureHubRunning returns the hub's leaf URL. Reuses any existing hub via
+// HubGuard's fast/slow path; on a spawner lease it fork-execs `sesh hub
+// serve` then polls for the daemon's published URL. The flock-serialized
+// spawn dance (so concurrent `sesh up` invocations never fork-exec
+// competing hubs) lives entirely inside HubGuard now.
 func ensureHubRunning(projectCode string) (string, error) {
-	urlPath, err := hubURLPath()
+	stateDir, err := seshHome()
 	if err != nil {
 		return "", err
 	}
 
-	// Fast path: existing URL points at a running hub. No lock needed.
-	if url, err := readHubURL(urlPath); err == nil && reachable(url) {
-		return url, nil
-	}
-
-	// Slow path: serialize the spawn.
-	lockPath, err := hubSpawnLockPath()
+	urls, lease, err := AcquireOrReuse(stateDir)
 	if err != nil {
 		return "", err
 	}
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return "", fmt.Errorf("open hub spawn lock: %w", err)
+	if !lease.IsSpawner() {
+		_ = lease.Release()
+		return urls.Primary, nil
 	}
-	defer lockFile.Close() // releases the flock
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return "", fmt.Errorf("flock hub spawn lock: %w", err)
-	}
-
-	// Re-check under the lock: another caller may have spawned while we
-	// waited.
-	if url, err := readHubURL(urlPath); err == nil && reachable(url) {
-		return url, nil
-	}
-	_ = os.Remove(urlPath)
+	defer lease.Release()
 
 	if err := spawnHub(projectCode); err != nil {
 		return "", err
 	}
 
 	// Poll for the spawned hub to publish its URL. 15s covers slow
-	// JetStream replay on a warm store.
+	// JetStream replay on a warm store. Lease (and the flock it holds) is
+	// kept alive until we return — racing AcquireOrReuse callers block
+	// here, so they wake up to a published URL rather than racing into a
+	// second spawn.
+	urlPath := filepath.Join(stateDir, "hub.url")
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if url, err := readHubURL(urlPath); err == nil && reachable(url) {

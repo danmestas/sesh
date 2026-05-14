@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -39,10 +38,6 @@ type HubServeCmd struct {
 }
 
 func (c *HubServeCmd) Run() error {
-	urlPath, err := hubURLPath()
-	if err != nil {
-		return err
-	}
 	repoPath, err := hubRepoPath()
 	if err != nil {
 		return err
@@ -52,31 +47,12 @@ func (c *HubServeCmd) Run() error {
 		return err
 	}
 
-	// O_EXCL on hub.url IS the race resolution. `sesh up` callers already
-	// serialize via hub.spawn.lock and remove any stale URL before spawn,
-	// so reaching this branch means another hub is running OR a manual
-	// `sesh hub serve` is racing. Distinguish three cases:
-	//   - URL present and reachable: another hub is running, refuse.
-	//   - URL present but empty: another hub is mid-boot, refuse.
-	//   - URL present and unreachable: truly stale, take over.
-	urlFile, err := os.OpenFile(urlPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	// HubGuard owns the O_EXCL claim on hub.url plus the stale-takeover
+	// dance; failure here means another hub is already running or
+	// mid-boot.
+	urlLease, err := RegisterDaemon(seshDir)
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			existing, _ := os.ReadFile(urlPath)
-			trimmed := stringTrim(existing)
-			switch {
-			case trimmed == "":
-				return errors.New("another sesh hub serve is mid-boot (hub.url present but unwritten)")
-			case reachable(trimmed):
-				return fmt.Errorf("hub already running at %s", trimmed)
-			}
-			// Truly stale — take over.
-			_ = os.Remove(urlPath)
-			urlFile, err = os.OpenFile(urlPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		}
-		if err != nil {
-			return fmt.Errorf("acquire hub.url: %w", err)
-		}
+		return err
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -96,20 +72,17 @@ func (c *HubServeCmd) Run() error {
 		ProjectCode: os.Getenv("SESH_PROJECT_CODE"),
 	})
 	if err != nil {
-		urlFile.Close()
-		_ = os.Remove(urlPath)
+		_ = urlLease.Release()
 		return fmt.Errorf("hub: %w", err)
 	}
 
 	leafURL := h.LeafURL()
-	if _, err := fmt.Fprintln(urlFile, leafURL); err != nil {
-		urlFile.Close()
-		_ = os.Remove(urlPath)
+	if err := urlLease.Publish(leafURL); err != nil {
+		_ = urlLease.Release()
 		_ = h.Stop()
-		return fmt.Errorf("write hub.url: %w", err)
+		return err
 	}
-	urlFile.Close()
-	defer os.Remove(urlPath)
+	defer urlLease.Release()
 
 	// Publish the hub's NATS client URL so clients doing hub/project/
 	// workflow-scoped KV work can connect to the hub's JetStream domain.
