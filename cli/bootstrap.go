@@ -28,9 +28,9 @@ import (
 // the hub is shared across all sessions in the project and is the
 // natural source of truth.
 //
-// ProbeHub composes ReadHubInfo + ProjectCode (cli/hubinfo.go) — the
-// atomic file I/O and libfossil read both live behind that module so
-// adding a new published URL is a one-line struct change.
+// ProbeHub composes ReadHubInfo + ReadHubProjectCode (cli/hubinfo.go)
+// — the atomic file I/O and libfossil read both live behind that module
+// so adding a new published URL is a one-line struct change.
 
 // Source is the chosen bootstrap source for a fresh repo.
 type Source int
@@ -171,39 +171,57 @@ func adoptHubProjectCode(cwd, hubCode string) error {
 	return nil
 }
 
+// HubProbe is the result of ProbeHub. Present=true means the hub has
+// both a reachable Fossil HTTP xfer URL AND at least one check-in (the
+// project-code is settled). Both are needed for clone-from-hub to
+// succeed; Present=false short-circuits to seed-from-cwd in MakePlan.
+//
+// FossilURL and ProjectCode are populated iff Present=true.
+type HubProbe struct {
+	Present     bool
+	FossilURL   string
+	ProjectCode string
+}
+
 // ProbeHub reads the hub's published Fossil URL and on-disk project-code
 // so MakePlan can decide between hub-clone and seed-from-cwd. Returns
-// ("","",nil) for any "hub absent or empty" case — the caller treats
-// that as "no hub content" and proceeds to seed-from-cwd.
+// HubProbe{Present: false} on the expected "no usable hub content yet"
+// case (no hub running, hub mid-boot, or hub bound but never committed) —
+// the caller proceeds to seed-from-cwd.
+//
+// err != nil is reserved for real I/O failures: a present-but-unreadable
+// hub.fossil.url file, a SQL error reading the libfossil config, etc.
+// The caller MUST surface these to the operator rather than silently
+// degrade to seed-from-cwd. A corrupt hub.repo masquerading as "no hub
+// content" would overwrite state the operator wanted preserved.
 //
 // Composition: ReadHubInfo surfaces the atomically-published URLs;
-// ProjectCode reads the hub's libfossil config. Either coming back
-// empty short-circuits to ("","",nil) because the caller needs BOTH a
-// reachable Fossil URL AND a settled project-code to clone-from-hub
-// safely.
-//
-// Errors are reserved for unexpected I/O failures (a present-but-
-// unreadable URL file, a SQL error). The caller logs and treats those
-// as "no hub content" — the safer default, since any duplicate seed
-// gets reconciled by autosync.
-func ProbeHub() (hubURL, hubProjectCode string, err error) {
+// ReadHubProjectCode reads the hub's libfossil config. Either coming
+// back empty short-circuits to Present=false because the caller needs
+// BOTH a reachable Fossil URL AND a settled project-code to
+// clone-from-hub safely.
+func ProbeHub() (HubProbe, error) {
 	stateDir, err := seshHome()
 	if err != nil {
-		return "", "", err
+		return HubProbe{}, err
 	}
-	info, _, err := ReadHubInfo(stateDir)
+	info, err := ReadHubInfo(stateDir)
 	if err != nil {
-		return "", "", fmt.Errorf("read hub info: %w", err)
+		return HubProbe{}, fmt.Errorf("read hub info: %w", err)
 	}
 	if info.FossilURL == "" {
-		return "", "", nil
+		return HubProbe{}, nil
 	}
-	code, err := ProjectCode(stateDir)
+	code, err := ReadHubProjectCode(stateDir)
 	if err != nil {
-		return "", "", err
+		return HubProbe{}, fmt.Errorf("read hub project-code: %w", err)
 	}
 	if code == "" {
-		return "", "", nil
+		return HubProbe{}, nil
 	}
-	return info.FossilURL, code, nil
+	return HubProbe{
+		Present:     true,
+		FossilURL:   info.FossilURL,
+		ProjectCode: code,
+	}, nil
 }

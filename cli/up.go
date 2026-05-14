@@ -106,17 +106,20 @@ func (c *UpCmd) Run() error {
 	// with the local pin (issue #26 / #34), the hub wins: a SourceHub
 	// plan flows into Execute below, which adopts the hub's value into
 	// <cwd>/.sesh/project-code before hub.NewHub fires EdgeSync's
-	// seed-from-upstream. Probe failures degrade to "no hub content" —
-	// the safer default, since autosync reconciles any duplicate seed.
-	hubFossilURL, hubProjectCode, probeErr := ProbeHub()
-	if probeErr != nil {
-		slog.Warn("hub-content probe failed; falling back to seed-from-cwd", "err", probeErr)
-		hubFossilURL, hubProjectCode = "", ""
+	// seed-from-upstream.
+	//
+	// Probe errors surface to the operator rather than silently degrade
+	// — a corrupt hub.repo reported as "no content" would overwrite
+	// state. probe.Present=false on a clean "no hub yet" case is
+	// expected and flows straight into seed-from-cwd via MakePlan.
+	probe, err := ProbeHub()
+	if err != nil {
+		return fmt.Errorf("probe hub: %w", err)
 	}
 	plan, err := MakePlan(World{
 		LocalProjectCode: projectCode,
-		HubFossilURL:     hubFossilURL,
-		HubProjectCode:   hubProjectCode,
+		HubFossilURL:     probe.FossilURL,
+		HubProjectCode:   probe.ProjectCode,
 		FreshRepo:        freshRepo,
 		SeedMode:         SeedMode(c.Seed),
 	})
@@ -134,12 +137,12 @@ func (c *UpCmd) Run() error {
 		if err := Execute(plan, Deps{
 			Cwd:            cwd,
 			RepoPath:       repoPath,
-			HubProjectCode: hubProjectCode,
+			HubProjectCode: probe.ProjectCode,
 		}); err != nil {
 			return fmt.Errorf("bootstrap: %w", err)
 		}
-		if hubProjectCode != "" {
-			projectCode = hubProjectCode
+		if probe.ProjectCode != "" {
+			projectCode = probe.ProjectCode
 		}
 	}
 
@@ -222,13 +225,13 @@ func ensureHubRunning(projectCode string) (string, error) {
 		return "", err
 	}
 
-	urls, lease, err := AcquireOrReuse(stateDir)
+	leafURL, lease, err := AcquireOrReuse(stateDir)
 	if err != nil {
 		return "", err
 	}
 	if !lease.IsSpawner() {
 		_ = lease.Release()
-		return urls.PrimaryURL, nil
+		return leafURL, nil
 	}
 	defer lease.Release()
 
@@ -243,9 +246,9 @@ func ensureHubRunning(projectCode string) (string, error) {
 	// second spawn.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		info, exists, err := ReadHubInfo(stateDir)
-		if err == nil && exists && info.PrimaryURL != "" && reachable(info.PrimaryURL) {
-			return info.PrimaryURL, nil
+		url, exists, err := ReadPrimaryURL(stateDir)
+		if err == nil && exists && url != "" && reachable(url) {
+			return url, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

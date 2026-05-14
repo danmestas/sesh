@@ -74,44 +74,50 @@ func (l *Lease) Publish(leafURL string) error {
 }
 
 // AcquireOrReuse implements the fast/slow path for the
-// exactly-one-hub-per-user bring-up dance.
+// exactly-one-hub-per-user bring-up dance. Returns the daemon's leaf URL
+// when a hub is already running (so callers can solicit into it) or "" with
+// a spawner lease when the caller must spawn the daemon themselves.
 //
-// Fast path: read hub.url; if its host:port is reachable, return its URLs
+// Fast path: read hub.url; if its host:port is reachable, return that URL
 // and a non-spawner lease without touching the flock.
 //
 // Slow path: flock hub.spawn.lock, re-probe. If a hub became reachable
-// during the wait, release the flock and return its URLs with a
-// non-spawner lease. Otherwise remove any stale hub.url, return empty
-// URLs and a spawner lease (the flock is held inside the lease). The
-// caller is responsible for spawning the hub daemon, polling for the
-// daemon's published URL, and calling lease.Release() once the URL is
-// observable — that's what unblocks concurrent racers waiting on the flock.
+// during the wait, release the flock and return its URL with a
+// non-spawner lease. Otherwise remove any stale hub.url, return "" and a
+// spawner lease (the flock is held inside the lease). The caller is
+// responsible for spawning the hub daemon, polling for the daemon's
+// published URL, and calling lease.Release() once the URL is observable —
+// that's what unblocks concurrent racers waiting on the flock.
+//
+// Only hub.url participates in the bring-up dance; hub.nats.url and
+// hub.fossil.url are surfaced separately via ReadHubInfo when callers
+// need them.
 //
 // The bind-vs-accept race from #15 is closed daemon-side: hub_serve.go
 // gates URL publication on EdgeSync's hub.Ready() channel, so consumers
 // only see hub.url / hub.fossil.url after the HTTP listener is accepting.
-func AcquireOrReuse(stateDir string) (HubInfo, *Lease, error) {
-	if info, ok := readURLsIfReachable(stateDir); ok {
-		return info, &Lease{kind: leaseNone}, nil
+func AcquireOrReuse(stateDir string) (leafURL string, lease *Lease, err error) {
+	if url, ok := readPrimaryIfReachable(stateDir); ok {
+		return url, &Lease{kind: leaseNone}, nil
 	}
 
 	lockPath := filepath.Join(stateDir, "hub.spawn.lock")
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return HubInfo{}, nil, fmt.Errorf("open hub spawn lock: %w", err)
+		return "", nil, fmt.Errorf("open hub spawn lock: %w", err)
 	}
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		_ = lockFile.Close()
-		return HubInfo{}, nil, fmt.Errorf("flock hub spawn lock: %w", err)
+		return "", nil, fmt.Errorf("flock hub spawn lock: %w", err)
 	}
 
-	if info, ok := readURLsIfReachable(stateDir); ok {
+	if url, ok := readPrimaryIfReachable(stateDir); ok {
 		_ = lockFile.Close()
-		return info, &Lease{kind: leaseNone}, nil
+		return url, &Lease{kind: leaseNone}, nil
 	}
 
 	_ = os.Remove(filepath.Join(stateDir, "hub.url"))
-	return HubInfo{}, &Lease{kind: leaseSpawner, handle: lockFile}, nil
+	return "", &Lease{kind: leaseSpawner, handle: lockFile}, nil
 }
 
 // RegisterDaemon claims hub.url for the calling daemon via O_EXCL. The
@@ -168,16 +174,16 @@ func daemonLease(file *os.File, urlPath string) *Lease {
 	}
 }
 
-// readURLsIfReachable returns the published HubInfo if hub.url is present
-// and its host:port is currently reachable. NATS / Fossil URLs are
-// best-effort: missing files just leave those fields empty via ReadHubInfo.
-func readURLsIfReachable(stateDir string) (HubInfo, bool) {
-	info, exists, err := ReadHubInfo(stateDir)
-	if err != nil || !exists || info.PrimaryURL == "" {
-		return HubInfo{}, false
+// readPrimaryIfReachable returns the daemon's leaf URL (hub.url) iff the
+// file is present, non-empty, and the host:port is currently reachable.
+// Drives AcquireOrReuse's fast path.
+func readPrimaryIfReachable(stateDir string) (string, bool) {
+	url, exists, err := ReadPrimaryURL(stateDir)
+	if err != nil || !exists || url == "" {
+		return "", false
 	}
-	if !reachable(info.PrimaryURL) {
-		return HubInfo{}, false
+	if !reachable(url) {
+		return "", false
 	}
-	return info, true
+	return url, true
 }

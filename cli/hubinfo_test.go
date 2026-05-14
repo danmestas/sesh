@@ -13,7 +13,10 @@ import (
 )
 
 // Round-trip: write a HubInfo, seed hub.url separately (simulating
-// HubGuard's Publish step), read back and confirm every field.
+// HubGuard's Publish step), read each channel back via its own function.
+// HubInfo (nats/fossil URLs) and ReadPrimaryURL (hub.url) are the two
+// parallel publication channels — kept apart in the test so the channel
+// boundary is explicit.
 func TestHubInfo_RoundTrip(t *testing.T) {
 	stateDir := t.TempDir()
 
@@ -30,15 +33,9 @@ func TestHubInfo_RoundTrip(t *testing.T) {
 		t.Fatalf("seed hub.url: %v", err)
 	}
 
-	got, exists, err := ReadHubInfo(stateDir)
+	got, err := ReadHubInfo(stateDir)
 	if err != nil {
 		t.Fatalf("ReadHubInfo: %v", err)
-	}
-	if !exists {
-		t.Errorf("exists=false; want true when hub.url present")
-	}
-	if got.PrimaryURL != primary {
-		t.Errorf("PrimaryURL = %q, want %q", got.PrimaryURL, primary)
 	}
 	if got.NATSURL != in.NATSURL {
 		t.Errorf("NATSURL = %q, want %q", got.NATSURL, in.NATSURL)
@@ -46,26 +43,45 @@ func TestHubInfo_RoundTrip(t *testing.T) {
 	if got.FossilURL != in.FossilURL {
 		t.Errorf("FossilURL = %q, want %q", got.FossilURL, in.FossilURL)
 	}
+
+	primaryGot, exists, err := ReadPrimaryURL(stateDir)
+	if err != nil {
+		t.Fatalf("ReadPrimaryURL: %v", err)
+	}
+	if !exists {
+		t.Errorf("ReadPrimaryURL exists=false; want true when hub.url present")
+	}
+	if primaryGot != primary {
+		t.Errorf("ReadPrimaryURL = %q, want %q", primaryGot, primary)
+	}
 }
 
-// Empty stateDir: ReadHubInfo returns zero info, exists=false, no error.
+// Empty stateDir: ReadHubInfo returns zero info / no error; ReadPrimaryURL
+// reports exists=false.
 func TestReadHubInfo_EmptyDir(t *testing.T) {
 	stateDir := t.TempDir()
-	info, exists, err := ReadHubInfo(stateDir)
+	info, err := ReadHubInfo(stateDir)
 	if err != nil {
 		t.Fatalf("ReadHubInfo on empty dir: %v", err)
-	}
-	if exists {
-		t.Errorf("exists=true on empty dir; want false")
 	}
 	if info != (HubInfo{}) {
 		t.Errorf("got %+v, want zero HubInfo", info)
 	}
+	primary, exists, err := ReadPrimaryURL(stateDir)
+	if err != nil {
+		t.Fatalf("ReadPrimaryURL on empty dir: %v", err)
+	}
+	if exists {
+		t.Errorf("ReadPrimaryURL exists=true on empty dir; want false")
+	}
+	if primary != "" {
+		t.Errorf("ReadPrimaryURL = %q on empty dir, want empty", primary)
+	}
 }
 
 // Partial publication: only hub.url present (HubGuard claimed but the
-// daemon died before writing nats/fossil). ReadHubInfo returns the
-// primary with the other fields empty and exists=true.
+// daemon died before writing nats/fossil). ReadPrimaryURL surfaces the
+// claim; ReadHubInfo reports empty nats/fossil.
 func TestReadHubInfo_OnlyPrimaryPublished(t *testing.T) {
 	stateDir := t.TempDir()
 	primary := "nats://hub:7422"
@@ -73,15 +89,19 @@ func TestReadHubInfo_OnlyPrimaryPublished(t *testing.T) {
 		t.Fatalf("seed hub.url: %v", err)
 	}
 
-	info, exists, err := ReadHubInfo(stateDir)
+	gotPrimary, exists, err := ReadPrimaryURL(stateDir)
 	if err != nil {
-		t.Fatalf("ReadHubInfo: %v", err)
+		t.Fatalf("ReadPrimaryURL: %v", err)
 	}
 	if !exists {
-		t.Errorf("exists=false; want true")
+		t.Errorf("ReadPrimaryURL exists=false; want true")
 	}
-	if info.PrimaryURL != primary {
-		t.Errorf("PrimaryURL = %q, want %q", info.PrimaryURL, primary)
+	if gotPrimary != primary {
+		t.Errorf("ReadPrimaryURL = %q, want %q", gotPrimary, primary)
+	}
+	info, err := ReadHubInfo(stateDir)
+	if err != nil {
+		t.Fatalf("ReadHubInfo: %v", err)
 	}
 	if info.NATSURL != "" {
 		t.Errorf("NATSURL = %q, want empty (file absent)", info.NATSURL)
@@ -92,19 +112,23 @@ func TestReadHubInfo_OnlyPrimaryPublished(t *testing.T) {
 }
 
 // hub.url absent but nats/fossil present (impossible in practice but
-// well-defined): exists=false because hub.url is the canonical "daemon
-// claimed" signal; nats/fossil fields still populate.
+// well-defined): ReadPrimaryURL reports absent; ReadHubInfo still surfaces
+// the partial publication.
 func TestReadHubInfo_PrimaryMissing(t *testing.T) {
 	stateDir := t.TempDir()
 	if err := WriteHubInfo(stateDir, HubInfo{NATSURL: "nats://x", FossilURL: "http://y"}); err != nil {
 		t.Fatalf("WriteHubInfo: %v", err)
 	}
-	info, exists, err := ReadHubInfo(stateDir)
+	_, exists, err := ReadPrimaryURL(stateDir)
 	if err != nil {
-		t.Fatalf("ReadHubInfo: %v", err)
+		t.Fatalf("ReadPrimaryURL: %v", err)
 	}
 	if exists {
-		t.Errorf("exists=true with hub.url absent; want false")
+		t.Errorf("ReadPrimaryURL exists=true with hub.url absent; want false")
+	}
+	info, err := ReadHubInfo(stateDir)
+	if err != nil {
+		t.Fatalf("ReadHubInfo: %v", err)
 	}
 	if info.NATSURL != "nats://x" || info.FossilURL != "http://y" {
 		t.Errorf("partial fields not surfaced: %+v", info)
@@ -125,24 +149,12 @@ func TestWriteHubInfo_EmptyFieldsSkip(t *testing.T) {
 	}
 }
 
-// WriteHubInfo ignores PrimaryURL — that file is owned by HubGuard's
-// daemon lease and must not be written through this path. Test asserts
-// the field is silently dropped rather than racing the O_EXCL claim.
-func TestWriteHubInfo_IgnoresPrimaryURL(t *testing.T) {
+// ClearHubInfo removes only the two URLs it manages (hub.nats.url,
+// hub.fossil.url). hub.url is owned by HubGuard's daemon lease and must
+// survive a ClearHubInfo call. Idempotent on a clean dir.
+func TestClearHubInfo_RemovesWriteHubInfoChannelOnly(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := WriteHubInfo(stateDir, HubInfo{PrimaryURL: "nats://leak"}); err != nil {
-		t.Fatalf("WriteHubInfo: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(stateDir, "hub.url")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("hub.url created via WriteHubInfo; should only be written by HubGuard.Publish")
-	}
-}
-
-// ClearHubInfo removes all three URL files; idempotent on a clean dir.
-func TestClearHubInfo_RemovesAll(t *testing.T) {
-	stateDir := t.TempDir()
-	files := []string{"hub.url", "hub.nats.url", "hub.fossil.url"}
-	for _, f := range files {
+	for _, f := range []string{"hub.url", "hub.nats.url", "hub.fossil.url"} {
 		if err := os.WriteFile(filepath.Join(stateDir, f), []byte("x\n"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", f, err)
 		}
@@ -150,13 +162,16 @@ func TestClearHubInfo_RemovesAll(t *testing.T) {
 	if err := ClearHubInfo(stateDir); err != nil {
 		t.Fatalf("ClearHubInfo: %v", err)
 	}
-	for _, f := range files {
+	for _, f := range []string{"hub.nats.url", "hub.fossil.url"} {
 		if _, err := os.Stat(filepath.Join(stateDir, f)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s present after Clear (err=%v)", f, err)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(stateDir, "hub.url")); err != nil {
+		t.Errorf("hub.url removed by ClearHubInfo; should only be cleaned by Lease.Release (stat err=%v)", err)
+	}
 	if err := ClearHubInfo(stateDir); err != nil {
-		t.Errorf("second ClearHubInfo on clean dir: %v", err)
+		t.Errorf("second ClearHubInfo on partially-clean dir: %v", err)
 	}
 }
 
@@ -184,7 +199,7 @@ func TestWriteHubInfo_AtomicConcurrent(t *testing.T) {
 	deadline := time.Now().Add(150 * time.Millisecond)
 	reads := 0
 	for time.Now().Before(deadline) {
-		info, _, err := ReadHubInfo(stateDir)
+		info, err := ReadHubInfo(stateDir)
 		if err != nil {
 			stop.Store(true)
 			wg.Wait()
@@ -206,22 +221,22 @@ func TestWriteHubInfo_AtomicConcurrent(t *testing.T) {
 	}
 }
 
-// ProjectCode returns ("", nil) when stateDir has no hub.repo at all.
-func TestProjectCode_NoHubRepo(t *testing.T) {
+// ReadHubProjectCode returns ("", nil) when stateDir has no hub.repo at all.
+func TestReadHubProjectCode_NoHubRepo(t *testing.T) {
 	stateDir := t.TempDir()
-	code, err := ProjectCode(stateDir)
+	code, err := ReadHubProjectCode(stateDir)
 	if err != nil {
-		t.Fatalf("ProjectCode: %v", err)
+		t.Fatalf("ReadHubProjectCode: %v", err)
 	}
 	if code != "" {
-		t.Errorf("ProjectCode = %q on empty dir, want empty", code)
+		t.Errorf("ReadHubProjectCode = %q on empty dir, want empty", code)
 	}
 }
 
-// ProjectCode reads from the libfossil config table when a hub.repo with
-// at least one check-in exists. Schema seeded manually to avoid pulling
+// ReadHubProjectCode reads from the libfossil config table when a hub.repo
+// with at least one check-in exists. Schema seeded manually to avoid pulling
 // in a real EdgeSync hub bring-up just for one read.
-func TestProjectCode_SeededRepo(t *testing.T) {
+func TestReadHubProjectCode_SeededRepo(t *testing.T) {
 	stateDir := t.TempDir()
 	repoPath := filepath.Join(stateDir, "hub.repo")
 	want := "abc123abc123abc123abc123abc123abc123abc1"
@@ -246,19 +261,19 @@ func TestProjectCode_SeededRepo(t *testing.T) {
 		t.Fatalf("close seeded db: %v", err)
 	}
 
-	got, err := ProjectCode(stateDir)
+	got, err := ReadHubProjectCode(stateDir)
 	if err != nil {
-		t.Fatalf("ProjectCode: %v", err)
+		t.Fatalf("ReadHubProjectCode: %v", err)
 	}
 	if got != want {
-		t.Errorf("ProjectCode = %q, want %q", got, want)
+		t.Errorf("ReadHubProjectCode = %q, want %q", got, want)
 	}
 }
 
 // hub.repo with zero check-ins → empty code, no error. Mirrors the prior
 // ProbeHub behavior so callers treating "" as "no canonical content"
 // keep working.
-func TestProjectCode_EmptyRepo(t *testing.T) {
+func TestReadHubProjectCode_EmptyRepo(t *testing.T) {
 	stateDir := t.TempDir()
 	repoPath := filepath.Join(stateDir, "hub.repo")
 
@@ -279,11 +294,11 @@ func TestProjectCode_EmptyRepo(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	got, err := ProjectCode(stateDir)
+	got, err := ReadHubProjectCode(stateDir)
 	if err != nil {
-		t.Fatalf("ProjectCode: %v", err)
+		t.Fatalf("ReadHubProjectCode: %v", err)
 	}
 	if got != "" {
-		t.Errorf("ProjectCode = %q on repo with 0 check-ins, want empty", got)
+		t.Errorf("ReadHubProjectCode = %q on repo with 0 check-ins, want empty", got)
 	}
 }
