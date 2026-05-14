@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -45,14 +44,12 @@ type HubInfo struct {
 // hub.url is not in scope; see ReadPrimaryURL / Lease.Publish.
 func WriteHubInfo(stateDir string, info HubInfo) error {
 	if info.NATSURL != "" {
-		path := filepath.Join(stateDir, "hub.nats.url")
-		if err := writeAtomic(path, info.NATSURL+"\n"); err != nil {
+		if err := writeAtomic(hubNATSURLPath(stateDir), info.NATSURL+"\n"); err != nil {
 			return fmt.Errorf("write hub.nats.url: %w", err)
 		}
 	}
 	if info.FossilURL != "" {
-		path := filepath.Join(stateDir, "hub.fossil.url")
-		if err := writeAtomic(path, info.FossilURL+"\n"); err != nil {
+		if err := writeAtomic(hubFossilURLPath(stateDir), info.FossilURL+"\n"); err != nil {
 			return fmt.Errorf("write hub.fossil.url: %w", err)
 		}
 	}
@@ -70,11 +67,11 @@ func WriteHubInfo(stateDir string, info HubInfo) error {
 // Errors are reserved for unexpected I/O — a present-but-unreadable
 // file, for instance.
 func ReadHubInfo(stateDir string) (HubInfo, error) {
-	natsURL, _, err := readURLFile(filepath.Join(stateDir, "hub.nats.url"))
+	natsURL, _, err := readURLFile(hubNATSURLPath(stateDir))
 	if err != nil {
 		return HubInfo{}, err
 	}
-	fossilURL, _, err := readURLFile(filepath.Join(stateDir, "hub.fossil.url"))
+	fossilURL, _, err := readURLFile(hubFossilURLPath(stateDir))
 	if err != nil {
 		return HubInfo{}, err
 	}
@@ -94,7 +91,7 @@ func ReadHubInfo(stateDir string) (HubInfo, error) {
 // WriteHubInfo never touches it; HubGuard's daemon lease owns the
 // claim/publish/release cycle.
 func ReadPrimaryURL(stateDir string) (url string, exists bool, err error) {
-	return readURLFile(filepath.Join(stateDir, "hub.url"))
+	return readURLFile(hubURLPath(stateDir))
 }
 
 // ClearHubInfo removes hub.nats.url and hub.fossil.url — the two files
@@ -108,8 +105,8 @@ func ReadPrimaryURL(stateDir string) (url string, exists bool, err error) {
 // removed by Lease.Release when the daemon exits.
 func ClearHubInfo(stateDir string) error {
 	paths := []string{
-		filepath.Join(stateDir, "hub.nats.url"),
-		filepath.Join(stateDir, "hub.fossil.url"),
+		hubNATSURLPath(stateDir),
+		hubFossilURLPath(stateDir),
 	}
 	var firstErr error
 	for _, p := range paths {
@@ -136,7 +133,7 @@ func ClearHubInfo(stateDir string) error {
 // the ProjectCode field on hub.Config and the HubProjectCode struct
 // fields on World / Deps.
 func ReadHubProjectCode(stateDir string) (string, error) {
-	repoPath := filepath.Join(stateDir, "hub.repo")
+	repoPath := hubRepoPath(stateDir)
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil

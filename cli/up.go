@@ -263,11 +263,11 @@ func spawnHub(projectCode string) error {
 	if err != nil {
 		return fmt.Errorf("self executable: %w", err)
 	}
-	logPath, err := hubLogPath()
+	stateDir, err := seshHome()
 	if err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(hubLogPath(stateDir), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open hub log: %w", err)
 	}

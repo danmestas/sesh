@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 )
 
@@ -101,8 +100,7 @@ func AcquireOrReuse(stateDir string) (leafURL string, lease *Lease, err error) {
 		return url, &Lease{kind: leaseNone}, nil
 	}
 
-	lockPath := filepath.Join(stateDir, "hub.spawn.lock")
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lockFile, err := os.OpenFile(hubSpawnLockPath(stateDir), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return "", nil, fmt.Errorf("open hub spawn lock: %w", err)
 	}
@@ -116,7 +114,7 @@ func AcquireOrReuse(stateDir string) (leafURL string, lease *Lease, err error) {
 		return url, &Lease{kind: leaseNone}, nil
 	}
 
-	_ = os.Remove(filepath.Join(stateDir, "hub.url"))
+	_ = os.Remove(hubURLPath(stateDir))
 	return "", &Lease{kind: leaseSpawner, handle: lockFile}, nil
 }
 
@@ -132,7 +130,7 @@ func AcquireOrReuse(stateDir string) (leafURL string, lease *Lease, err error) {
 //   - URL present but unreachable → previous daemon died without cleanup;
 //     remove and re-claim.
 func RegisterDaemon(stateDir string) (*Lease, error) {
-	urlPath := filepath.Join(stateDir, "hub.url")
+	urlPath := hubURLPath(stateDir)
 	file, err := tryClaim(urlPath)
 	if err == nil {
 		return daemonLease(file, urlPath), nil

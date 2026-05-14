@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,14 +37,11 @@ type HubServeCmd struct {
 }
 
 func (c *HubServeCmd) Run() error {
-	repoPath, err := hubRepoPath()
-	if err != nil {
-		return err
-	}
 	seshDir, err := seshHome()
 	if err != nil {
 		return err
 	}
+	repoPath := hubRepoPath(seshDir)
 
 	// HubGuard owns the O_EXCL claim on hub.url plus the stale-takeover
 	// dance; failure here means another hub is already running or
@@ -61,7 +57,7 @@ func (c *HubServeCmd) Run() error {
 	h, err := hub.NewHub(ctx, hub.Config{
 		RepoPath:       repoPath,
 		ServerName:     "sesh-hub",
-		NATSStoreDir:   filepath.Join(seshDir, "messaging"),
+		NATSStoreDir:   hubStoreDir(seshDir),
 		FossilHTTPPort: c.HTTPPort,
 		NATSClientPort: c.NATSClientPort,
 		NATSLeafPort:   c.NATSLeafPort,
