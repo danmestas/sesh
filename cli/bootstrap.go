@@ -24,10 +24,12 @@ import (
 //     whatever commits already accumulated.
 //
 // MakePlan is the pure decision tree, Execute is the effectful runner.
-// Splitting them keeps the fork unit-testable without spinning up hubs
-// and lets the conflict case (project-code drift between the local pin
-// and the hub's on-disk repo, issue #26) abort with an actionable
-// message before any hub bring-up.
+// Splitting them keeps the fork unit-testable without spinning up hubs.
+// When the hub's on-disk project-code disagrees with the local pin
+// (issue #26 / #34), Execute adopts the hub's value into
+// <cwd>/.sesh/project-code before EdgeSync's seed-from-upstream runs —
+// the hub is shared across all sessions in the project and is the
+// natural source of truth.
 //
 // The hub-project-code probe currently lives here in ProbeHub. When
 // issue #29 (HubInfo) lands, that probe moves behind HubInfo.ProjectCode()
@@ -69,25 +71,11 @@ type World struct {
 }
 
 // Plan is the decision MakePlan returned. Source dictates which (if any)
-// bootstrap action Execute will run. Conflict is non-nil iff the caller
-// should abort with the actionable message instead of continuing into
-// hub bring-up.
+// bootstrap action Execute will run.
 type Plan struct {
 	Source       Source
 	HubFossilURL string   // populated iff Source == SourceHub
 	SeedMode     SeedMode // populated iff Source == SourceGitWorktree
-	Conflict     *Conflict
-}
-
-// Conflict carries everything the user needs to resolve a project-code
-// drift between the local pin and the hub's on-disk repo. Kind is a
-// stable enum string for future tooling; Message is the human-actionable
-// text the caller surfaces verbatim.
-type Conflict struct {
-	Kind     string
-	Message  string
-	LocalPin string
-	HubPin   string
 }
 
 // MakePlan computes the bootstrap plan from world state. Pure — same
@@ -95,29 +83,16 @@ type Conflict struct {
 //
 // Decision tree:
 //
-//   - !FreshRepo                                    → {Source: None}
-//   - HubFossilURL set && HubProjectCode set
-//       && HubProjectCode != LocalProjectCode       → {Conflict}
-//   - HubFossilURL set                              → {Source: Hub}
-//   - else                                          → {Source: GitWorktree}
+//   - !FreshRepo         → {Source: None}
+//   - HubFossilURL set   → {Source: Hub}
+//   - else               → {Source: GitWorktree}
 //
-// The drift check explicitly requires HubProjectCode to be non-empty.
-// ProbeHub keeps HubFossilURL and HubProjectCode paired today, but
-// guarding here means a future probe variant that surfaces one without
-// the other won't fabricate a phantom conflict against "".
+// Project-code drift between the local pin and the hub's on-disk repo
+// is reconciled at Execute time (the hub wins; see Execute), so MakePlan
+// does not branch on HubProjectCode.
 func MakePlan(w World) (Plan, error) {
 	if !w.FreshRepo {
 		return Plan{Source: SourceNone}, nil
-	}
-	if w.HubFossilURL != "" && w.HubProjectCode != "" && w.HubProjectCode != w.LocalProjectCode {
-		return Plan{
-			Conflict: &Conflict{
-				Kind:     "project-code-drift",
-				Message:  formatDriftMessage(w.LocalProjectCode, w.HubProjectCode),
-				LocalPin: w.LocalProjectCode,
-				HubPin:   w.HubProjectCode,
-			},
-		}, nil
 	}
 	if w.HubFossilURL != "" {
 		return Plan{Source: SourceHub, HubFossilURL: w.HubFossilURL}, nil
@@ -127,28 +102,46 @@ func MakePlan(w World) (Plan, error) {
 
 // Deps carries the I/O Execute needs. Ctx scopes any commit operations
 // to the session's lifetime; Hub is the already-bound session hub
-// (NewHub has returned); Cwd is the working directory the seed snapshot
-// is taken from. RepoPath is informational, surfaced in slog so the
-// operator can locate the affected file.
+// (NewHub has returned, only required by the SourceGitWorktree branch);
+// Cwd is the working directory the seed snapshot is taken from.
+// RepoPath is informational, surfaced in slog so the operator can
+// locate the affected file. HubProjectCode is the project-code probed
+// from the hub's on-disk repo and is consulted by the SourceHub branch
+// to adopt-on-drift into <cwd>/.sesh/project-code; empty means "no hub
+// content / nothing to adopt".
 type Deps struct {
-	Ctx      context.Context
-	Hub      *hub.Hub
-	Cwd      string
-	RepoPath string
+	Ctx            context.Context
+	Hub            *hub.Hub
+	Cwd            string
+	RepoPath       string
+	HubProjectCode string
 }
 
-// Execute runs the action MakePlan chose. The hub-clone path is a no-op
-// here because the actual clone is wired through hub.NewHub's
-// SeedFromUpstream — by the time Execute runs, NewHub has already
-// fetched the upstream content. Execute exists so the caller has one
-// callsite to invoke whatever the bootstrap decided to do, including
-// the case where the decision was "do nothing."
+// Execute runs the action MakePlan chose.
+//
+// For SourceHub, if the hub published a project-code that differs from
+// the local pin at <cwd>/.sesh/project-code, Execute adopts the hub's
+// value before EdgeSync's seed-from-upstream runs — the hub is shared
+// across all sessions in the project and is the natural source of
+// truth. This means Execute must run BEFORE hub.NewHub for SourceHub.
+// The actual clone happens inside hub.NewHub's SeedFromUpstream; that
+// step is keyed off the now-adopted project-code so the upstream
+// project-code agrees with what the session's Fossil repo expects.
+//
+// For SourceGitWorktree, the session's hub must already be bound
+// (d.Hub != nil) because the seed commits through it.
+//
+// Adoption is idempotent: if the file already matches the hub's code,
+// Execute is a no-op.
 func Execute(p Plan, d Deps) error {
 	switch p.Source {
 	case SourceNone:
 		slog.Info("fossil repo pre-existed; not re-seeding", "path", d.RepoPath)
 		return nil
 	case SourceHub:
+		if err := adoptHubProjectCode(d.Cwd, d.HubProjectCode); err != nil {
+			return err
+		}
 		slog.Info("fossil repo cloned from hub upstream",
 			"path", d.RepoPath, "upstream", p.HubFossilURL)
 		return nil
@@ -156,6 +149,29 @@ func Execute(p Plan, d Deps) error {
 		return seedFromGitWorktree(d.Ctx, d.Hub, d.Cwd, p.SeedMode)
 	}
 	return fmt.Errorf("bootstrap: unknown source %d", p.Source)
+}
+
+// adoptHubProjectCode updates <cwd>/.sesh/project-code to hubCode iff
+// the file currently disagrees with it. Empty hubCode is a no-op — the
+// hub probe surfaces "" when the hub has no content yet, and there's
+// nothing to adopt from. A missing-or-unreadable local file is treated
+// as "current value is empty," which triggers a write to seed the pin.
+func adoptHubProjectCode(cwd, hubCode string) error {
+	if hubCode == "" {
+		return nil
+	}
+	path := projectCodePath(cwd)
+	currentBytes, _ := os.ReadFile(path)
+	current := strings.TrimSpace(string(currentBytes))
+	if current == hubCode {
+		return nil
+	}
+	slog.Info("adopting hub project-code",
+		"hub", hubCode, "was_pinned_to", current, "path", path)
+	if err := writeAtomic(path, hubCode+"\n"); err != nil {
+		return fmt.Errorf("adopt hub project-code: %w", err)
+	}
+	return nil
 }
 
 // ProbeHub reads the hub's published URL and on-disk project-code so
@@ -221,24 +237,4 @@ func ProbeHub() (hubURL, hubProjectCode string, err error) {
 		return "", "", fmt.Errorf("read project-code: %w", err)
 	}
 	return hubURL, hubProjectCode, nil
-}
-
-// formatDriftMessage builds the user-visible conflict text. Paths are
-// rendered in their conventional display form (`.sesh/project-code`
-// relative to cwd; `~/.sesh/hub.repo` with literal tilde) rather than
-// fully-resolved absolute paths — the recovery commands are intended
-// to be copy-pasted into the same shell the operator is already in.
-func formatDriftMessage(localPin, hubPin string) string {
-	return fmt.Sprintf(`sesh up: project-code drift detected
-  local pin   .sesh/project-code  = %s
-  hub repo    ~/.sesh/hub.repo    = %s
-
-Pick a side and re-run:
-
-  # treat hub as canonical (other sessions in this project agree with it):
-  rm .sesh/project-code
-
-  # treat local cwd as canonical (you want a fresh hub for this project):
-  sesh hub stop && rm -rf ~/.sesh/hub.repo*
-  sesh hub serve`, localPin, hubPin)
 }
