@@ -2,10 +2,7 @@ package cli
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -31,9 +28,9 @@ import (
 // the hub is shared across all sessions in the project and is the
 // natural source of truth.
 //
-// The hub-project-code probe currently lives here in ProbeHub. When
-// issue #29 (HubInfo) lands, that probe moves behind HubInfo.ProjectCode()
-// and ProbeHub goes away; the Plan/Execute split stays put.
+// ProbeHub composes ReadHubInfo + ProjectCode (cli/hubinfo.go) — the
+// atomic file I/O and libfossil read both live behind that module so
+// adding a new published URL is a one-line struct change.
 
 // Source is the chosen bootstrap source for a fresh repo.
 type Source int
@@ -174,67 +171,39 @@ func adoptHubProjectCode(cwd, hubCode string) error {
 	return nil
 }
 
-// ProbeHub reads the hub's published URL and on-disk project-code so
-// MakePlan can decide between hub-clone and seed-from-cwd. Returns
+// ProbeHub reads the hub's published Fossil URL and on-disk project-code
+// so MakePlan can decide between hub-clone and seed-from-cwd. Returns
 // ("","",nil) for any "hub absent or empty" case — the caller treats
 // that as "no hub content" and proceeds to seed-from-cwd.
 //
-// SQLite WAL mode lets this read coexist with the hub's open writer; the
-// read-only pragma eliminates contention. Schema is libfossil's:
-// event.type='ci' marks a check-in, and project-code lives in the
-// config table.
+// Composition: ReadHubInfo surfaces the atomically-published URLs;
+// ProjectCode reads the hub's libfossil config. Either coming back
+// empty short-circuits to ("","",nil) because the caller needs BOTH a
+// reachable Fossil URL AND a settled project-code to clone-from-hub
+// safely.
 //
-// Errors are reserved for unexpected I/O failures (a present-but-unreadable
-// URL file, a stat failure that isn't ENOENT, a SQL error). The caller
-// logs and treats those as "no hub content" — the safer default, since
-// any duplicate seed gets reconciled by autosync.
-//
-// When issue #29 (HubInfo) lands, the project-code read moves behind
-// HubInfo.ProjectCode().
+// Errors are reserved for unexpected I/O failures (a present-but-
+// unreadable URL file, a SQL error). The caller logs and treats those
+// as "no hub content" — the safer default, since any duplicate seed
+// gets reconciled by autosync.
 func ProbeHub() (hubURL, hubProjectCode string, err error) {
-	urlPath, err := hubFossilURLPath()
+	stateDir, err := seshHome()
 	if err != nil {
 		return "", "", err
 	}
-	urlBytes, err := os.ReadFile(urlPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", "", nil
-	}
+	info, _, err := ReadHubInfo(stateDir)
 	if err != nil {
-		return "", "", fmt.Errorf("read hub.fossil.url: %w", err)
+		return "", "", fmt.Errorf("read hub info: %w", err)
 	}
-	hubURL = strings.TrimSpace(string(urlBytes))
-	if hubURL == "" {
+	if info.FossilURL == "" {
 		return "", "", nil
 	}
-
-	repoPath, err := hubRepoPath()
+	code, err := ProjectCode(stateDir)
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := os.Stat(repoPath); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", "", nil
-		}
-		return "", "", fmt.Errorf("stat hub repo: %w", err)
-	}
-
-	db, err := sql.Open("sqlite", "file:"+repoPath+"?_pragma=mode(ro)")
-	if err != nil {
-		return "", "", fmt.Errorf("open hub repo: %w", err)
-	}
-	defer db.Close()
-
-	var commits int
-	if err := db.QueryRow("SELECT count(*) FROM event WHERE type='ci'").Scan(&commits); err != nil {
-		return "", "", fmt.Errorf("count check-ins: %w", err)
-	}
-	if commits == 0 {
+	if code == "" {
 		return "", "", nil
 	}
-
-	if err := db.QueryRow("SELECT value FROM config WHERE name='project-code'").Scan(&hubProjectCode); err != nil {
-		return "", "", fmt.Errorf("read project-code: %w", err)
-	}
-	return hubURL, hubProjectCode, nil
+	return info.FossilURL, code, nil
 }

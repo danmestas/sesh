@@ -107,37 +107,20 @@ func (c *HubServeCmd) Run() error {
 	}
 	defer urlLease.Release()
 
-	// Publish the hub's NATS client URL so clients doing hub/project/
-	// workflow-scoped KV work can connect to the hub's JetStream domain.
-	// Sessions run their own JetStream domains; the hub's is shared.
-	natsURLPath, err := hubNATSURLPath()
-	if err != nil {
+	// Publish hub.nats.url and hub.fossil.url atomically via HubInfo. NATS
+	// is the hub's JetStream entry point (sessions run their own domains;
+	// the hub's is the shared one). Fossil is the HTTP xfer endpoint
+	// peer sessions read at `sesh up` to decide clone-from-hub vs.
+	// seed-from-cwd. hub.url is owned by urlLease (above); WriteHubInfo
+	// skips PrimaryURL even if populated.
+	if err := WriteHubInfo(seshDir, HubInfo{
+		NATSURL:   h.NATSURL(),
+		FossilURL: "http://" + h.HTTPAddr() + "/",
+	}); err != nil {
 		_ = h.Stop()
-		return fmt.Errorf("hub.nats.url path: %w", err)
+		return fmt.Errorf("publish hub info: %w", err)
 	}
-	if err := writeAtomic(natsURLPath, h.NATSURL()+"\n"); err != nil {
-		_ = h.Stop()
-		return fmt.Errorf("write hub.nats.url: %w", err)
-	}
-	defer os.Remove(natsURLPath)
-
-	// Publish the hub's Fossil HTTP xfer endpoint. Sessions read this at
-	// `sesh up` to decide bootstrap path: when the hub is empty (no
-	// peer session has committed yet), fall back to seed-from-cwd; when
-	// the hub already has content from a peer session's autosync, the
-	// new session's Fossil clones from this URL instead so the per-session
-	// repos start in convergent state rather than diverging from the
-	// cwd snapshot.
-	fossilURLPath, err := hubFossilURLPath()
-	if err != nil {
-		_ = h.Stop()
-		return fmt.Errorf("hub.fossil.url path: %w", err)
-	}
-	if err := writeAtomic(fossilURLPath, "http://"+h.HTTPAddr()+"/\n"); err != nil {
-		_ = h.Stop()
-		return fmt.Errorf("write hub.fossil.url: %w", err)
-	}
-	defer os.Remove(fossilURLPath)
+	defer func() { _ = ClearHubInfo(seshDir) }()
 
 	slog.Info("sesh hub running",
 		"keepalive", c.Keepalive,

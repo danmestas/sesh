@@ -114,43 +114,6 @@ func seshHome() (string, error) {
 	return dir, nil
 }
 
-// hubURLPath returns ~/.sesh/hub.url — the hub's leafnode listener URL,
-// written by the hub at bind for sesh up to discover the hub and solicit
-// upstream into it.
-func hubURLPath() (string, error) {
-	dir, err := seshHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "hub.url"), nil
-}
-
-// hubNATSURLPath returns ~/.sesh/hub.nats.url — the hub's NATS client
-// URL, written by the hub at bind. Clients that need to operate on the
-// hub's JetStream domain (hub/project/workflow-scoped shared memory)
-// connect to this URL rather than to a session's NATS URL. Each session
-// runs its own JetStream domain; the hub's is the shared one.
-func hubNATSURLPath() (string, error) {
-	dir, err := seshHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "hub.nats.url"), nil
-}
-
-// hubFossilURLPath returns ~/.sesh/hub.fossil.url — the hub's Fossil
-// HTTP xfer endpoint, written by the hub at bind. Sessions read this
-// to decide whether to seed-from-cwd (hub empty) or
-// --seed-from-upstream=<this> (hub has content from earlier sessions
-// in the project).
-func hubFossilURLPath() (string, error) {
-	dir, err := seshHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "hub.fossil.url"), nil
-}
-
 // hubRepoPath returns ~/.sesh/hub.repo.
 func hubRepoPath() (string, error) {
 	dir, err := seshHome()
