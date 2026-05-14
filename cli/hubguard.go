@@ -104,10 +104,9 @@ func (l *Lease) Publish(leafURL string) error {
 // daemon's published URL, and calling lease.Release() once the URL is
 // observable — that's what unblocks concurrent racers waiting on the flock.
 //
-// TODO(sesh#15, EdgeSync#171): when EdgeSync's hub.Hub exposes a Ready()
-// channel, AcquireOrReuse should block on it before returning URLs on the
-// reuse paths — eliminating the microsecond window between hub.url publish
-// and HTTP listener accept that #15 describes.
+// The bind-vs-accept race from #15 is closed daemon-side: hub_serve.go
+// gates URL publication on EdgeSync's hub.Ready() channel, so consumers
+// only see hub.url / hub.fossil.url after the HTTP listener is accepting.
 func AcquireOrReuse(stateDir string) (HubURLs, *Lease, error) {
 	urlPath := filepath.Join(stateDir, "hub.url")
 
