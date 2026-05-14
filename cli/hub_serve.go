@@ -76,6 +76,29 @@ func (c *HubServeCmd) Run() error {
 		return fmt.Errorf("hub: %w", err)
 	}
 
+	// Start the HTTP serve loop in a goroutine and gate URL publication on
+	// Ready closing. Until Ready closes, the Fossil HTTP listener is bound
+	// but not yet calling Accept; advertising hub.fossil.url before then
+	// lets racers dial a half-open listener (#15 residual gap closed via
+	// EdgeSync#171). Buffered cap-1 so the goroutine never blocks on exit.
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- h.ServeHTTP(ctx) }()
+
+	select {
+	case <-h.Ready():
+	case err := <-serveErr:
+		_ = urlLease.Release()
+		_ = h.Stop()
+		if err != nil {
+			return fmt.Errorf("hub HTTP serve: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		_ = urlLease.Release()
+		_ = h.Stop()
+		return ctx.Err()
+	}
+
 	leafURL := h.LeafURL()
 	if err := urlLease.Publish(leafURL); err != nil {
 		_ = urlLease.Release()
@@ -129,9 +152,6 @@ func (c *HubServeCmd) Run() error {
 	if !c.Keepalive {
 		go autoShutdownLoop(ctx, cancel, h, c.StartupGrace)
 	}
-
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- h.ServeHTTP(ctx) }()
 
 	select {
 	case <-ctx.Done():
