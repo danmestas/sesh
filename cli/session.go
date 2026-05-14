@@ -1,0 +1,179 @@
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// Session owns a project-local state file at <stateDir>/<label>.json. It
+// represents the lifecycle of a single `sesh up` between claim and release:
+// sesh up creates one at startup (atomic O_EXCL claim), publishes its bound
+// URLs once the hub is ready, runs until SIGINT, then removes the file.
+// sesh down (via package-level Terminate) reads the published PID and
+// signals the owner.
+//
+// The file is the registry — no in-process state, no shared bus. A live PID
+// in the file means a live session; a missing file means none; a dead PID
+// in the file is a stale claim that gets reaped on the next ClaimSession or
+// Terminate.
+type Session struct {
+	stateDir string
+	label    string
+}
+
+// ClaimSession atomically claims (stateDir, label) by O_EXCL-creating the
+// state JSON file with the current process's PID. A stale file owned by a
+// dead PID is reaped first. Returns an error iff a live PID already owns
+// the slot.
+//
+// The returned Session must be released via Session.Release (typically
+// deferred) so the file does not outlive the owning process.
+func ClaimSession(stateDir, label string) (*Session, error) {
+	path := sessionFilePath(stateDir, label)
+	if existing, err := readSessionFile(path); err == nil {
+		if alive(existing.PID) {
+			return nil, fmt.Errorf("session %q already held by pid %d (%s)", label, existing.PID, path)
+		}
+		_ = os.Remove(path)
+	}
+	payload, err := json.Marshal(SessionState{PID: os.Getpid()})
+	if err != nil {
+		return nil, fmt.Errorf("marshal session state: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("create session state %s: %w", path, err)
+	}
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return &Session{stateDir: stateDir, label: label}, nil
+}
+
+// Publish overwrites the session file with state. The file must still
+// exist (i.e. the claim must still hold) — guards against publishing for
+// a session whose state file has been externally removed. Atomic via
+// tempfile+rename in the same directory.
+func (s *Session) Publish(state SessionState) error {
+	path := sessionFilePath(s.stateDir, s.label)
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("publish session state: %w", err)
+	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal session state: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("temp session state: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename session state: %w", err)
+	}
+	return nil
+}
+
+// Release removes the session state file. Best-effort; an already-removed
+// file is not an error. Intended use is `defer s.Release()` immediately
+// after a successful ClaimSession.
+func (s *Session) Release() error {
+	path := sessionFilePath(s.stateDir, s.label)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// ReadSession returns the current persisted state for (stateDir, label).
+// Used by sibling commands that don't own the slot (sesh down, future
+// status/ls). Returns fs.ErrNotExist when no session is claimed.
+func ReadSession(stateDir, label string) (SessionState, error) {
+	return readSessionFile(sessionFilePath(stateDir, label))
+}
+
+// Terminate brings down the sesh up that owns (stateDir, label) by sending
+// SIGINT and waiting up to timeout for it to exit. The state file is
+// reaped on success.
+//
+//   - No file → no error (already down).
+//   - File exists but owner PID is dead → reap, no error.
+//   - Owner exits within timeout → reap, no error.
+//   - Owner survives past timeout → error with PID surfaced.
+//
+// The caller blocks while waiting; this function does not background.
+// sesh up's own SIGINT handler does the heavy cleanup (hub stop, leaf
+// disconnect, JetStream/Fossil WAL checkpoint).
+func Terminate(stateDir, label string, timeout time.Duration) error {
+	path := sessionFilePath(stateDir, label)
+	state, err := readSessionFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read session state: %w", err)
+	}
+	if !alive(state.PID) {
+		_ = os.Remove(path)
+		return nil
+	}
+	proc, err := os.FindProcess(state.PID)
+	if err != nil {
+		_ = os.Remove(path)
+		return nil
+	}
+	if err := proc.Signal(os.Interrupt); err != nil {
+		// PID was alive a microsecond ago; treat the race as already-gone.
+		_ = os.Remove(path)
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !alive(state.PID) {
+			_ = os.Remove(path)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("session %q (pid %d) didn't exit within %s", label, state.PID, timeout)
+}
+
+// sessionFilePath returns <stateDir>/<label>.json. The dir must already
+// exist — callers using the cwd convention create it via projectStateDir.
+func sessionFilePath(stateDir, label string) string {
+	return filepath.Join(stateDir, label+".json")
+}
+
+// readSessionFile decodes a session JSON at path.
+func readSessionFile(path string) (SessionState, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SessionState{}, err
+	}
+	var s SessionState
+	if err := json.Unmarshal(data, &s); err != nil {
+		return SessionState{}, fmt.Errorf("parse session state: %w", err)
+	}
+	return s, nil
+}

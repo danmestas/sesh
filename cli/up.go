@@ -53,12 +53,18 @@ func (c *UpCmd) Run() error {
 		return fmt.Errorf("getwd: %w", err)
 	}
 
-	// Atomic same-machine same-name guard.
-	release, err := claimSessionState(c.Session, os.Getpid())
+	// Atomic same-machine same-name guard. The Session module owns the
+	// state file lifecycle from claim through release; up.Run consumes
+	// it via Publish once the hub binds its URLs.
+	stateDir, err := projectStateDir()
 	if err != nil {
 		return err
 	}
-	defer release()
+	sess, err := ClaimSession(stateDir, c.Session)
+	if err != nil {
+		return err
+	}
+	defer sess.Release()
 
 	// Fossil project-code: pinned at <cwd>/.sesh/project-code on first
 	// `sesh up`, read back on subsequent runs. All sesh leaves in this
@@ -161,7 +167,7 @@ func (c *UpCmd) Run() error {
 		return fmt.Errorf("sesh up: %w", err)
 	}
 
-	if err := updateSessionState(c.Session, SessionState{
+	if err := sess.Publish(SessionState{
 		PID:       os.Getpid(),
 		NATSURL:   h.NATSURL(),
 		LeafURL:   h.LeafURL(),

@@ -20,7 +20,6 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -34,10 +33,11 @@ import (
 
 // SessionState is the project-local JSON at <cwd>/.sesh/sessions/<label>.json.
 //
-// Written in two phases: claimSessionState creates the file O_EXCL with PID
-// only (the atomic ownership claim), then updateSessionState overwrites with
-// the URLs once the hub has bound its ports. Sub-leaves and NATS clients
-// read NATSURL/LeafURL to attach without grepping logs.
+// Written in two phases by the Session module (see session.go): ClaimSession
+// creates the file O_EXCL with PID only (the atomic ownership claim), then
+// Session.Publish overwrites with the URLs once the hub has bound its ports.
+// Sub-leaves and NATS clients read NATSURL/LeafURL to attach without
+// grepping logs.
 type SessionState struct {
 	PID      int    `json:"pid"`
 	NATSURL  string `json:"nats_url,omitempty"`  // for NATS clients under this session
@@ -56,49 +56,6 @@ func projectStateDir() (string, error) {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	return dir, nil
-}
-
-// sessionStatePath returns the JSON path for a session label.
-func sessionStatePath(label string) (string, error) {
-	dir, err := projectStateDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, label+".json"), nil
-}
-
-// claimSessionState atomically claims (cwd, label) by O_EXCL-creating the
-// state JSON. Stale entries (file exists, PID is dead) are reaped first.
-// Returns a release function that removes the file.
-func claimSessionState(label string, pid int) (release func(), err error) {
-	path, err := sessionStatePath(label)
-	if err != nil {
-		return nil, err
-	}
-
-	if existing, err := readSessionState(path); err == nil {
-		if alive(existing.PID) {
-			return nil, fmt.Errorf("session %q already held by pid %d (%s)", label, existing.PID, path)
-		}
-		_ = os.Remove(path)
-	}
-
-	payload, err := json.Marshal(SessionState{PID: pid})
-	if err != nil {
-		return nil, fmt.Errorf("marshal session state: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("create session state %s: %w", path, err)
-	}
-	if _, err := f.Write(payload); err != nil {
-		f.Close()
-		_ = os.Remove(path)
-		return nil, err
-	}
-	f.Close()
-
-	return func() { _ = os.Remove(path) }, nil
 }
 
 // writeAtomic writes data to path via tmpfile+rename so readers never
@@ -124,55 +81,6 @@ func writeAtomic(path, content string) error {
 		return fmt.Errorf("rename %s: %w", path, err)
 	}
 	return nil
-}
-
-// updateSessionState replaces the session JSON with state. The session must
-// already be claimed (file exists) — guards against writing state for a
-// session no live process owns. Atomic via tempfile+rename in the same dir.
-func updateSessionState(label string, state SessionState) error {
-	path, err := sessionStatePath(label)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("update session state: %w", err)
-	}
-	payload, err := json.Marshal(state)
-	if err != nil {
-		return fmt.Errorf("marshal session state: %w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return fmt.Errorf("temp session state: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename session state: %w", err)
-	}
-	return nil
-}
-
-// readSessionState decodes a session JSON file.
-func readSessionState(path string) (SessionState, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return SessionState{}, err
-	}
-	var s SessionState
-	if err := json.Unmarshal(data, &s); err != nil {
-		return SessionState{}, fmt.Errorf("parse session state: %w", err)
-	}
-	return s, nil
 }
 
 // alive returns true if a process with pid is reachable by signal 0.
