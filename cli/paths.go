@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -218,6 +219,33 @@ func loadOrCreateProjectCode(cwd, projectName string) (string, error) {
 		return "", fmt.Errorf("seed project-code %s: %w", path, err)
 	}
 	return code, nil
+}
+
+// ResolveProjectCode reconciles the local pin at <cwd>/.sesh/project-code
+// against an authoritative upstream value (typically the hub's
+// project-code from ReadHubProjectCode). If hubCode is empty (no hub
+// content yet) or already agrees with localCode, returns localCode
+// untouched. Otherwise the hub wins: ResolveProjectCode rewrites the
+// pin to match hubCode and returns hubCode so EdgeSync's
+// SeedFromUpstream sees agreement on both sides of the clone.
+//
+// Idempotent: a second call with the same args is a no-op. A missing
+// or unreadable local file is treated the same as "current value is
+// empty," which triggers a write to seed the pin.
+//
+// This is the pre-hub side of project-code resolution. The hub is
+// shared across all sessions in the project and is the natural source
+// of truth (issue #26 / #34); local pins follow.
+func ResolveProjectCode(cwd, localCode, hubCode string) (string, error) {
+	if hubCode == "" || hubCode == localCode {
+		return localCode, nil
+	}
+	slog.Info("adopting hub project-code",
+		"hub", hubCode, "was_pinned_to", localCode, "path", projectCodePath(cwd))
+	if err := writeAtomic(projectCodePath(cwd), hubCode+"\n"); err != nil {
+		return "", fmt.Errorf("adopt hub project-code: %w", err)
+	}
+	return hubCode, nil
 }
 
 // isValidProjectCode checks that s is exactly 40 lowercase hex chars,
