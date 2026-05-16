@@ -171,12 +171,23 @@ nats kv put $bucket $task_id "$new" --revision=$rev
 
 ## Status events
 
+> **Breaking change from #49:** This shape replaces the v0
+> `{event, puller, ts, due_at}` payload introduced in #49. Puller and
+> watcher implementations must switch atomically — the two shapes are
+> not cross-compatible.
+
 After a successful CAS claim (step 2 above), the puller publishes a
 **best-effort, fire-and-forget** event on a plain NATS subject. If the
 publish fails the claim still stands — the KV record is the source of
 truth; the event is a hint. Inspired by the leading-`ack` pattern in
 Synadia Agent SDK §6.4, which resets a caller's inactivity timeout
 before any latency-inducing work begins.
+
+The event payload is **convergent with the Synadia §8.3 heartbeat shape**
+so that a single liveness tracker can watch both task-puller events and
+agent heartbeats with one parser. See the [Worked example](#worked-example)
+below and
+[`synadia-agents-on-sesh.md § 7. Liveness`](./synadia-agents-on-sesh.md#7-liveness).
 
 ### Subject
 
@@ -198,23 +209,52 @@ sesh.task.<bucket>.*.events
 
 ### Payload
 
+The payload shape is **convergent with the Synadia §8.3 heartbeat** — the six
+common fields (`agent`, `owner`, `session`, `instance_id`, `ts`, `interval_s`)
+are identical to a §8.3 heartbeat, so a single liveness tracker keyed on
+`instance_id` can consume both `sesh.task.*.*.events` and `agents.hb.*.*.*`
+with one parser. See also
+[`synadia-agents-on-sesh.md § 7. Liveness`](./synadia-agents-on-sesh.md#7-liveness).
+
 ```json
 {
-  "event": "claimed",
-  "puller": "researcher:agent-042",
-  "ts": "2026-05-16T18:00:00Z",
-  "due_at": "2026-05-16T18:00:30Z"
+  "agent":       "researcher",
+  "owner":       "alice",
+  "session":     "my-session",
+  "instance_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "ts":          "2026-05-16T18:00:00Z",
+  "interval_s":  10,
+  "event":       "claimed",
+  "task_id":     "01HXX...",
+  "due_at":      "2026-05-16T18:00:30Z"
 }
 ```
 
 Field table:
 
-| Field    | Type             | Present  | Meaning                                                                                       |
-| -------- | ---------------- | -------- | --------------------------------------------------------------------------------------------- |
-| `event`  | string           | always   | Lifecycle token; see values below                                                             |
-| `puller` | string           | always   | `role:agent-id` of the emitting puller                                                        |
-| `ts`     | string (RFC3339) | always   | Wall time of the event (UTC)                                                                  |
-| `due_at` | string (RFC3339) | always   | Current `due_at` from the KV record. May be `null` on `complete` and `fail` (no future deadline). |
+**Common fields (§8.3 — identical to a Synadia agent heartbeat):**
+
+| Field         | Type             | Required | Meaning                                                         |
+| ------------- | ---------------- | -------- | --------------------------------------------------------------- |
+| `agent`       | string           | Yes      | Puller's role identifier (e.g. `"researcher"`)                  |
+| `owner`       | string           | Yes      | Puller's owner                                                  |
+| `session`     | string           | Yes      | Puller's session label; may be `""` for session-less pullers    |
+| `instance_id` | string           | Yes      | Puller's stable ID across events (liveness trackers key on this). Synadia §3.4 defines `instance_id` as the framework-assigned NATS micro service `id`; task pullers are not micro services, so this is any stable process-scoped ID (e.g. a UUID or [`nats.go/nuid`](https://github.com/nats-io/nuid) value) generated once at startup and reused across all events from that puller. Format is implementation-dependent — UUIDs and NATS nuids (`VMKS6MHK71PCPWGY38A7N5`) are both common. |
+| `ts`          | string (RFC3339) | Yes      | Wall time of the event (UTC)                                    |
+| `interval_s`  | number           | Yes      | Puller's extend cadence in seconds (constant across events from the same puller) |
+
+**Task-specific fields:**
+
+| Field     | Type             | Required                          | Meaning                                                                          |
+| --------- | ---------------- | --------------------------------- | -------------------------------------------------------------------------------- |
+| `event`   | string           | Yes                               | Lifecycle token; see values below                                                |
+| `task_id` | string           | Yes                               | The task being heartbeated (its ULID key)                                        |
+| `due_at`  | string (RFC3339) | On `claimed` and `extend` only    | Current `due_at` from the KV record. `null` on `complete` and `fail` (no future deadline). |
+
+> **Note on `puller`:** earlier drafts (pre-#50) used a single free-form
+> `puller: "role:id"` field. That field is replaced by the structured
+> `agent` + `owner` + `instance_id` triple, which aligns with §8.3 and
+> enables the convergent liveness model.
 
 ### Event values
 
@@ -236,38 +276,63 @@ KV. The event stream complements KV; it does not replace it.
 
 ### Worked example
 
-**Puller side** — emit after a successful claim:
+**Puller side** — emit after a successful claim (extend events follow the
+same shape with `event:"extend"` and an updated `due_at`):
 
 ```sh
 bucket=sesh_tasks_workflow_4bf92f35
 task_id=01HXX...
+instance_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)  # stable per process
 
 # Step 2: CAS claim (see Pull protocol above)
 nats kv put $bucket $task_id "$new" --revision=$prev_rev
 
-# Step 2a: emit status event (best-effort, UTC timestamp)
+# Step 2a: emit status event (best-effort, §8.3-convergent shape).
+# interval_s is in seconds — matches the extend interval (see step 3).
 nats pub "sesh.task.${bucket}.${task_id}.events" \
-  "$(jq -n --arg puller "researcher:agent-042" \
-           --arg due_at "$due_at" \
-     '{event:"claimed",puller:$puller,ts:(now|strftime("%Y-%m-%dT%H:%M:%SZ")),due_at:$due_at}')"
+  "$(jq -n --arg agent      "researcher" \
+           --arg owner      "${SESH_OWNER:-$USER}" \
+           --arg session    "${SESH_SESSION:-}" \
+           --arg instance_id "$instance_id" \
+           --arg task_id    "$task_id" \
+           --arg due_at     "$due_at" \
+     '{agent:$agent, owner:$owner, session:$session,
+       instance_id:$instance_id,
+       ts:(now|strftime("%Y-%m-%dT%H:%M:%SZ")),
+       interval_s:10,
+       event:"claimed", task_id:$task_id, due_at:$due_at}')"
 ```
 
-**Watcher side** — subscribe to learn the moment any task is claimed.
-Note that `due_at` is null on terminal events, so the watcher only
-reads it for `claimed` and `extend`:
+**Watcher side** — one parser handles both `sesh.task.*.*.events` (task
+pullers) and `agents.hb.*.*.*` (§8.3 agent heartbeats). Both share the
+six common fields; the task tail is additive and absent from pure §8.3
+heartbeats:
 
 ```sh
-# Subscribe and react to each message
-nats sub "sesh.task.${bucket}.*.events" | while read -r msg; do
-  event=$(jq -r .event <<<"$msg")
-  puller=$(jq -r .puller <<<"$msg")
+# Subscribe to both task events AND agent heartbeats — one liveness stream
+(
+  nats sub "sesh.task.${bucket}.*.events" &
+  nats sub "agents.hb.*.*.*" &
+  wait
+) | while read -r msg; do
+  # Common §8.3 fields — present in both event types
+  instance_id=$(jq -r .instance_id <<<"$msg")
+  agent=$(jq -r .agent <<<"$msg")
+  ts=$(jq -r .ts <<<"$msg")
+
+  # Task-specific fields — absent (or null) in pure §8.3 heartbeats
+  event=$(jq -r '.event // "heartbeat"' <<<"$msg")
+  task_id=$(jq -r '.task_id // ""' <<<"$msg")
+
   case $event in
-    claimed)  echo "Task claimed by $puller — reset inactivity timer" ;;
-    extend)   echo "Puller $puller still alive, due_at extended" ;;
-    complete) echo "Task completed by $puller" ;;
-    fail)     echo "Task failed by $puller" ;;
-    *)        ;;   # silently ignore unknown events
+    claimed)   echo "[$instance_id] Task $task_id claimed by $agent — reset timer" ;;
+    extend)    echo "[$instance_id] Puller $agent still alive at $ts" ;;
+    complete)  echo "[$instance_id] Task $task_id completed by $agent" ;;
+    fail)      echo "[$instance_id] Task $task_id failed by $agent" ;;
+    heartbeat) echo "[$instance_id] Agent $agent heartbeat at $ts" ;;
+    *)         ;;   # silently ignore unknown event values
   esac
+  # Update liveness table: last_seen[$instance_id] = ts
 done
 ```
 
@@ -276,6 +341,11 @@ no longer waits up to one extend-interval (typically 10s) to learn that
 a task was pulled. The sweeper uses the same signal to distinguish
 "claimed and working" (`claimed` received, `due_at` advancing) from
 "claimed and crashed" (`claimed` never received, `due_at` lapsed).
+
+Liveness trackers key on `instance_id` and consider an instance offline
+after 3× `interval_s` of silence — the same rule that §8.3 prescribes
+for agent heartbeats (see
+[`synadia-agents-on-sesh.md § 7.1`](./synadia-agents-on-sesh.md#71-heartbeat-pubsub-81-83)).
 
 ## Sweeper
 
