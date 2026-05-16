@@ -20,9 +20,10 @@ import (
 // field set. Codifies the on-disk schema sub-leaves and clients consume.
 func TestSessionState_RoundTrip(t *testing.T) {
 	in := SessionState{
-		PID:     12345,
-		NATSURL: "nats://127.0.0.1:54321",
-		LeafURL: "nats-leaf://127.0.0.1:54322",
+		PID:       12345,
+		NATSURL:   "nats://127.0.0.1:54321",
+		NATSWSURL: "ws://127.0.0.1:54323",
+		LeafURL:   "nats-leaf://127.0.0.1:54322",
 	}
 	data, err := json.Marshal(in)
 	if err != nil {
@@ -37,6 +38,44 @@ func TestSessionState_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestSessionState_NATSWSURLOmitEmpty pins the omitempty contract for the
+// new nats_ws_url field. When WebSocket is disabled the URL is empty and
+// the field must not appear in the on-disk JSON — backward compatibility
+// for consumers that haven't learned about the field yet, and a clean
+// signal to consumers that have ("missing" means "no WS available").
+func TestSessionState_NATSWSURLOmitEmpty(t *testing.T) {
+	in := SessionState{
+		PID:     1,
+		NATSURL: "nats://127.0.0.1:1",
+		LeafURL: "nats-leaf://127.0.0.1:2",
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "nats_ws_url") {
+		t.Errorf("nats_ws_url present in JSON when URL is empty: %s", data)
+	}
+}
+
+// TestSessionState_NATSWSURLPresent confirms the field IS emitted when
+// non-empty — protects against accidentally tagging the field with a
+// flag that suppresses output unconditionally.
+func TestSessionState_NATSWSURLPresent(t *testing.T) {
+	in := SessionState{
+		PID:       1,
+		NATSURL:   "nats://127.0.0.1:1",
+		NATSWSURL: "ws://127.0.0.1:3",
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"nats_ws_url":"ws://127.0.0.1:3"`) {
+		t.Errorf("nats_ws_url missing or wrong shape in JSON: %s", data)
+	}
+}
+
 // TestSessionState_BackCompat verifies a PID-only file written by an older
 // sesh still parses cleanly — empty URL fields rather than parse failure.
 // This keeps in-flight session files readable across a version bump.
@@ -46,7 +85,7 @@ func TestSessionState_BackCompat(t *testing.T) {
 	if err := json.Unmarshal(old, &s); err != nil {
 		t.Fatalf("legacy parse failed: %v", err)
 	}
-	if s.PID != 99 || s.NATSURL != "" || s.LeafURL != "" {
+	if s.PID != 99 || s.NATSURL != "" || s.LeafURL != "" || s.NATSWSURL != "" {
 		t.Fatalf("legacy parse got %+v", s)
 	}
 }

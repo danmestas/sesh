@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/alecthomas/kong v1.15.0
-	github.com/danmestas/EdgeSync v0.0.19
+	github.com/danmestas/EdgeSync v0.0.20
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.49.0
 )

@@ -25,9 +25,11 @@ type HubServeCmd struct {
 	Keepalive bool `help:"Stay alive past the last session disconnect. Default: exit when last leaf disconnects."`
 
 	// Override knobs — rarely needed. The default ports are auto-picked.
-	HTTPPort       int `help:"Fossil HTTP port (0 = auto)" default:"0"`
-	NATSClientPort int `help:"NATS client port (0 = auto)" default:"0"`
-	NATSLeafPort   int `help:"NATS leafnode port (0 = auto)" default:"0"`
+	HTTPPort          int  `help:"Fossil HTTP port (0 = auto)" default:"0"`
+	NATSClientPort    int  `help:"NATS client port (0 = auto)" default:"0"`
+	NATSLeafPort      int  `help:"NATS leafnode port (0 = auto)" default:"0"`
+	NATSWebSocketPort int  `help:"NATS WebSocket port (0 = auto)" default:"0"`
+	DisableWebSocket  bool `name:"disable-ws" help:"Disable the embedded NATS WebSocket listener. Default: enabled."`
 
 	// StartupGrace is how long to wait for the first leaf to connect after
 	// startup before declaring the hub abandoned and exiting. Only applies
@@ -55,12 +57,14 @@ func (c *HubServeCmd) Run() error {
 	defer cancel()
 
 	h, err := hub.NewHub(ctx, hub.Config{
-		RepoPath:       repoPath,
-		ServerName:     "sesh-hub",
-		NATSStoreDir:   hubStoreDir(seshDir),
-		FossilHTTPPort: c.HTTPPort,
-		NATSClientPort: c.NATSClientPort,
-		NATSLeafPort:   c.NATSLeafPort,
+		RepoPath:          repoPath,
+		ServerName:        "sesh-hub",
+		NATSStoreDir:      hubStoreDir(seshDir),
+		FossilHTTPPort:    c.HTTPPort,
+		NATSClientPort:    c.NATSClientPort,
+		NATSLeafPort:      c.NATSLeafPort,
+		EnableWebSocket:   !c.DisableWebSocket,
+		NATSWebSocketPort: c.NATSWebSocketPort,
 		// Inherited from `sesh up` so the hub's Fossil subscribes to the
 		// same EdgeSync fossil-sync subject as the project's leaves.
 		// Empty (e.g. hand-launched hub) preserves prior auto-generated

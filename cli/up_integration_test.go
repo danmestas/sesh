@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -55,6 +56,20 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	dial(t, state.NATSURL, "NATSURL")
 	dial(t, state.LeafURL, "LeafURL")
 
+	// nats_ws_url is the WebSocket endpoint for browser / CF Workers
+	// clients. WS is enabled by default; the field must be present and
+	// the underlying TCP socket dialable. (NATS-level WS pub/sub
+	// round-trip is covered by EdgeSync's hub package tests; sesh's
+	// job here is just to confirm the URL surfaces in the session JSON
+	// and the socket is bound end-to-end.)
+	if state.NATSWSURL == "" {
+		t.Fatal("nats_ws_url missing from session JSON (WS default-enabled)")
+	}
+	if !strings.HasPrefix(state.NATSWSURL, "ws://") {
+		t.Errorf("nats_ws_url = %q, want ws:// scheme", state.NATSWSURL)
+	}
+	dial(t, state.NATSWSURL, "NATSWSURL")
+
 	// hub.nats.url is the hub's client NATS URL — clients doing
 	// hub/project/workflow-scoped KV work connect here so their KV
 	// buckets live in the shared (hub) JetStream domain, not in a
@@ -99,6 +114,7 @@ func readTrimmed(t *testing.T, path string) string {
 type stateOnDisk struct {
 	PID       int    `json:"pid"`
 	NATSURL   string `json:"nats_url"`
+	NATSWSURL string `json:"nats_ws_url"`
 	LeafURL   string `json:"leaf_url"`
 	FossilURL string `json:"fossil_url"`
 }
