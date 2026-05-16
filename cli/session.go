@@ -11,17 +11,40 @@ import (
 	"time"
 )
 
+// AgentRef is a snapshot of one live agent entry in the session's agents[]
+// array. It mirrors the fields callers need from $SRV.INFO.agents without
+// requiring a NATS round-trip.
+//
+// Fields are derived from the micro service's INFO response:
+//   - Agent      ← metadata.agent
+//   - Owner      ← metadata.owner
+//   - InstanceID ← service id (the framework-assigned opaque string)
+//   - Subject    ← the "prompt" endpoint's subject (first endpoint named "prompt",
+//                  or the first endpoint if none is named "prompt")
+type AgentRef struct {
+	Agent      string `json:"agent"`
+	Owner      string `json:"owner"`
+	InstanceID string `json:"instance_id"`
+	Subject    string `json:"subject"`
+}
+
 // SessionState is the project-local JSON at <cwd>/.sesh/sessions/<label>.json.
 //
 // Written in two phases by the Session module: ClaimSession creates the file
 // O_EXCL with PID only (the atomic ownership claim), then Session.Publish
 // overwrites with the URLs once the hub has bound its ports. Sub-leaves and
 // NATS clients read NATSURL/LeafURL to attach without grepping logs.
+//
+// Agents[] is updated by the session watcher whenever agents register or
+// deregister on $SRV.INFO.agents. It is eventual (best-effort, ~1s lag)
+// and defaults to [] when absent — backward-compatible with older files
+// that did not include the field.
 type SessionState struct {
-	PID       int    `json:"pid"`
-	NATSURL   string `json:"nats_url,omitempty"`   // for NATS clients under this session
-	LeafURL   string `json:"leaf_url,omitempty"`   // for EdgeSync leaves to solicit upstream
-	FossilURL string `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
+	PID       int        `json:"pid"`
+	NATSURL   string     `json:"nats_url,omitempty"`   // for NATS clients under this session
+	LeafURL   string     `json:"leaf_url,omitempty"`   // for EdgeSync leaves to solicit upstream
+	FossilURL string     `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
+	Agents    []AgentRef `json:"agents,omitempty"`     // live agents in this session; eventual, updated by watcher
 }
 
 // Session owns a project-local state file at <stateDir>/<label>.json. It
@@ -84,6 +107,50 @@ func (s *Session) Publish(state SessionState) error {
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("publish session state: %w", err)
 	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal session state: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("temp session state: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename session state: %w", err)
+	}
+	return nil
+}
+
+// UpdateAgents atomically rewrites the agents[] field of the session JSON.
+// It reads the current file, replaces the Agents slice with agents, and
+// writes back via tempfile+rename. Returns fs.ErrNotExist if the session
+// file has been removed (i.e. the session has ended).
+//
+// UpdateAgents is NOT safe for concurrent invocation; callers MUST serialize
+// via a single writer per session (in practice, the watcher goroutine started
+// by Starter.serve()). Concurrent readers on any goroutine are safe — the
+// temp-file-and-rename never exposes a partial file.
+func (s *Session) UpdateAgents(agents []AgentRef) error {
+	path := sessionFilePath(s.stateDir, s.label)
+	state, err := readSessionFile(path)
+	if err != nil {
+		return err // includes fs.ErrNotExist when session is gone
+	}
+	if agents == nil {
+		agents = []AgentRef{}
+	}
+	state.Agents = agents
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("marshal session state: %w", err)
