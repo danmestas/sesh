@@ -246,6 +246,15 @@ Recommended cadence: **30 s** (§8.2). Payload (§8.3):
 Observers key liveness on `instance_id` and consider an instance offline
 after 3× `interval_s` of silence (§8.2).
 
+**Convergent liveness with task pullers.** Sesh task-puller status events
+(`sesh.task.*.*.events`) carry the same six §8.3 fields (`agent`, `owner`,
+`session`, `instance_id`, `ts`, `interval_s`) plus a task-specific tail
+(`event`, `task_id`, `due_at`). A liveness tracker subscribed to both
+`agents.hb.*.*.*` and `sesh.task.*.*.events` can handle both with one
+parser, keying on `instance_id`. See
+[`docs/task-management.md § Status events`](./task-management.md#status-events)
+for the full field table and worked example.
+
 ### 7.2 Shutdown heartbeat (§8.6)
 
 Before a graceful shutdown agents SHOULD publish one final heartbeat with an
