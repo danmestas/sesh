@@ -306,6 +306,11 @@ func (s *Starter) serve(ctx context.Context) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.h.ServeHTTP(ctx) }()
 
+	// Start the agent watcher: polls $SRV.INFO.agents and keeps
+	// agents[] in the session JSON current. Best-effort — watcher
+	// errors are logged, not fatal.
+	go runAgentWatcher(ctx, s.h.NATSURL(), s.sessHandle, s.cmd.Session)
+
 	select {
 	case <-ctx.Done():
 	case err := <-serveErr:

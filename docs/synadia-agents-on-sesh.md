@@ -380,6 +380,48 @@ One line per agent-side item in the §12 checklist:
 
 ---
 
+## 11. Outside-the-mesh discovery (`agents[]` in the session JSON)
+
+External tools that cannot issue a `$SRV.INFO.agents` request — shell scripts,
+`sesh-ops` dashboards, CI runners — can read `.sesh/sessions/<label>.json` to
+discover which agents are live in a session. The running `sesh up` process
+maintains an `agents[]` array in that file, updated within ~1 s of each
+registration or deregistration. The array is a best-effort, eventual-consistent
+mirror of `$SRV.INFO.agents` filtered to the session by `metadata.session`.
+The bus is authoritative; the file is a convenience.
+
+```json
+{
+  "pid": 12345,
+  "nats_url": "nats://127.0.0.1:54321",
+  "leaf_url": "nats-leaf://127.0.0.1:7422",
+  "fossil_url": "http://127.0.0.1:8080/",
+  "agents": [
+    {
+      "agent": "claude-code",
+      "owner": "aconnolly",
+      "instance_id": "VMKS6MHK71PCPWGY38A7N5",
+      "subject": "agents.prompt.claude-code.aconnolly.synadia-com-2"
+    }
+  ]
+}
+```
+
+Field sources:
+
+| Field         | Source in `$SRV.INFO.agents` response           |
+|---------------|-------------------------------------------------|
+| `agent`       | `metadata.agent`                                |
+| `owner`       | `metadata.owner`                                |
+| `instance_id` | top-level `id` (framework-assigned opaque ID)   |
+| `subject`     | the `prompt` endpoint's `subject`               |
+
+`agents[]` is absent from files written by older `sesh` versions; readers
+MUST treat a missing field as an empty array. Write is atomic (temp-file +
+rename) so readers never see a partial file.
+
+---
+
 ## Further reading
 
 - [`docs/synadia-comparison.md`](./synadia-comparison.md) — layer map and rationale for adopting Synadia §3
