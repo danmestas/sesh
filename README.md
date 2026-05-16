@@ -18,6 +18,15 @@ sesh                 ← user-facing CLI (up/down/hub) — session vocabulary, ~
 
 Dependency arrow goes one way: sesh depends on EdgeSync, never the reverse.
 
+## Synadia Agent Protocol
+
+Agents running inside a sesh session register as NATS micro services under
+`name = "agents"`, making them discoverable via `$SRV.INFO.agents` with no
+per-consumer protocol negotiation. See
+[`docs/synadia-agents-on-sesh.md`](docs/synadia-agents-on-sesh.md) for the
+full presence contract (identity, connection, subjects, endpoints, streaming,
+and liveness).
+
 ## Commands
 
 - `sesh up --session=<label> [--scope=session|project]` — bring a session up. Cwd-derived project name. Foreground; blocks until SIGINT. Auto-spawns the hub if none is running. See [Fossil scope](#fossil-scope-session-vs-project) for `--scope`.
