@@ -50,7 +50,7 @@ sesh up --session=morning
 
 # In another shell, look at what's running
 cat ~/.sesh/hub.url                              # hub's NATS leaf URL
-cat .sesh/sessions/morning.json                  # {"pid":..,"nats_url":..,"leaf_url":..,"fossil_url":..,"agents":[..]}
+cat .sesh/sessions/morning.json                  # {"pid":..,"nats_url":..,"nats_ws_url":..,"leaf_url":..,"fossil_url":..,"agents":[..]}
 
 # End the session — hub auto-shuts down if this was the last session
 sesh down --session=morning
@@ -61,6 +61,12 @@ sesh down --session=morning
 A live `sesh up` publishes its NATS client URL and leafnode listener URL in
 `.sesh/sessions/<label>.json`. Sub-leaves and clients dial those without
 grepping logs.
+
+`nats_ws_url` is the loopback WebSocket NATS endpoint (`ws://127.0.0.1:NNNN`,
+`no_tls`). It is enabled by default — opt out with `sesh up --disable-ws`.
+Browser clients and Cloudflare Worker / Durable Object agents connect through
+this URL via `@nats-io/transport-websockets`, since neither runtime can open
+TCP sockets. The field is `omitempty`; absent on opt-out.
 
 ```sh
 # EdgeSync leaf node under this session
@@ -89,7 +95,7 @@ nats --server="$NATS" sub '>'
 └── hub.log           ← stderr from auto-spawned hub
 
 <cwd>/.sesh/sessions/
-├── <label>.json      ← {pid, nats_url, leaf_url, fossil_url, agents[]} — claimed
+├── <label>.json      ← {pid, nats_url, nats_ws_url, leaf_url, fossil_url, agents[]} — claimed
 │                       PID-only via O_EXCL, URLs filled in once the embedded hub
 │                       binds its ports, agents[] updated as services register;
 │                       file removed on graceful exit

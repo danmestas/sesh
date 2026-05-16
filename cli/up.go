@@ -25,9 +25,17 @@ import (
 type UpCmd struct {
 	Session string `required:"" help:"Session label (free-form)"`
 
-	HTTPPort       int `help:"Fossil HTTP port (0 = auto)" default:"0"`
-	NATSClientPort int `help:"NATS client port (0 = auto)" default:"0"`
-	NATSLeafPort   int `help:"NATS leafnode port (0 = auto)" default:"0"`
+	HTTPPort          int `help:"Fossil HTTP port (0 = auto)" default:"0"`
+	NATSClientPort    int `help:"NATS client port (0 = auto)" default:"0"`
+	NATSLeafPort      int `help:"NATS leafnode port (0 = auto)" default:"0"`
+	NATSWebSocketPort int `help:"NATS WebSocket port (0 = auto)" default:"0"`
+	// DisableWebSocket lets the operator turn off the embedded NATS
+	// WebSocket listener. Default is enabled — sesh's loopback-only
+	// posture makes the WS endpoint dialable for browser / Cloudflare
+	// Workers clients via @nats-io/transport-websockets without
+	// surfacing any extra knob. Opt-out is for environments that want
+	// to minimize listening sockets.
+	DisableWebSocket bool `name:"disable-ws" help:"Disable the embedded NATS WebSocket listener (advertised as nats_ws_url in the session JSON). Default: enabled."`
 
 	// Seed controls what gets committed to this session's Fossil repo
 	// at sesh up. Only applies on fresh repos — a session that's been
@@ -240,15 +248,17 @@ func (s *Starter) acquireHub() error {
 // solicit. EdgeSync's SeedFromUpstream fires here for SourceHub plans.
 func (s *Starter) bindHub(ctx context.Context) error {
 	h, err := hub.NewHub(ctx, hub.Config{
-		RepoPath:         s.repoPath,
-		ServerName:       s.name,
-		NATSStoreDir:     s.storeDir,
-		FossilHTTPPort:   s.cmd.HTTPPort,
-		NATSClientPort:   s.cmd.NATSClientPort,
-		NATSLeafPort:     s.cmd.NATSLeafPort,
-		LeafUpstream:     s.leafURL,
-		ProjectCode:      s.projectCode,
-		SeedFromUpstream: s.plan.HubFossilURL,
+		RepoPath:          s.repoPath,
+		ServerName:        s.name,
+		NATSStoreDir:      s.storeDir,
+		FossilHTTPPort:    s.cmd.HTTPPort,
+		NATSClientPort:    s.cmd.NATSClientPort,
+		NATSLeafPort:      s.cmd.NATSLeafPort,
+		EnableWebSocket:   !s.cmd.DisableWebSocket,
+		NATSWebSocketPort: s.cmd.NATSWebSocketPort,
+		LeafUpstream:      s.leafURL,
+		ProjectCode:       s.projectCode,
+		SeedFromUpstream:  s.plan.HubFossilURL,
 	})
 	if err != nil {
 		return fmt.Errorf("sesh up: %w", err)
@@ -278,6 +288,7 @@ func (s *Starter) publishSession() error {
 	if err := s.sessHandle.Publish(SessionState{
 		PID:       os.Getpid(),
 		NATSURL:   s.h.NATSURL(),
+		NATSWSURL: s.h.NATSWebSocketURL(),
 		LeafURL:   s.h.LeafURL(),
 		FossilURL: "http://" + s.h.HTTPAddr() + "/",
 	}); err != nil {

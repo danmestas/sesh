@@ -20,7 +20,7 @@ import (
 //   - Owner      ← metadata.owner
 //   - InstanceID ← service id (the framework-assigned opaque string)
 //   - Subject    ← the "prompt" endpoint's subject (first endpoint named "prompt",
-//                  or the first endpoint if none is named "prompt")
+//     or the first endpoint if none is named "prompt")
 type AgentRef struct {
 	Agent      string `json:"agent"`
 	Owner      string `json:"owner"`
@@ -41,10 +41,11 @@ type AgentRef struct {
 // that did not include the field.
 type SessionState struct {
 	PID       int        `json:"pid"`
-	NATSURL   string     `json:"nats_url,omitempty"`   // for NATS clients under this session
-	LeafURL   string     `json:"leaf_url,omitempty"`   // for EdgeSync leaves to solicit upstream
-	FossilURL string     `json:"fossil_url,omitempty"` // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
-	Agents    []AgentRef `json:"agents,omitempty"`     // live agents in this session; eventual, updated by watcher
+	NATSURL   string     `json:"nats_url,omitempty"`    // for NATS clients under this session
+	NATSWSURL string     `json:"nats_ws_url,omitempty"` // WebSocket NATS endpoint (ws://, loopback, no_tls); for browser / Cloudflare Workers clients via @nats-io/transport-websockets. Present iff the embedded NATS server has WebSocket enabled.
+	LeafURL   string     `json:"leaf_url,omitempty"`    // for EdgeSync leaves to solicit upstream
+	FossilURL string     `json:"fossil_url,omitempty"`  // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
+	Agents    []AgentRef `json:"agents,omitempty"`      // live agents in this session; eventual, updated by watcher
 }
 
 // Session owns a project-local state file at <stateDir>/<label>.json. It
