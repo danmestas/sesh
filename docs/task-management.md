@@ -169,6 +169,114 @@ new=$(jq 'if .attempts >= .max_attempts then .status="failed" else .status="pend
 nats kv put $bucket $task_id "$new" --revision=$rev
 ```
 
+## Status events
+
+After a successful CAS claim (step 2 above), the puller publishes a
+**best-effort, fire-and-forget** event on a plain NATS subject. If the
+publish fails the claim still stands — the KV record is the source of
+truth; the event is a hint. Inspired by the leading-`ack` pattern in
+Synadia Agent SDK §6.4, which resets a caller's inactivity timeout
+before any latency-inducing work begins.
+
+### Subject
+
+```
+sesh.task.<bucket>.<task-id>.events
+```
+
+`<bucket>` is the KV bucket name verbatim (e.g., `sesh_tasks_workflow_4bf92f35`).
+`<task-id>` is the task's ULID (e.g., `01HXX...`). The dot-separated
+subject is fine for plain pub/sub; NATS KV bucket names use underscores,
+but NATS subjects allow dots.
+
+Watchers subscribe with a wildcard to learn the moment any task in the
+bucket changes state, without polling KV:
+
+```
+sesh.task.<bucket>.*.events
+```
+
+### Payload
+
+```json
+{
+  "event": "claimed",
+  "puller": "researcher:agent-042",
+  "ts": "2026-05-16T18:00:00Z",
+  "due_at": "2026-05-16T18:00:30Z"
+}
+```
+
+Field table:
+
+| Field    | Type             | Present  | Meaning                                                                                       |
+| -------- | ---------------- | -------- | --------------------------------------------------------------------------------------------- |
+| `event`  | string           | always   | Lifecycle token; see values below                                                             |
+| `puller` | string           | always   | `role:agent-id` of the emitting puller                                                        |
+| `ts`     | string (RFC3339) | always   | Wall time of the event (UTC)                                                                  |
+| `due_at` | string (RFC3339) | always   | Current `due_at` from the KV record. May be `null` on `complete` and `fail` (no future deadline). |
+
+### Event values
+
+| Value      | When emitted                                            |
+| ---------- | ------------------------------------------------------- |
+| `claimed`  | Immediately after the CAS that moves status → `in_progress` |
+| `extend`   | After each successful `due_at` extension                |
+| `complete` | After the CAS that moves status → `completed`           |
+| `fail`     | After the CAS that moves status → `failed` or back to `pending` |
+
+Receivers **MUST** silently ignore unknown event values — forward
+compatibility for future lifecycle tokens.
+
+### Delivery semantics
+
+Plain pub/sub (no JetStream). Messages are not persisted; a subscriber
+that is offline at claim time misses the event and falls back to polling
+KV. The event stream complements KV; it does not replace it.
+
+### Worked example
+
+**Puller side** — emit after a successful claim:
+
+```sh
+bucket=sesh_tasks_workflow_4bf92f35
+task_id=01HXX...
+
+# Step 2: CAS claim (see Pull protocol above)
+nats kv put $bucket $task_id "$new" --revision=$prev_rev
+
+# Step 2a: emit status event (best-effort, UTC timestamp)
+nats pub "sesh.task.${bucket}.${task_id}.events" \
+  "$(jq -n --arg puller "researcher:agent-042" \
+           --arg due_at "$due_at" \
+     '{event:"claimed",puller:$puller,ts:(now|strftime("%Y-%m-%dT%H:%M:%SZ")),due_at:$due_at}')"
+```
+
+**Watcher side** — subscribe to learn the moment any task is claimed.
+Note that `due_at` is null on terminal events, so the watcher only
+reads it for `claimed` and `extend`:
+
+```sh
+# Subscribe and react to each message
+nats sub "sesh.task.${bucket}.*.events" | while read -r msg; do
+  event=$(jq -r .event <<<"$msg")
+  puller=$(jq -r .puller <<<"$msg")
+  case $event in
+    claimed)  echo "Task claimed by $puller — reset inactivity timer" ;;
+    extend)   echo "Puller $puller still alive, due_at extended" ;;
+    complete) echo "Task completed by $puller" ;;
+    fail)     echo "Task failed by $puller" ;;
+    *)        ;;   # silently ignore unknown events
+  esac
+done
+```
+
+The watcher resets its inactivity timer on `claimed` immediately — it
+no longer waits up to one extend-interval (typically 10s) to learn that
+a task was pulled. The sweeper uses the same signal to distinguish
+"claimed and working" (`claimed` received, `due_at` advancing) from
+"claimed and crashed" (`claimed` never received, `due_at` lapsed).
+
 ## Sweeper
 
 A long-running loop (an orchestrator can run one as a background
@@ -190,6 +298,13 @@ done
 ```
 
 Multiple sweepers are safe — CAS ensures only one succeeds per task.
+
+The sweeper observes the status events from the section above to
+distinguish "claimed and working" (a `claimed` was seen, `extend`
+events keep arriving) from "claimed and crashed" (no `extend` events,
+`due_at` lapses). A stale `due_at` triggers the kick-back to `pending`
+regardless of which case it is; the events just shorten the time to
+diagnose which happened.
 
 ## Watching for changes
 

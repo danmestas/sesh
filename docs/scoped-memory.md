@@ -264,6 +264,14 @@ nats kv history <bucket> <key>            # version history (if enabled)
 nats kv watch <bucket>                    # tail change events
 ```
 
+Task buckets (`sesh_tasks_<scope>_<scope-id>`) emit real-time status
+events on plain pub/sub subjects alongside their KV records. The subject
+pattern `sesh.task.<bucket>.<task-id>.events` carries `claimed`,
+`extend`, `complete`, and `fail` lifecycle tokens; subscribers learn the
+moment a task is claimed without polling KV. See [Task management —
+Status events](./task-management.md#status-events) for the full payload
+shape and watcher example.
+
 ## Further reading
 
 - [Message envelope](./message-envelope.md) — trace-id binding for workflow scope
