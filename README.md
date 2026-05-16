@@ -20,14 +20,18 @@ Dependency arrow goes one way: sesh depends on EdgeSync, never the reverse.
 
 ## Synadia Agent Protocol
 
-Agents running inside a sesh session register as NATS micro services under
-`name = "agents"`, making them discoverable via `$SRV.INFO.agents` with no
-per-consumer protocol negotiation. See
-[`docs/synadia-agents-on-sesh.md`](docs/synadia-agents-on-sesh.md) for the
-full presence contract (identity, connection, subjects, endpoints, streaming,
-and liveness), and [`docs/sesh-ref-agent.md`](docs/sesh-ref-agent.md) for the
-executable spec — a minimal Go agent (`cmd/sesh-ref-agent/`) that the contract
-is validated against.
+Sesh speaks the [Synadia Agent Protocol v0.3](https://github.com/synadia-io/agent-sdk-docs).
+Agents inside a session register as NATS micro services under `name = "agents"`,
+listen on `agents.prompt.<agent>.<owner>.<session>`, and answer `$SRV.INFO.agents`
+for discovery — no per-consumer protocol negotiation. The hub is substrate, not
+an agent; it does not register.
+
+See [`docs/synadia-agents-on-sesh.md`](docs/synadia-agents-on-sesh.md) for the
+presence contract (identity, subjects, endpoints, streaming, liveness),
+[`docs/sesh-ref-agent.md`](docs/sesh-ref-agent.md) for the executable spec
+(`cmd/sesh-ref-agent/`), and [`docs/synadia-comparison.md`](docs/synadia-comparison.md)
+for how sesh's substrate, scoped memory, tasks, goals, and trace envelope sit
+around the wire.
 
 ## Commands
 
@@ -46,7 +50,7 @@ sesh up --session=morning
 
 # In another shell, look at what's running
 cat ~/.sesh/hub.url                              # hub's NATS leaf URL
-cat .sesh/sessions/morning.json                  # {"pid":..,"nats_url":..,"leaf_url":..}
+cat .sesh/sessions/morning.json                  # {"pid":..,"nats_url":..,"leaf_url":..,"fossil_url":..,"agents":[..]}
 
 # End the session — hub auto-shuts down if this was the last session
 sesh down --session=morning
@@ -85,8 +89,9 @@ nats --server="$NATS" sub '>'
 └── hub.log           ← stderr from auto-spawned hub
 
 <cwd>/.sesh/sessions/
-├── <label>.json      ← {pid, nats_url, leaf_url} — claimed PID-only via O_EXCL,
-│                       URLs filled in once the embedded hub binds its ports;
+├── <label>.json      ← {pid, nats_url, leaf_url, fossil_url, agents[]} — claimed
+│                       PID-only via O_EXCL, URLs filled in once the embedded hub
+│                       binds its ports, agents[] updated as services register;
 │                       file removed on graceful exit
 ├── <label>.repo      ← per-session fossil leaf repo
 └── <label>.messaging/  ← per-session JetStream storage
@@ -259,10 +264,10 @@ durable-intent companion to tasks).
 
 ## Upstream contributions
 
-Draft proposals for the `synadia-ai/synadia-agent-sdk-docs` spec live in
+Sesh contributes back to the spec from
 [`docs/synadia-upstream/`](docs/synadia-upstream/): W3C `traceparent`
-header propagation, artifact-by-reference via `metadata.artifact_url`, and
-an informative deployment-patterns appendix.
+propagation, artifact-by-reference via `metadata.artifact_url`, and a
+deployment-patterns appendix.
 
 ## Status
 
