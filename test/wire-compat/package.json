@@ -1,0 +1,18 @@
+{
+  "name": "sesh-wire-compat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Wire-compat test driving sesh-ref-agent from the upstream @synadia-ai/agents TS SDK.",
+  "scripts": {
+    "wire-compat": "tsx wire-compat.ts"
+  },
+  "dependencies": {
+    "@nats-io/transport-node": "^3.0.0",
+    "@synadia-ai/agents": "^0.5.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}

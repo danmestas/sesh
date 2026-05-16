@@ -25,7 +25,9 @@ Agents running inside a sesh session register as NATS micro services under
 per-consumer protocol negotiation. See
 [`docs/synadia-agents-on-sesh.md`](docs/synadia-agents-on-sesh.md) for the
 full presence contract (identity, connection, subjects, endpoints, streaming,
-and liveness).
+and liveness), and [`docs/sesh-ref-agent.md`](docs/sesh-ref-agent.md) for the
+executable spec — a minimal Go agent (`cmd/sesh-ref-agent/`) that the contract
+is validated against.
 
 ## Commands
 
