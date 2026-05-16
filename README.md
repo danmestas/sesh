@@ -246,6 +246,13 @@ pull protocol built on scoped memory), and
 goal records, hierarchical composition, and task linkage — the
 durable-intent companion to tasks).
 
+## Upstream contributions
+
+Draft proposals for the `synadia-ai/synadia-agent-sdk-docs` spec live in
+[`docs/synadia-upstream/`](docs/synadia-upstream/): W3C `traceparent`
+header propagation, artifact-by-reference via `metadata.artifact_url`, and
+an informative deployment-patterns appendix.
+
 ## Status
 
 Spike. Designed during a 2026-05-11 brainstorm; see commit messages for the design rationale captured inline. Out of scope today:
