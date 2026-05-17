@@ -164,11 +164,37 @@ func (c *HubServeCmd) Run() error {
 // pins the hub) is preferred over the alternative (an idle timeout that
 // races a slow editor restart and kills the hub mid-flap, forcing every
 // session to fork-exec a fresh daemon).
+//
+// Poll cadence is split between two regimes to close the issue #61
+// race-where-a-leaf-connects-and-disconnects-between-ticks bug:
+//
+//   - **Pre-hadLeaf** (no leaf observed yet): poll every 50ms. Catches
+//     rapid `sesh up` / `sesh down` cycles (orch bench T1.2) where the
+//     leaf is up for <500ms total. A leaf that connects and disconnects
+//     within 50ms of itself is still possible but vanishingly rare in
+//     practice; if it happens, the 30s startupGrace still bounds the
+//     stuck-hub case.
+//   - **Post-hadLeaf** (a leaf has been observed): drop to 500ms. The
+//     long-lived-session invariant defended in the prose above only
+//     applies once at least one leaf has stably attached, so the fast
+//     pre-hadLeaf cadence does not perturb operator-suspends-laptop
+//     scenarios.
+//
+// The split addresses #61 without touching the brief's load-bearing
+// long-lived-session behavior: faster polling pre-hadLeaf means the
+// observation that a leaf connected at all is more reliable; the
+// steady-state 500ms cadence after first-leaf-observed is unchanged.
 func autoShutdownLoop(ctx context.Context, cancel context.CancelFunc, h *hub.Hub, startupGrace time.Duration) {
 	var hadLeaf atomic.Bool
 	startupDeadline := time.Now().Add(startupGrace)
 
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// preHadLeafTick gives the loop a tight chance to observe `NumLeafs()>0`
+	// before the leaf disconnects, even for sub-500ms connect/disconnect
+	// cycles. Switches to steadyTick once hadLeaf is true.
+	const preHadLeafTick = 50 * time.Millisecond
+	const steadyTick = 500 * time.Millisecond
+
+	ticker := time.NewTicker(preHadLeafTick)
 	defer ticker.Stop()
 
 	for {
@@ -178,7 +204,10 @@ func autoShutdownLoop(ctx context.Context, cancel context.CancelFunc, h *hub.Hub
 		case <-ticker.C:
 			n := h.NumLeafs()
 			if n > 0 {
-				hadLeaf.Store(true)
+				if hadLeaf.CompareAndSwap(false, true) {
+					// First-leaf-observed: relax to steady-state cadence.
+					ticker.Reset(steadyTick)
+				}
 				continue
 			}
 			// n == 0
