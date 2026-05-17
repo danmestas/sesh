@@ -109,6 +109,34 @@ func hubRepoPath(stateDir string) string {
 	return filepath.Join(stateDir, "hub.repo")
 }
 
+// checkoutDir returns <cwd>/.sesh/checkouts/<label> — the materialized
+// fossil working directory for a worker (or operator) bound to the
+// session-or-project repo identified by <label>. The label is the same
+// disambiguator used by .sesh/sessions/<label>.repo (and by the worker's
+// orch-spawned session identity), so .sesh/sessions/<label>.repo and
+// .sesh/checkouts/<label>/ form a 1:1 pair under --scope=session. Under
+// --scope=project, all checkouts share the single .sesh/project.repo
+// repo file but keep distinct working dirs keyed on <label>.
+//
+// Tier-1 safety: .sesh/checkouts/<label>/ is the ONLY path under .sesh/
+// that sesh worktree --force-recreate is permitted to remove. Adjacent
+// trees — .sesh/sessions/, .sesh/messaging/ — are never touched by the
+// worktree code path.
+func checkoutDir(cwd, label string) string {
+	return filepath.Join(projectSeshDir(cwd), "checkouts", label)
+}
+
+// checkoutMarkerPath returns the absolute path to the .fslckout marker
+// file libfossil writes inside a materialized checkout. Stat-ing this
+// file is the cheapest way to ask "does this directory contain a live
+// fossil checkout?" without opening the SQLite DB. On Windows the
+// equivalent marker is _FOSSIL_ — sesh is POSIX-only today so the
+// fixed-name check is fine; the helper centralizes the assumption so
+// the inevitable Windows port has a single call site to fix.
+func checkoutMarkerPath(checkoutDir string) string {
+	return filepath.Join(checkoutDir, ".fslckout")
+}
+
 // hubURLPath returns <stateDir>/hub.url — the daemon's leafnode URL,
 // owned O_EXCL by HubGuard's daemon lease.
 func hubURLPath(stateDir string) string {
