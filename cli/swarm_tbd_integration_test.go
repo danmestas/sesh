@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -93,8 +92,8 @@ func TestSwarmTBD_TwoWorkers_ConvergeOnSharedTrunk(t *testing.T) {
 	// Also exercise Slice 5: worker-cwd should resolve to the same path
 	// the worktree subcommand produced. orch-spawn relies on this
 	// indirection.
-	alphaCwd := mustRunWorkerCwdScope(t, bin, home, project, "alpha", "project")
-	betaCwd := mustRunWorkerCwdScope(t, bin, home, project, "beta", "project")
+	alphaCwd := mustRunWorkerCwd(t, bin, home, project, "alpha", "--scope=project")
+	betaCwd := mustRunWorkerCwd(t, bin, home, project, "beta", "--scope=project")
 	if eq, err := samePath(alphaWT, alphaCwd); err != nil {
 		t.Fatalf("samePath(alphaWT,alphaCwd): %v", err)
 	} else if !eq {
@@ -169,54 +168,4 @@ func TestSwarmTBD_TwoWorkers_ConvergeOnSharedTrunk(t *testing.T) {
 			t.Errorf("tier-1 root vanished during test: %s: %v", root, err)
 		}
 	}
-}
-
-// awaitPeerSees pumps `fossil update`-equivalent (libfossil.Update) on
-// the peer's checkout and polls for the named file to appear with the
-// expected contents. Returns true on success, false on timeout. The
-// caller decides how to fail the test — most callers t.Fatalf so the
-// failure message is specific to the missed direction.
-func awaitPeerSees(peerCheckout, repoPath, name, want string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		// Best-effort update; transient SQLite contention is fine — we
-		// retry on the next loop tick.
-		_ = updateViaLibfossil(repoPath, peerCheckout)
-		if got, err := os.ReadFile(filepath.Join(peerCheckout, name)); err == nil && string(got) == want {
-			return true
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	return false
-}
-
-// mustRunWorkerCwdScope wraps `sesh worker-cwd <label> --scope=<scope>`.
-// Lives here because the existing worker_cwd_integration_test.go uses a
-// scope-coupled signature that doesn't fit the swarm test's call shape;
-// we keep it local to avoid widening the shared helper surface.
-func mustRunWorkerCwdScope(t *testing.T, bin, home, project, label, scope string) string {
-	t.Helper()
-	cmd := exec.Command(bin, "worker-cwd", label, "--scope="+scope)
-	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "HOME="+home)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("sesh worker-cwd %s --scope=%s: %v\n%s", label, scope, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// samePath resolves both inputs through EvalSymlinks and reports whether
-// they refer to the same on-disk path. Used by the swarm test to confirm
-// `sesh worker-cwd` and `sesh worktree` agree on the checkout location.
-func samePath(a, b string) (bool, error) {
-	ar, err := filepath.EvalSymlinks(a)
-	if err != nil {
-		return false, err
-	}
-	br, err := filepath.EvalSymlinks(b)
-	if err != nil {
-		return false, err
-	}
-	return ar == br, nil
 }
