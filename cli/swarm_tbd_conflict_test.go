@@ -17,46 +17,84 @@ import (
 // Two real `sesh up` subprocesses cohabit one project repo via
 // `--scope=project`, each provisioning its own libfossil checkout. Each
 // worker commits divergent edits to shared.txt on its own branch. The
-// test then attempts repo.Merge to consolidate the two leaves into trunk
-// and asserts the two halves of the fossil-worker accessory's discipline:
+// test then attempts repo.Merge to consolidate the two leaves into trunk.
+// The two sub-tests have DIFFERENT scopes — read carefully:
 //
-//   - Sub-test "trivial_disjoint_lines": alpha and beta edit different,
-//     non-overlapping line ranges of shared.txt on separate branches.
-//     libfossil.Repo.Merge auto-resolves via three-way text-merge.
-//     Materializing the merged tip surfaces BOTH workers' contributions.
+//   - Sub-test "trivial_disjoint_lines" is close to a production
+//     assertion. Alpha and beta edit different, non-overlapping line
+//     ranges of shared.txt on separate branches. libfossil.Repo.Merge
+//     auto-resolves via three-way text-merge. Materializing the merged
+//     tip surfaces BOTH workers' contributions via the same
+//     `sesh materialize` path a real consumer would use. The round-trip
+//     through the Go API, the on-disk repo, and the materialize CLI is
+//     exactly what production code paths exercise.
 //
-//   - Sub-test "judgment_same_line": alpha and beta edit the SAME line
-//     range on separate branches. libfossil.Repo.Merge returns a
-//     *MergeConflictError naming shared.txt. The test asserts the error
-//     shape (this is the surface) and does NOT auto-resolve. Resolution
-//     is operator territory.
+//   - Sub-test "judgment_same_line_branch_merge_api" is a libfossil
+//     API-CONTRACT assertion, NOT a production worker-protocol
+//     assertion. Alpha and beta edit the SAME line range on separate
+//     branches. libfossil.Repo.Merge returns a *MergeConflictError
+//     naming shared.txt. The test asserts that error shape on the
+//     branch-merge surface specifically. See the long comment below
+//     about why this is NOT the production conflict path workers will
+//     hit, and what would be needed to test that production path.
 //
-// Why branches and not working-tree merge:
+// Why the judgment sub-test uses Repo.Merge and not the worker's
+// trunk-commit-with-autosync-pull path:
 //
-// The brief in #71 sketches a flow where beta's UNCOMMITTED working file
-// merges with alpha's already-committed change ("beta has alpha's lines
-// 1-3 AND beta's own staged lines 5-7"). libfossil's API doesn't offer
-// that — Checkout.Update is a fast-forward extract that overwrites local
-// uncommitted edits rather than three-way-merging into them, and the
-// only three-way text-merge surface libfossil exposes is Repo.Merge
-// between two distinct branches. So this test models the swarm's
-// "two workers diverged on the same file" reality through the API path
-// that actually exists: each worker commits on its own branch, and the
-// merge into trunk is where the conflict surface lives.
+// The fossil-worker accessory's production conflict path is:
 //
-// If libfossil ever grows a working-tree-merge surface (e.g. `Update`
-// with conflict-marker semantics or a separate `MergeIntoWorkingDir`
-// call), an additional sub-test should be added here covering that
-// path. The discipline being asserted — "trivial auto-merges, judgment
-// surfaces" — is identical in both shapes; only the API entrypoint
-// differs.
+//  1. Worker commits a change to trunk via `co.Checkin`.
+//  2. Autosync pulls a peer's conflicting trunk commit.
+//  3. libfossil calls `Checkout.Update` to merge peer's change into
+//     the local checkout.
+//  4. Working-tree files now contain conflict markers
+//     (`<<<<<<<` / `>>>>>>>`), per libfossil's internal Update at
+//     internal/checkout/update.go:124-128 (which bumps `conflicts++`,
+//     writes the file with markers, and emits a diagnostic) and the
+//     docstring at internal/checkout/update.go:177-178 ("performing
+//     3-way merge where needed to preserve local modifications").
+//  5. The next `co.Checkin` would commit those marker-bearing files
+//     unless the worker surfaces the conflict and stops.
+//
+// So the internal capability — 3-way merge with conflict markers in the
+// working tree — EXISTS in libfossil today. The gap is the public Go
+// API surface:
+//
+//   - libfossil/checkout.go:125-135 wraps the internal Update and
+//     returns plain `error`. The internal function's `(filesWritten,
+//     filesRemoved, conflicts int, err error)` quadruple collapses to a
+//     single `error`, discarding the conflict count. A Go caller
+//     cannot distinguish "succeeded clean" from "succeeded but wrote
+//     conflict markers into the working tree" from "failed to apply at
+//     all" — all three return either `nil` or a generic wrapped error
+//     with no typed surface.
+//
+//   - libfossil's `Repo.Merge` (branch-merge), in contrast, DOES expose
+//     *MergeConflictError as a typed error with conflicted file paths.
+//
+// Therefore the only conflict surface this test CAN assert from Go is
+// the branch-merge API contract on Repo.Merge — not the production
+// trunk-commit-with-autosync-pull conflict path workers will actually
+// hit. The judgment sub-test below is an API-contract test against the
+// surface libfossil currently exposes, not a worker-protocol test.
+//
+// A proper worker-path test would pump `Checkout.Update` directly,
+// scan the working tree for conflict markers, and assert that the next
+// `Checkin` either errors with a surfaceable shape or that an inspect-
+// before-commit hook fires. That test is currently inexpressible
+// against the public libfossil API. The shape gap is tracked at
+// danmestas/libfossil#37 ("feat: expose conflict info on
+// Checkout.Update"). When that lands, a sibling sub-test should be
+// added here covering the worker path.
 //
 // Failure modes this catches:
 //   - Disjoint-line text-merge regresses to whole-file "ours/theirs"
 //     picker (the trivial sub-test would lose one side's edits).
-//   - Same-line conflict stops returning *MergeConflictError (the
-//     judgment sub-test would see a clean merge that drops a side's
-//     work — strictly worse than surfacing the conflict).
+//   - Repo.Merge's same-line conflict stops returning
+//     *MergeConflictError (the judgment sub-test would see a clean
+//     merge that silently drops a side's work — strictly worse than
+//     surfacing the conflict). This is the branch-merge API contract,
+//     not the worker conflict surface.
 //   - The materialize-after-merge round-trip loses the branch-merge
 //     commit (the trivial sub-test's materialize assertion would fail).
 func TestSwarmTBD_ConflictResolution_OperatorHandoff(t *testing.T) {
@@ -68,7 +106,7 @@ func TestSwarmTBD_ConflictResolution_OperatorHandoff(t *testing.T) {
 	}
 
 	t.Run("trivial_disjoint_lines", testSwarmConflict_TrivialDisjointLines)
-	t.Run("judgment_same_line", testSwarmConflict_JudgmentSameLine)
+	t.Run("judgment_same_line_branch_merge_api", testSwarmConflict_JudgmentSameLine_BranchMergeAPI)
 }
 
 // swarmConflictHarness sets up two sesh up subprocesses sharing one
@@ -183,13 +221,24 @@ func testSwarmConflict_TrivialDisjointLines(t *testing.T) {
 	}
 }
 
-// testSwarmConflict_JudgmentSameLine is Scenario B: alpha edits line 5
-// to "ALPHA-EDIT" on branch "alpha-edits", beta edits the SAME line to
+// testSwarmConflict_JudgmentSameLine_BranchMergeAPI is Scenario B and is
+// scoped as a libfossil API-contract assertion. Alpha edits line 5 to
+// "ALPHA-EDIT" on branch "alpha-edits"; beta edits the SAME line to
 // "BETA-EDIT" on branch "beta-edits". The first merge into trunk
 // succeeds (it's a fast-forward from the baseline). The second merge
-// must return *MergeConflictError naming shared.txt — that's the
-// operator-facing surface. The test does NOT resolve the conflict.
-func testSwarmConflict_JudgmentSameLine(t *testing.T) {
+// must return *MergeConflictError naming shared.txt on the Repo.Merge
+// (branch-merge) surface — that is the surface libfossil currently
+// exposes to Go callers, and the only conflict-shape this test can
+// assert today.
+//
+// This is NOT the production worker conflict path. The fossil-worker
+// accessory's conflict path is `Checkout.Update` writing conflict
+// markers into the working tree after an autosync pull; that path's
+// public Go API at libfossil/checkout.go:125-135 returns plain `error`
+// and currently swallows the conflict signal. See the parent test's
+// godoc and danmestas/libfossil#37 for the gap. When that lands, add a
+// sibling sub-test exercising Checkout.Update + next-Checkin.
+func testSwarmConflict_JudgmentSameLine_BranchMergeAPI(t *testing.T) {
 	h := newSwarmConflictHarness(t)
 
 	alphaContent := "line-1\nline-2\nline-3\nline-4\nALPHA-EDIT\nline-6\nline-7\nline-8\nline-9\nline-10\n"
