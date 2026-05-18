@@ -1,7 +1,10 @@
 package cli_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/url"
 	"os"
@@ -91,6 +94,122 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	// hub.nats.url is cleaned up by the hub process on its auto-shutdown
 	// (~500ms after sesh up exits), not by sesh up itself — same as
 	// hub.url. Not asserted here; race-prone.
+}
+
+// TestSeshUp_RejectsLabelTraversal is the tier-1 safety test for the
+// up entrypoint. It exercises validateLabel through `sesh up --session`
+// with the hostile inputs that would otherwise let the label escape its
+// slot under .sesh/. The same matrix as the worktree / materialize
+// retrofit tests — validateLabel sits ABOVE the path math in every
+// label-consuming subcommand.
+//
+// We seed a known canary under .sesh/messaging/ and fingerprint the
+// .sesh/ tree before and after the hostile-input runs. Each invocation
+// must exit non-zero, never bring a session up, and never mutate any
+// existing path under .sesh/.
+func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	cases := []struct {
+		name  string
+		label string
+	}{
+		{"empty", ""},
+		{"dot", "."},
+		{"dotdot", ".."},
+		{"slash_prefix", "/etc"},
+		{"slash_embedded", "foo/bar"},
+		{"backslash_embedded", "foo\\bar"},
+		{"dotdot_embedded", "alpha/../beta"},
+		{"dotdot_only_embedded", "x..y"},
+		{"nul_byte", "alpha\x00beta"},
+		{"leading_dot", ".sessions"},
+		{"whitespace_only", "   "},
+		{"control_char", "alpha\x01"},
+		{"newline", "alpha\nbeta"},
+		{"parent_sessions", "../sessions"},
+		{"deeper_traversal", "../../foo"},
+	}
+
+	bin := buildSesh(t)
+	home := t.TempDir()
+	project := t.TempDir()
+	// .sesh/ tier-1 paths we want to prove are not touched by the
+	// hostile-input runs. We do NOT bring a real session up — the
+	// validator must reject the label before any path math touches
+	// disk.
+	seshDir := filepath.Join(project, ".sesh")
+	if err := os.MkdirAll(filepath.Join(seshDir, "sessions"), 0o755); err != nil {
+		t.Fatalf("seed .sesh/sessions: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(seshDir, "messaging"), 0o755); err != nil {
+		t.Fatalf("seed .sesh/messaging: %v", err)
+	}
+	canary := filepath.Join(seshDir, "messaging", "canary.txt")
+	if err := os.WriteFile(canary, []byte("tier-1\n"), 0o644); err != nil {
+		t.Fatalf("seed canary: %v", err)
+	}
+	before := fingerprintTree(t, seshDir)
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// Per-case deadline. validateLabel must reject and
+			// exit non-zero in well under a second; a regression
+			// that lets the label through would otherwise hang
+			// the test by booting a daemon. CommandContext +
+			// SIGKILL keeps the test bounded so we see a clean
+			// failure rather than a 4-minute test-timeout panic.
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, "up", "--session="+tc.label)
+			cmd.Dir = project
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if err == nil {
+				t.Fatalf("sesh up accepted hostile label %q; stdout=%q stderr=%q",
+					tc.label, stdout.String(), stderr.String())
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				// Ctx-killed means sesh up didn't fail-fast on
+				// the hostile label — it ran long enough that
+				// the deadline elapsed. That's the regression
+				// signature we're guarding against.
+				t.Fatalf("sesh up failed to fail-fast on hostile label %q (deadline-killed); stdout=%q stderr=%q",
+					tc.label, stdout.String(), stderr.String())
+			}
+			// Either Kong rejects the flag (empty label), our
+			// validator rejects it, or os/exec refuses the
+			// arg outright (NUL byte case — argv can't carry
+			// NULs on POSIX). All three are acceptable
+			// provided the exit is non-zero and tier-1 .sesh/
+			// paths survive (asserted at the end of the
+			// parent test). The cue check is best-effort —
+			// for the NUL case Go's exec rejects with
+			// "invalid argument" before the binary ever
+			// runs, so stderr is empty.
+			combined := strings.ToLower(stderr.String() + stdout.String() + err.Error())
+			if !strings.Contains(combined, "label") && !strings.Contains(combined, "session") && !strings.Contains(combined, "invalid argument") {
+				t.Errorf("hostile label %q rejected but no 'label'/'session'/'invalid argument' cue; err=%v stderr=%s",
+					tc.label, err, stderr.String())
+			}
+		})
+	}
+
+	after := fingerprintTree(t, seshDir)
+	if before != after {
+		t.Errorf("tier-1 .sesh/ tree fingerprint drifted after hostile-input up runs:\nbefore=%s\nafter=%s",
+			before, after)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "tier-1\n" {
+		t.Errorf("canary %s mutated by hostile-input up runs; got=%q err=%v",
+			canary, string(got), err)
+	}
 }
 
 // readTrimmed reads a file and trims trailing whitespace. The hub

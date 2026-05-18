@@ -19,6 +19,15 @@ type DownCmd struct {
 }
 
 func (c *DownCmd) Run() error {
+	// Tier-1 safety: validate the session label before ANY path math.
+	// ReadSession / Terminate compose <stateDir>/<label>.json; a
+	// hostile label like "../sessions" would let those calls read or
+	// SIGKILL state outside .sesh/sessions/. The validator MUST sit
+	// above the stateDir lookup — same contract as up.go / worktree.go
+	// / materialize.go.
+	if err := validateLabel(c.Session); err != nil {
+		return fmt.Errorf("invalid session label: %w", err)
+	}
 	stateDir, err := projectStateDir()
 	if err != nil {
 		return err
