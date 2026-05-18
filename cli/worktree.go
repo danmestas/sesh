@@ -61,6 +61,13 @@ type WorktreeCmd struct {
 }
 
 func (c *WorktreeCmd) Run() error {
+	// Tier-1 safety: validate the label before ANY path math. Without
+	// this, a hostile label like "../sessions" would let the rest of
+	// the function read or os.RemoveAll a sibling path under .sesh/.
+	if err := validateLabel(c.Label); err != nil {
+		return fmt.Errorf("invalid label: %w", err)
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getwd: %w", err)
