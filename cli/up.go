@@ -57,6 +57,16 @@ type UpCmd struct {
 }
 
 func (c *UpCmd) Run() error {
+	// Tier-1 safety: validate the session label before ANY path math.
+	// NewStarter computes <cwd>/.sesh/sessions/<label>.repo, the
+	// JetStream storeDir at <cwd>/.sesh/sessions/<label>.messaging/,
+	// and the claim file under .sesh/sessions/<label>.json. A hostile
+	// label like "../sessions" would let those paths escape .sesh/
+	// before we ever touched validateLabel. The validator MUST sit
+	// above NewStarter — same contract as worktree.go / materialize.go.
+	if err := validateLabel(c.Session); err != nil {
+		return fmt.Errorf("invalid session label: %w", err)
+	}
 	s, err := NewStarter(c)
 	if err != nil {
 		return err
