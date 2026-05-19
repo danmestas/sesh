@@ -65,7 +65,7 @@ func (c *UpCmd) Run() error {
 	// before we ever touched validateLabel. The validator MUST sit
 	// above NewStarter — same contract as worktree.go / materialize.go.
 	if err := validateLabel(c.Session); err != nil {
-		return fmt.Errorf("invalid session label: %w", err)
+		return fmt.Errorf("sesh up: invalid label %q: %w", c.Session, err)
 	}
 	s, err := NewStarter(c)
 	if err != nil {
@@ -155,12 +155,12 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 	repoPath, err := repoPathFor(scope, cwd, c.Session)
 	if err != nil {
 		_ = sess.Release()
-		return nil, err
+		return nil, fmt.Errorf("sesh up: %w", err)
 	}
 	storeDir, err := storeDirFor(cwd, c.Session)
 	if err != nil {
 		_ = sess.Release()
-		return nil, err
+		return nil, fmt.Errorf("sesh up: %w", err)
 	}
 	freshRepo := false
 	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {

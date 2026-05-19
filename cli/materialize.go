@@ -92,7 +92,7 @@ func (c *MaterializeCmd) Run() error {
 	// extracts to .sesh/checkouts/.materialize-<label>-<random>/; a
 	// hostile label would let either of those step outside .sesh/.
 	if err := validateLabel(c.Label); err != nil {
-		return fmt.Errorf("invalid label: %w", err)
+		return fmt.Errorf("sesh materialize: invalid label %q: %w", c.Label, err)
 	}
 
 	cwd, err := os.Getwd()
@@ -103,7 +103,7 @@ func (c *MaterializeCmd) Run() error {
 	scope := SeshScope(c.Scope)
 	repoPath, err := repoPathFor(scope, cwd, c.Label)
 	if err != nil {
-		return err
+		return fmt.Errorf("sesh materialize: %w", err)
 	}
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

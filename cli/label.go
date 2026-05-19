@@ -64,9 +64,21 @@ func validateLabel(label string) error {
 	if strings.Contains(label, "..") {
 		return fmt.Errorf("label %q contains '..'", label)
 	}
+	// ASCII-only: reject every rune outside printable 7-bit ASCII
+	// (0x20-0x7e). Higher code points include Unicode confusables —
+	// U+2025 two-dot-leader (visually similar to ".."), U+FF0E
+	// fullwidth full stop (visually similar to ".") — that an operator
+	// or AI agent could accidentally interpolate when typing a label
+	// from a clipboard or paste. The validator does no NFC/NFKC
+	// normalisation, so the only safe stance is to reject every
+	// non-ASCII rune outright. This keeps the same code path that
+	// rejects raw "." and ".." from being bypassed by lookalikes.
 	for _, r := range label {
 		if r < 0x20 || r == 0x7f {
 			return fmt.Errorf("label %q contains a control character (rune %U)", label, r)
+		}
+		if r > 0x7e {
+			return fmt.Errorf("label %q contains a non-ASCII rune %U; labels are restricted to printable 7-bit ASCII", label, r)
 		}
 	}
 	return nil

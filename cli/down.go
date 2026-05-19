@@ -26,7 +26,7 @@ func (c *DownCmd) Run() error {
 	// above the stateDir lookup — same contract as up.go / worktree.go
 	// / materialize.go.
 	if err := validateLabel(c.Session); err != nil {
-		return fmt.Errorf("invalid session label: %w", err)
+		return fmt.Errorf("sesh down: invalid label %q: %w", c.Session, err)
 	}
 	stateDir, err := projectStateDir()
 	if err != nil {

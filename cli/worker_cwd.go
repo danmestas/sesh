@@ -52,7 +52,7 @@ func (c *WorkerCwdCmd) Run() error {
 	// the function stat a sibling path under .sesh/ and reveal its
 	// existence through the error message.
 	if err := validateLabel(c.Label); err != nil {
-		return fmt.Errorf("invalid label: %w", err)
+		return fmt.Errorf("sesh worker-cwd: invalid label %q: %w", c.Label, err)
 	}
 
 	cwd, err := os.Getwd()
@@ -71,7 +71,7 @@ func (c *WorkerCwdCmd) Run() error {
 
 	dir, err := checkoutDir(cwd, c.Label)
 	if err != nil {
-		return err
+		return fmt.Errorf("sesh worker-cwd: %w", err)
 	}
 
 	// Stat the .fslckout marker. We don't stat the dir itself because a

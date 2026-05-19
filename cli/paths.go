@@ -132,7 +132,7 @@ func hubRepoPath(stateDir string) string {
 // is the entire .sesh/ tier-1 safety boundary.
 func checkoutDir(cwd, label string) (string, error) {
 	if err := validateLabel(label); err != nil {
-		return "", fmt.Errorf("checkoutDir: %w", err)
+		return "", fmt.Errorf("invalid label %q: %w", label, err)
 	}
 	return filepath.Join(projectSeshDir(cwd), "checkouts", label), nil
 }

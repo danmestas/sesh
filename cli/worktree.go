@@ -65,7 +65,7 @@ func (c *WorktreeCmd) Run() error {
 	// this, a hostile label like "../sessions" would let the rest of
 	// the function read or os.RemoveAll a sibling path under .sesh/.
 	if err := validateLabel(c.Label); err != nil {
-		return fmt.Errorf("invalid label: %w", err)
+		return fmt.Errorf("sesh worktree: invalid label %q: %w", c.Label, err)
 	}
 
 	cwd, err := os.Getwd()
@@ -76,7 +76,7 @@ func (c *WorktreeCmd) Run() error {
 	scope := SeshScope(c.Scope)
 	repoPath, err := repoPathFor(scope, cwd, c.Label)
 	if err != nil {
-		return err
+		return fmt.Errorf("sesh worktree: %w", err)
 	}
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -89,7 +89,7 @@ func (c *WorktreeCmd) Run() error {
 
 	dir, err := checkoutDir(cwd, c.Label)
 	if err != nil {
-		return err
+		return fmt.Errorf("sesh worktree: %w", err)
 	}
 
 	// --force-recreate: scoped strictly to the per-label checkout dir.
