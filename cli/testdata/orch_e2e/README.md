@@ -25,15 +25,10 @@ shell sequences that touch only the fossil checkout cwd they run in.
   mission loop test (T1.2). Creates `mission.txt`, runs `fossil add`,
   `fossil commit`. Output: the trunk advances by one commit.
 
-### Fossil user registration in recipes
-
-Recipes start with a `fossil user new <name> <name> '' || true` line.
-The sesh-seeded project repo only has `hub` and `nobody` in its user
-table; without an entry for the committer, `fossil commit` rejects
-the commit with "cannot determine user". Recipes register a
-synthetic e2e user, then run `fossil commit` with that user via the
-`USER=<name>` env override. Real orch workers run under an operator
-already in the user table; the fixture stands that step in.
+  Recipes commit under the operator's natural `$USER`. `sesh up`
+  registers `$USER` in the seeded project repo's fossil user table at
+  seed time (sesh#77), so `fossil commit` from a checkout works
+  without any `fossil user new` priming step.
 
 - **`verifier-mission.recipe`** — fossil-verifier stand-in for T1.2.
   Reads the trunk via `fossil timeline`, writes a verdict file

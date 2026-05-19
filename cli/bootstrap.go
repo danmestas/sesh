@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 
 	"github.com/danmestas/EdgeSync/hub"
 )
@@ -120,6 +122,24 @@ type Deps struct {
 //   - SourceGitWorktree: commit the cwd worktree as the initial Fossil
 //     check-in via h.Commit.
 func Apply(ctx context.Context, p Plan, h *hub.Hub, d Deps) error {
+	// Registering the operator's OS $USER in the seeded fossil user
+	// table is independent of which bootstrap source we picked: every
+	// source ends with a usable repo the operator (or a worker spawned
+	// under the operator's UID) may want to `fossil commit` into via
+	// the fossil CLI. The CLI path enforces the user-table check;
+	// libfossil-direct paths (cli/seed.go's hub.Commit) do not, so
+	// seeded-but-empty user tables silently break the CLI path. See
+	// sesh#77 for the failure mode and the fossil-worker accessory
+	// protocol that drove it.
+	//
+	// registerOperatorUser is idempotent (HasUser pre-check) and logs+
+	// continues on any failure — seed-blocking on user-table state
+	// would be worse UX than the late `cannot determine user` error
+	// the operator already tolerates today.
+	if err := registerOperatorUser(h); err != nil {
+		slog.Warn("operator user registration failed (continuing)", "err", err)
+	}
+
 	switch p.Source {
 	case SourceNone:
 		slog.Info("fossil repo pre-existed; not re-seeding", "path", d.RepoPath)
@@ -132,6 +152,67 @@ func Apply(ctx context.Context, p Plan, h *hub.Hub, d Deps) error {
 		return seedFromGitWorktree(ctx, h, d.Cwd, p.SeedMode)
 	}
 	return fmt.Errorf("bootstrap: unknown source %d", p.Source)
+}
+
+// registerOperatorUser ensures the operator's OS user ($USER) exists in
+// the bound hub's fossil user table with check-in capability ('i'). The
+// fossil CLI uses $USER to derive the committer login, and rejects
+// `fossil commit` with "cannot determine user" when that login is not
+// in the user table. cli/seed.go's libfossil-direct path bypasses that
+// check, so without this call a freshly-seeded repo can be committed
+// to via libfossil but NOT via the fossil CLI — which is exactly the
+// path real workers take under the fossil-worker accessory.
+//
+// Idempotency: a HasUser pre-check skips the AddUser call when the
+// user is already present. AddUser also surfaces an "already exists"
+// error from libfossil's UNIQUE constraint when racing — we treat that
+// as success so concurrent `sesh up` invocations against the same
+// project repo don't fight.
+//
+// Capability 'i' (check-in) is the minimum useful — enough to commit
+// but not enough to administer the repo. The operator can elevate
+// manually via `fossil user capabilities` if they need 's' or 'a'.
+//
+// Empty / unusable $USER (container with no USER env, login containing
+// shell metacharacters, etc.) is logged + skipped, not fatal: the seed
+// itself succeeds and the operator surfaces the gap later if they hit
+// `fossil commit`. Refusing to seed because $USER looks weird is worse
+// UX than letting the seed land and waving the warning.
+func registerOperatorUser(h *hub.Hub) error {
+	if h == nil {
+		return fmt.Errorf("hub is nil")
+	}
+	login := strings.TrimSpace(os.Getenv("USER"))
+	if login == "" {
+		slog.Warn("operator $USER empty; skipping fossil user registration " +
+			"— `fossil commit` from a worktree will hit 'cannot determine user'")
+		return nil
+	}
+	// Reject obviously-broken logins. Fossil's user table tolerates a
+	// lot, but a login with control chars or path separators would just
+	// break the eventual `fossil commit` lookup. The validateLabel
+	// matrix elsewhere in this package is overkill for usernames; a
+	// minimal sanity check is enough.
+	if strings.ContainsAny(login, "\x00\n\r/\\") {
+		slog.Warn("operator $USER contains invalid characters; "+
+			"skipping fossil user registration", "user", login)
+		return nil
+	}
+	if h.HasUser(login) {
+		slog.Debug("operator already in fossil user table", "user", login)
+		return nil
+	}
+	if err := h.AddUser(hub.User{Login: login, Caps: "i"}); err != nil {
+		// Race: another `sesh up` (or this run's retry) won the
+		// AddUser. HasUser is the strongest available
+		// post-condition; if it now returns true, treat as success.
+		if h.HasUser(login) {
+			return nil
+		}
+		return fmt.Errorf("add user %q: %w", login, err)
+	}
+	slog.Info("registered operator in fossil user table", "user", login, "caps", "i")
+	return nil
 }
 
 // HubProbe is the result of ProbeHub. Present=true means the hub has
