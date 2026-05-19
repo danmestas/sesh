@@ -101,7 +101,10 @@ func (c *MaterializeCmd) Run() error {
 	}
 
 	scope := SeshScope(c.Scope)
-	repoPath := repoPathFor(scope, cwd, c.Label)
+	repoPath, err := repoPathFor(scope, cwd, c.Label)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf(

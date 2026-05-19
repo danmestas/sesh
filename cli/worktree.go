@@ -74,7 +74,10 @@ func (c *WorktreeCmd) Run() error {
 	}
 
 	scope := SeshScope(c.Scope)
-	repoPath := repoPathFor(scope, cwd, c.Label)
+	repoPath, err := repoPathFor(scope, cwd, c.Label)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf(
@@ -84,7 +87,10 @@ func (c *WorktreeCmd) Run() error {
 		return fmt.Errorf("stat backing repo %s: %w", repoPath, err)
 	}
 
-	dir := checkoutDir(cwd, c.Label)
+	dir, err := checkoutDir(cwd, c.Label)
+	if err != nil {
+		return err
+	}
 
 	// --force-recreate: scoped strictly to the per-label checkout dir.
 	// We never touch the parent .sesh/checkouts/ tree, never .sesh/sessions/,

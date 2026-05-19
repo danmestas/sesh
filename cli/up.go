@@ -152,7 +152,16 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 	}
 
 	scope := SeshScope(c.Scope)
-	repoPath := repoPathFor(scope, cwd, c.Session)
+	repoPath, err := repoPathFor(scope, cwd, c.Session)
+	if err != nil {
+		_ = sess.Release()
+		return nil, err
+	}
+	storeDir, err := storeDirFor(cwd, c.Session)
+	if err != nil {
+		_ = sess.Release()
+		return nil, err
+	}
 	freshRepo := false
 	if _, err := os.Stat(repoPath); errors.Is(err, os.ErrNotExist) {
 		freshRepo = true
@@ -167,7 +176,7 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 		scope:       scope,
 		name:        fmt.Sprintf("%s-session-%s", project, c.Session),
 		repoPath:    repoPath,
-		storeDir:    storeDirFor(cwd, c.Session),
+		storeDir:    storeDir,
 		freshRepo:   freshRepo,
 		projectCode: projectCode,
 	}, nil

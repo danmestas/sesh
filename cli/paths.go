@@ -122,8 +122,19 @@ func hubRepoPath(stateDir string) string {
 // that sesh worktree --force-recreate is permitted to remove. Adjacent
 // trees — .sesh/sessions/, .sesh/messaging/ — are never touched by the
 // worktree code path.
-func checkoutDir(cwd, label string) string {
-	return filepath.Join(projectSeshDir(cwd), "checkouts", label)
+//
+// Defense-in-depth: the label is re-validated here even though every
+// operator entrypoint already validates at the top of Run(). The first
+// gate is the primary defense; this second gate exists so a future
+// entrypoint (or refactor that inlines path math) cannot silently
+// re-introduce path traversal by forgetting the entrypoint-level check.
+// The cost is a sub-microsecond regex; the consequence of a missed gate
+// is the entire .sesh/ tier-1 safety boundary.
+func checkoutDir(cwd, label string) (string, error) {
+	if err := validateLabel(label); err != nil {
+		return "", fmt.Errorf("checkoutDir: %w", err)
+	}
+	return filepath.Join(projectSeshDir(cwd), "checkouts", label), nil
 }
 
 // checkoutMarkerPath returns the absolute path to the .fslckout marker
