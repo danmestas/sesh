@@ -1,0 +1,7 @@
+# hubrestart-post.recipe — alpha post-restart commit for the hub-restart
+# test (T1.3). Must propagate to beta after the central hub was killed
+# and the leaf-side recovery kicked back in.
+fossil user new e2e-alpha e2e-alpha '' 2>/dev/null || true
+echo "after-the-storm" > post-restart.txt
+fossil add post-restart.txt
+USER=e2e-alpha fossil commit -m "post-restart commit"

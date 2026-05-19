@@ -288,6 +288,37 @@ first call in every `sesh worktree`, `sesh materialize`, and
 `sesh worker-cwd` — a hostile label is rejected before any path math
 runs. See sesh#67 + sesh#68 for the gate.
 
+## Testing the swarm
+
+Two e2e test variants live in `cli/`:
+
+- **Mock variant** (`cli/e2e_test.go`, default build tag). The "worker"
+  and "verifier" are the test code itself driving the project repo via
+  the libfossil Go API. Runs in normal CI; covers the load-bearing
+  swarm properties through sesh's leaf-link surface.
+
+  ```bash
+  go test ./cli/ -run TestE2E -count=1 -timeout 360s -v
+  ```
+
+- **Orch variant** (`cli/e2e_orch_test.go`, build tag `orch_e2e`). Drives
+  real `orch-spawn claude --sesh-session <label>` subprocesses through
+  recipe fixtures executed by a stub-claude. Validates the same
+  properties through the real subprocess chain (orch-spawn -> tmux ->
+  claude).
+
+  ```bash
+  go test -tags=orch_e2e ./cli/ -run TestE2E -count=1 -timeout 360s -v
+  ```
+
+  The orch variant auto-wires to stubs in `cli/testdata/orch_e2e/`
+  with no operator setup required, provided `orch-spawn`, `tmux`, and
+  `fossil` are on PATH. The tests SKIP cleanly when any prerequisite
+  is missing. To point at a real `claude` binary or custom recipes,
+  override with `SESH_E2E_CLAUDE=/path/to/claude` and/or
+  `SESH_E2E_RECIPE_DIR=/path/to/recipes`. See
+  `cli/testdata/orch_e2e/README.md` for the fixture wiring.
+
 ## Where to learn more
 
 - [sesh#64](https://github.com/danmestas/sesh/issues/64) — the

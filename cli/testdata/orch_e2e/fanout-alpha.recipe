@@ -1,0 +1,9 @@
+# fanout-alpha.recipe — alpha worker side of the star-fanout test.
+#
+# Stands in for `orch-spawn claude --sesh-session alpha --accessory
+# fossil-worker` running against alpha's checkout. Commits a single
+# file; the test then watches beta and gamma observe it.
+fossil user new e2e-alpha e2e-alpha '' 2>/dev/null || true
+echo "alpha-was-here" > fanout-from-alpha.txt
+fossil add fanout-from-alpha.txt
+USER=e2e-alpha fossil commit -m "alpha fanout commit"

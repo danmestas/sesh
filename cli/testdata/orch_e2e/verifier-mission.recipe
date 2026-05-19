@@ -1,0 +1,20 @@
+# verifier-mission.recipe — fossil-verifier stub recipe.
+#
+# Stands in for a real claude-verifier with the fossil-verifier
+# accessory loaded. The verifier's contract is: inspect the trunk,
+# render a GO/NO-GO verdict matching the accessory template, write the
+# verdict to a file the operator can read.
+#
+# The orch-variant test reads verifier-verdict.txt after the recipe
+# finishes and asserts the verdict line is present.
+fossil timeline -n 5 > timeline-snapshot.txt
+{
+  echo "Verifier report - sesh-session: alpha, trunk HEAD: $(fossil timeline -n 1 --type ci | head -3 | tail -1 | awk '{print $1}')"
+  echo ""
+  echo "Verdict: GO"
+  echo ""
+  echo "Acceptance criteria coverage:"
+  echo "- [x] mission.txt present at trunk HEAD"
+  echo ""
+  echo "Recommendation to operator: merge"
+} > verifier-verdict.txt

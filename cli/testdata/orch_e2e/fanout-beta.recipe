@@ -1,0 +1,5 @@
+# fanout-beta.recipe — beta worker side of the star-fanout test.
+fossil user new e2e-beta e2e-beta '' 2>/dev/null || true
+echo "beta-was-here" > fanout-from-beta.txt
+fossil add fanout-from-beta.txt
+USER=e2e-beta fossil commit -m "beta fanout commit"
