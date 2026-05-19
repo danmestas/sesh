@@ -1,0 +1,22 @@
+# worker-mission.recipe — fossil-worker stub recipe.
+#
+# The orch-variant e2e test (TestE2E_FullMissionLoop) drives stub-claude
+# through this recipe inside a `sesh worktree alpha` checkout. Each line
+# stands in for one step a real claude-worker would take when given the
+# fossil-worker accessory.
+#
+# Output of running this recipe: mission.txt is added to the checkout
+# and committed to the trunk. The test's verifier phase then reads
+# `fossil timeline` and asserts the commit landed.
+#
+# `fossil user new` is idempotent in the sense that adding an existing
+# user is a no-op error we tolerate. Recipes register a worker user
+# because the sesh-seeded project repo only has `hub` and `nobody` in
+# its user table; without an entry for the committer, `fossil commit`
+# refuses with "cannot determine user". Real orch workers spawn under
+# an operator who is already in the user table; this fixture stands
+# that step in.
+fossil user new e2e-worker e2e-worker '' 2>/dev/null || true
+echo "mission accomplished" > mission.txt
+fossil add mission.txt
+USER=e2e-worker fossil commit -m "implement mission"

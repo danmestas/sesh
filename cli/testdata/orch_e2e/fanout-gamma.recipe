@@ -1,0 +1,5 @@
+# fanout-gamma.recipe — gamma worker side of the star-fanout test.
+fossil user new e2e-gamma e2e-gamma '' 2>/dev/null || true
+echo "gamma-was-here" > fanout-from-gamma.txt
+fossil add fanout-from-gamma.txt
+USER=e2e-gamma fossil commit -m "gamma fanout commit"

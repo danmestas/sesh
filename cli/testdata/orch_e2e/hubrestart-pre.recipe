@@ -1,0 +1,7 @@
+# hubrestart-pre.recipe — alpha pre-restart commit for the hub-restart
+# test (T1.3). Baseline that proves the link is healthy before we kill
+# the hub.
+fossil user new e2e-alpha e2e-alpha '' 2>/dev/null || true
+echo "before-the-storm" > pre-restart.txt
+fossil add pre-restart.txt
+USER=e2e-alpha fossil commit -m "pre-restart commit"
