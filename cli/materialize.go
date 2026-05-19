@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	// Imported for its side effect: registers the modernc SQLite driver
 	// libfossil requires before any Repo.Open succeeds. Mirrors the
@@ -68,7 +69,7 @@ import (
 type MaterializeCmd struct {
 	Label string `arg:"" required:"" help:"Session/checkout label. Must match a session brought up via 'sesh up --session=<label>' (or, with --scope=project, must match any session that mounted the shared project.repo)."`
 
-	Scope string `help:"Backing repo scope: 'session' uses .sesh/sessions/<label>.repo; 'project' uses the shared .sesh/project.repo." enum:"session,project" default:"session"`
+	Scope string `help:"Backing repo scope override: 'session' or 'project'. Default empty (auto-detect from session state JSON, falling back to 'session' for backward compat). Override only when you intentionally want to materialize a different scope's backing repo than the session was brought up under." enum:",session,project" default:""`
 
 	Output string `name:"output" help:"Output directory (must exist). Defaults to cwd."`
 
@@ -100,7 +101,10 @@ func (c *MaterializeCmd) Run() error {
 		return fmt.Errorf("getwd: %w", err)
 	}
 
-	scope := SeshScope(c.Scope)
+	scope, err := resolveScope(cwd, c.Label, c.Scope)
+	if err != nil {
+		return fmt.Errorf("sesh materialize: %w", err)
+	}
 	repoPath, err := repoPathFor(scope, cwd, c.Label)
 	if err != nil {
 		return fmt.Errorf("sesh materialize: %w", err)
@@ -108,8 +112,8 @@ func (c *MaterializeCmd) Run() error {
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf(
-				"backing repo missing at %s — run 'sesh up --session=%s%s' first",
-				repoPath, c.Label, scopeHint(scope))
+				"backing repo missing at %s — run 'sesh up --session=%s%s' first%s",
+				repoPath, c.Label, scopeHint(scope), otherScopeRepoHint(cwd, scope))
 		}
 		return fmt.Errorf("stat backing repo %s: %w", repoPath, err)
 	}
@@ -202,7 +206,7 @@ func refuseIfGitDirty(dir string) error {
 	if err := statusCmd.Run(); err != nil {
 		return fmt.Errorf("git status in %s: %w (output: %s)", dir, err, out.String())
 	}
-	porcelain := out.String()
+	porcelain := filterSeshManagedFromPorcelain(out.String())
 	if porcelain == "" {
 		return nil
 	}
@@ -211,6 +215,43 @@ func refuseIfGitDirty(dir string) error {
 			"uncommitted files:\n%s"+
 			"stash with `git stash`, or re-run with --allow-dirty to overlay anyway",
 		dir, porcelain)
+}
+
+// filterSeshManagedFromPorcelain strips out lines referring to paths sesh
+// itself manages — .sesh/ (runtime state) and .gitignore (auto-created
+// by sesh up to silence .sesh/ noise; see #86). Operators following the
+// documented mission-loop recipe shouldn't trip the dirty-worktree gate
+// over sesh's own setup. Anything ELSE that's dirty (operator's own
+// uncommitted files) still surfaces and blocks materialize as designed.
+//
+// Format reference: `git status --porcelain` emits two-char status code
+// + space + path, one per line. Paths can be quoted if they contain
+// special characters; we match the most common shapes (`?? path`,
+// `M  path`, `A  path`, etc.) and leave unmatched lines through.
+func filterSeshManagedFromPorcelain(porcelain string) string {
+	if porcelain == "" {
+		return ""
+	}
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(porcelain, "\n"), "\n") {
+		// status code is 2 chars, then a space, then the path.
+		if len(line) < 4 {
+			kept = append(kept, line)
+			continue
+		}
+		path := strings.Trim(line[3:], "\"")
+		if path == ".sesh/" || path == ".sesh" || strings.HasPrefix(path, ".sesh/") {
+			continue
+		}
+		if path == ".gitignore" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	return strings.Join(kept, "\n") + "\n"
 }
 
 // runGitAdd executes `git add .` in dir. Idempotent: if no diff,
