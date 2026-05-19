@@ -208,6 +208,13 @@ func (s *Starter) Start(parent context.Context) error {
 		return err
 	}
 	s.postHubBootstrap(ctx)
+	// Auto-add .sesh/ to the project's .gitignore so `sesh materialize`
+	// doesn't refuse-as-dirty over our own runtime state (#86). Idempotent;
+	// no-op outside a git repo. Logged + continued on any failure — seed
+	// shouldn't block on .gitignore wrangling.
+	if err := ensureSeshGitignored(s.cwd); err != nil {
+		slog.Warn("auto-gitignore of .sesh/ failed (continuing)", "err", err)
+	}
 	if err := s.publishSession(); err != nil {
 		return err
 	}
@@ -306,6 +313,7 @@ func (s *Starter) postHubBootstrap(ctx context.Context) {
 func (s *Starter) publishSession() error {
 	if err := s.sessHandle.Publish(SessionState{
 		PID:       os.Getpid(),
+		Scope:     string(s.scope),
 		NATSURL:   s.h.NATSURL(),
 		NATSWSURL: s.h.NATSWebSocketURL(),
 		LeafURL:   s.h.LeafURL(),

@@ -41,6 +41,7 @@ type AgentRef struct {
 // that did not include the field.
 type SessionState struct {
 	PID       int        `json:"pid"`
+	Scope     string     `json:"scope,omitempty"`       // "session" or "project" — the scope this session was brought up under. Read by sesh worktree / sesh materialize / sesh worker-cwd to auto-detect scope without flag repetition. Empty for backward compat with older session JSONs; consumers fall back to "session" in that case. (#84)
 	NATSURL   string     `json:"nats_url,omitempty"`    // for NATS clients under this session
 	NATSWSURL string     `json:"nats_ws_url,omitempty"` // WebSocket NATS endpoint (ws://, loopback, no_tls); for browser / Cloudflare Workers clients via @nats-io/transport-websockets. Present iff the embedded NATS server has WebSocket enabled.
 	LeafURL   string     `json:"leaf_url,omitempty"`    // for EdgeSync leaves to solicit upstream

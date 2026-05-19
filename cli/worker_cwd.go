@@ -43,7 +43,7 @@ import (
 type WorkerCwdCmd struct {
 	Label string `arg:"" required:"" help:"Session/checkout label. Must match a label previously passed to 'sesh worktree <label>'."`
 
-	Scope string `help:"Backing repo scope: 'session' resolves .sesh/checkouts/<label>/ against the per-session repo; 'project' resolves it under the shared project.repo. Must match the scope used at 'sesh worktree' time." enum:"session,project" default:"session"`
+	Scope string `help:"Backing repo scope override: 'session' or 'project'. Default empty (auto-detect from session state JSON, falling back to 'session' for backward compat). Override only when you intentionally want to probe a different scope's checkout than the session was brought up under." enum:",session,project" default:""`
 }
 
 func (c *WorkerCwdCmd) Run() error {
@@ -64,10 +64,13 @@ func (c *WorkerCwdCmd) Run() error {
 	// pass the same flag value through). The resolved path is identical
 	// under both scopes today — .sesh/checkouts/<label>/ — because the
 	// scope only affects where the *backing repo* lives, not the checkout
-	// directory. We still validate the flag so a typo surfaces here
-	// rather than silently being ignored downstream.
-	scope := SeshScope(c.Scope)
-	_ = scope
+	// directory. We still resolve+validate the flag so a typo surfaces
+	// here rather than silently being ignored downstream, and so the
+	// scopeHint in the error message reflects the correct scope context.
+	scope, err := resolveScope(cwd, c.Label, c.Scope)
+	if err != nil {
+		return fmt.Errorf("sesh worker-cwd: %w", err)
+	}
 
 	dir, err := checkoutDir(cwd, c.Label)
 	if err != nil {

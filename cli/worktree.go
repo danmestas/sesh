@@ -55,7 +55,7 @@ import (
 type WorktreeCmd struct {
 	Label string `arg:"" required:"" help:"Session/checkout label. Must match a session brought up via 'sesh up --session=<label>' (or, with --scope=project, must match any session that's mounted the shared project.repo)."`
 
-	Scope string `help:"Backing repo scope: 'session' uses .sesh/sessions/<label>.repo; 'project' uses the shared .sesh/project.repo." enum:"session,project" default:"session"`
+	Scope string `help:"Backing repo scope override: 'session' or 'project'. Default empty (auto-detect from session state JSON, falling back to 'session' for backward compat). Override only when you intentionally want to read a different scope's backing repo than the session was brought up under." enum:",session,project" default:""`
 
 	ForceRecreate bool `name:"force-recreate" help:"Remove the existing checkout dir (.sesh/checkouts/<label>/) and re-materialize. Adjacent .sesh/sessions/ and .sesh/messaging/ are NOT touched. Use sparingly — destroys uncommitted edits in the checkout."`
 }
@@ -73,7 +73,10 @@ func (c *WorktreeCmd) Run() error {
 		return fmt.Errorf("getwd: %w", err)
 	}
 
-	scope := SeshScope(c.Scope)
+	scope, err := resolveScope(cwd, c.Label, c.Scope)
+	if err != nil {
+		return fmt.Errorf("sesh worktree: %w", err)
+	}
 	repoPath, err := repoPathFor(scope, cwd, c.Label)
 	if err != nil {
 		return fmt.Errorf("sesh worktree: %w", err)
@@ -81,8 +84,8 @@ func (c *WorktreeCmd) Run() error {
 	if _, err := os.Stat(repoPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf(
-				"backing repo missing at %s — run 'sesh up --session=%s%s' first",
-				repoPath, c.Label, scopeHint(scope))
+				"backing repo missing at %s — run 'sesh up --session=%s%s' first%s",
+				repoPath, c.Label, scopeHint(scope), otherScopeRepoHint(cwd, scope))
 		}
 		return fmt.Errorf("stat backing repo %s: %w", repoPath, err)
 	}

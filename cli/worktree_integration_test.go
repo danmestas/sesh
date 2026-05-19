@@ -268,6 +268,70 @@ func TestSeshWorktree_ScopeProject(t *testing.T) {
 	}
 }
 
+// TestSeshWorktree_AutodetectsScopeFromSessionState verifies #84: when
+// `sesh up` was invoked with --scope=project, a follow-on `sesh worktree`
+// without an explicit --scope flag MUST auto-detect project scope from the
+// session JSON. Operators following the documented mission-loop recipe
+// don't have to repeat --scope=project on every command.
+func TestSeshWorktree_AutodetectsScopeFromSessionState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	bin := buildSesh(t)
+	home := t.TempDir()
+	project := t.TempDir()
+	setupGitWorktree(t, project)
+
+	sesh, stderr := startSeshArgs(t, bin, home, project, "alpha", "--scope=project")
+	defer killAndWait(t, sesh, stderr)
+	waitForURLs(t, filepath.Join(project, ".sesh", "sessions", "alpha.json"), 15*time.Second)
+	if !waitForSlog(t, stderr, "seeded fossil from worktree", 10*time.Second) {
+		t.Fatalf("alpha never seeded:\n%s", stderr.String())
+	}
+
+	// Confirm the session JSON has scope="project" recorded — that's the
+	// load-bearing precondition for auto-detect.
+	statePath := filepath.Join(project, ".sesh", "sessions", "alpha.json")
+	stateBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read session JSON: %v", err)
+	}
+	if !strings.Contains(string(stateBytes), `"scope":"project"`) {
+		t.Fatalf("session JSON missing scope=project: %s", string(stateBytes))
+	}
+
+	// Invoke worktree WITHOUT the --scope flag. Pre-fix this would error
+	// with "backing repo missing at .sesh/sessions/alpha.repo". Post-fix
+	// the call resolves project scope from session state and succeeds.
+	out := mustRunWorktree(t, bin, home, project, "alpha")
+	expected := filepath.Join(project, ".sesh", "checkouts", "alpha")
+	if got, _ := filepath.EvalSymlinks(out); got != "" {
+		want, _ := filepath.EvalSymlinks(expected)
+		if got != want {
+			t.Errorf("worktree output = %q; want %q", got, want)
+		}
+	}
+
+	// The checkout must point at the project.repo, not the per-session
+	// repo (which doesn't exist under --scope=project).
+	marker := filepath.Join(expected, ".fslckout")
+	repoVVar, err := readVVarRepository(marker)
+	if err != nil {
+		t.Fatalf("read vvar: %v", err)
+	}
+	wantRepo := filepath.Join(project, ".sesh", "project.repo")
+	wantResolved, _ := filepath.EvalSymlinks(wantRepo)
+	gotResolved, _ := filepath.EvalSymlinks(repoVVar)
+	if gotResolved != wantResolved {
+		t.Errorf("auto-detected vvar 'repository' = %q; want %q (worktree should pick project scope from session JSON)",
+			repoVVar, wantRepo)
+	}
+}
+
 // TestSeshWorktree_ErrorIfSessionNotUp asserts the operator-facing
 // error path when `sesh worktree` is invoked before `sesh up`. The
 // command must exit non-zero and the stderr must mention `sesh up`
