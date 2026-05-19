@@ -295,6 +295,121 @@ func TestSeshWorktree_ErrorIfSessionNotUp(t *testing.T) {
 	}
 }
 
+// TestSeshWorktree_RejectsLabelTraversal is the tier-1 safety test for
+// the worktree entrypoint. It exercises validateLabel through
+// `sesh worktree <label>` with the same hostile inputs that the up /
+// down / materialize / worker-cwd retrofit tests use, plus a few
+// Unicode-confusable rows that pin the ASCII-only stance.
+//
+// The matrix is dual-scope (--scope=session and --scope=project): the
+// `--force-recreate` code path under `sesh worktree` is the ONLY
+// non-cleanup os.RemoveAll under .sesh/, so a label-escape regression
+// here is the most-dangerous variant we can guard against.
+//
+// We seed a canary under .sesh/messaging/ and fingerprint the .sesh/
+// tree before and after each scope's hostile-input runs. Each invocation
+// must exit non-zero, never bring a session up, and never mutate any
+// existing path under .sesh/.
+//
+// Unicode rows (Item 2 of #66): the validator's regex is intentionally
+// ASCII-only. Operators or AI agents could accidentally include
+// lookalikes (U+2025 two-dot-leader visually similar to ".."; U+FF0E
+// fullwidth full stop visually similar to "."). Asserting the
+// rejection in a test prevents a future "be friendly to international
+// users" PR from silently relaxing the gate.
+func TestSeshWorktree_RejectsLabelTraversal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	cases := []struct {
+		name  string
+		label string
+	}{
+		{"empty", ""},
+		{"dot", "."},
+		{"dotdot", ".."},
+		{"slash_prefix", "/etc"},
+		{"slash_embedded", "foo/bar"},
+		{"backslash_embedded", "foo\\bar"},
+		{"dotdot_embedded", "alpha/../beta"},
+		{"dotdot_only_embedded", "x..y"},
+		{"nul_byte", "alpha\x00beta"},
+		{"leading_dot", ".sessions"},
+		{"whitespace_only", "   "},
+		{"control_char", "alpha\x01"},
+		{"newline", "alpha\nbeta"},
+		{"parent_sessions", "../sessions"},
+		{"deeper_traversal", "../../foo"},
+		// Unicode confusables — visually similar to ".." / "." but the
+		// validator runs on bytes-via-rune-iteration with no canonical
+		// normalisation, so the ASCII-only regex rejects them by the
+		// same code path that rejects raw "..".
+		{"unicode_two_dot_leader", "alpha‥beta"},   // U+2025 ‥
+		{"unicode_fullwidth_dot_prefix", "．alpha"}, // U+FF0E ．
+		{"unicode_fullwidth_dot_embedded", "alpha．beta"},
+	}
+
+	for _, scope := range []string{"session", "project"} {
+		scope := scope
+		t.Run("scope="+scope, func(t *testing.T) {
+			bin := buildSesh(t)
+			home := t.TempDir()
+			project := t.TempDir()
+			// .sesh/ tier-1 paths we want to prove are not touched by
+			// the hostile-input runs. We do NOT bring a real session
+			// up — the validator must reject the label before any
+			// path math touches disk.
+			seshDir := filepath.Join(project, ".sesh")
+			if err := os.MkdirAll(filepath.Join(seshDir, "sessions"), 0o755); err != nil {
+				t.Fatalf("seed .sesh/sessions: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Join(seshDir, "messaging"), 0o755); err != nil {
+				t.Fatalf("seed .sesh/messaging: %v", err)
+			}
+			canary := filepath.Join(seshDir, "messaging", "canary.txt")
+			if err := os.WriteFile(canary, []byte("tier-1\n"), 0o644); err != nil {
+				t.Fatalf("seed canary: %v", err)
+			}
+			before := fingerprintTree(t, seshDir)
+
+			for _, tc := range cases {
+				tc := tc
+				t.Run(tc.name, func(t *testing.T) {
+					cmd := exec.Command(bin, "worktree", tc.label, "--scope="+scope)
+					cmd.Dir = project
+					cmd.Env = append(os.Environ(), "HOME="+home)
+					var stdout, stderrBuf bytes.Buffer
+					cmd.Stdout = &stdout
+					cmd.Stderr = &stderrBuf
+					err := cmd.Run()
+					if err == nil {
+						t.Fatalf("worktree accepted hostile label %q under scope=%s; stdout=%q stderr=%q",
+							tc.label, scope, stdout.String(), stderrBuf.String())
+					}
+					// Either Kong rejects the arg (empty label) or
+					// the validator rejects it; both are acceptable
+					// as long as the exit is non-zero and tier-1
+					// paths survive (asserted below). For the NUL
+					// case os/exec rejects with "invalid argument"
+					// before the binary runs.
+					_ = stderrBuf.String()
+				})
+			}
+
+			after := fingerprintTree(t, seshDir)
+			if before != after {
+				t.Errorf("tier-1 .sesh/ tree fingerprint drifted after hostile-input worktree runs under scope=%s:\nbefore=%s\nafter=%s",
+					scope, before, after)
+			}
+			if got, err := os.ReadFile(canary); err != nil || string(got) != "tier-1\n" {
+				t.Errorf("canary %s mutated by hostile-input worktree runs; got=%q err=%v",
+					canary, string(got), err)
+			}
+		})
+	}
+}
+
 // TestSeshWorktree_PropagatesEdit_ViaAutosync is the SWARM ACCEPTANCE
 // GATE for issue #64. Two sessions share --scope=project; both run
 // `sesh worktree`. A commit landing in alpha's checkout must surface

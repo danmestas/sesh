@@ -1,6 +1,9 @@
 package cli
 
-import "path/filepath"
+import (
+	"fmt"
+	"path/filepath"
+)
 
 // SeshScope selects where a session's Fossil repo lives on disk.
 //
@@ -29,17 +32,37 @@ const (
 )
 
 // repoPathFor returns the Fossil repo path for the given scope.
-func repoPathFor(scope SeshScope, cwd, session string) string {
-	if scope == ScopeProject {
-		return filepath.Join(projectSeshDir(cwd), "project.repo")
+//
+// Under ScopeProject the session label does not appear in the returned
+// path (the repo is shared across sessions), but we still validate it
+// because (a) every caller passes a label and (b) defense-in-depth: a
+// future scope variant that does interpolate the label gets the gate
+// for free.
+//
+// Defense-in-depth: see checkoutDir's doc for the rationale. The first
+// gate sits at operator entrypoints (up, down, worktree, materialize,
+// worker-cwd); this second gate exists so a future entrypoint cannot
+// silently re-introduce traversal by forgetting the entrypoint-level
+// check.
+func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
+	if err := validateLabel(session); err != nil {
+		return "", fmt.Errorf("repoPathFor: %w", err)
 	}
-	return filepath.Join(projectSeshDir(cwd), "sessions", session+".repo")
+	if scope == ScopeProject {
+		return filepath.Join(projectSeshDir(cwd), "project.repo"), nil
+	}
+	return filepath.Join(projectSeshDir(cwd), "sessions", session+".repo"), nil
 }
 
 // storeDirFor returns the JetStream store directory for this session.
 // JetStream storage is always per-session even in project scope: each
 // sesh up runs its own embedded NATS server in its own process and
 // JetStream's on-disk layout cannot be shared across processes.
-func storeDirFor(cwd, session string) string {
-	return filepath.Join(projectSeshDir(cwd), "sessions", session+".messaging")
+//
+// Defense-in-depth: see checkoutDir's doc. Same gate, same rationale.
+func storeDirFor(cwd, session string) (string, error) {
+	if err := validateLabel(session); err != nil {
+		return "", fmt.Errorf("storeDirFor: %w", err)
+	}
+	return filepath.Join(projectSeshDir(cwd), "sessions", session+".messaging"), nil
 }

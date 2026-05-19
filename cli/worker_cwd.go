@@ -69,7 +69,10 @@ func (c *WorkerCwdCmd) Run() error {
 	scope := SeshScope(c.Scope)
 	_ = scope
 
-	dir := checkoutDir(cwd, c.Label)
+	dir, err := checkoutDir(cwd, c.Label)
+	if err != nil {
+		return err
+	}
 
 	// Stat the .fslckout marker. We don't stat the dir itself because a
 	// stray empty directory (e.g. leftover from a partial mkdir) would
