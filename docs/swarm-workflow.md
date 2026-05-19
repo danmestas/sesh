@@ -77,6 +77,12 @@ sesh down --session=alpha
 
 `sesh up` runs in the foreground. Either background it with `&` (as
 above) or run it in its own terminal/pane. `sesh down --session=alpha`
+
+`sesh up` also registers the operator's `$USER` in the seeded fossil
+repo's user table with check-in capability (`i`). Workers spawned
+under the operator's UID can `fossil commit` from a checkout without
+the operator manually running `fossil user new` — the registration is
+idempotent across re-runs.
 sends SIGINT and waits for the foreground process to exit.
 
 ## Scope choice: `session` vs `project`
