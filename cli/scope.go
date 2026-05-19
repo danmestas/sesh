@@ -46,7 +46,7 @@ const (
 // check.
 func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
 	if err := validateLabel(session); err != nil {
-		return "", fmt.Errorf("repoPathFor: %w", err)
+		return "", fmt.Errorf("invalid label %q: %w", session, err)
 	}
 	if scope == ScopeProject {
 		return filepath.Join(projectSeshDir(cwd), "project.repo"), nil
@@ -62,7 +62,7 @@ func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
 // Defense-in-depth: see checkoutDir's doc. Same gate, same rationale.
 func storeDirFor(cwd, session string) (string, error) {
 	if err := validateLabel(session); err != nil {
-		return "", fmt.Errorf("storeDirFor: %w", err)
+		return "", fmt.Errorf("invalid label %q: %w", session, err)
 	}
 	return filepath.Join(projectSeshDir(cwd), "sessions", session+".messaging"), nil
 }

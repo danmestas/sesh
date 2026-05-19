@@ -26,27 +26,6 @@ func TestSeshDown_RejectsLabelTraversal(t *testing.T) {
 		t.Skip("integration test")
 	}
 
-	cases := []struct {
-		name  string
-		label string
-	}{
-		{"empty", ""},
-		{"dot", "."},
-		{"dotdot", ".."},
-		{"slash_prefix", "/etc"},
-		{"slash_embedded", "foo/bar"},
-		{"backslash_embedded", "foo\\bar"},
-		{"dotdot_embedded", "alpha/../beta"},
-		{"dotdot_only_embedded", "x..y"},
-		{"nul_byte", "alpha\x00beta"},
-		{"leading_dot", ".sessions"},
-		{"whitespace_only", "   "},
-		{"control_char", "alpha\x01"},
-		{"newline", "alpha\nbeta"},
-		{"parent_sessions", "../sessions"},
-		{"deeper_traversal", "../../foo"},
-	}
-
 	bin := buildSesh(t)
 	home := t.TempDir()
 	project := t.TempDir()
@@ -74,10 +53,10 @@ func TestSeshDown_RejectsLabelTraversal(t *testing.T) {
 
 	before := fingerprintTree(t, seshDir)
 
-	for _, tc := range cases {
+	for _, tc := range hostileLabelInputs {
 		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(bin, "down", "--session="+tc.label)
+		t.Run(tc.Name, func(t *testing.T) {
+			cmd := exec.Command(bin, "down", "--session="+tc.Label)
 			cmd.Dir = project
 			cmd.Env = append(os.Environ(), "HOME="+home)
 			var stdout, stderr bytes.Buffer
@@ -86,7 +65,7 @@ func TestSeshDown_RejectsLabelTraversal(t *testing.T) {
 			err := cmd.Run()
 			if err == nil {
 				t.Fatalf("sesh down accepted hostile label %q; stdout=%q stderr=%q",
-					tc.label, stdout.String(), stderr.String())
+					tc.Label, stdout.String(), stderr.String())
 			}
 			// Either Kong rejects the flag (empty label), our
 			// validator rejects it, or os/exec refuses the arg
@@ -97,7 +76,7 @@ func TestSeshDown_RejectsLabelTraversal(t *testing.T) {
 			combined := strings.ToLower(stderr.String() + stdout.String() + err.Error())
 			if !strings.Contains(combined, "label") && !strings.Contains(combined, "session") && !strings.Contains(combined, "invalid argument") {
 				t.Errorf("hostile label %q rejected but no 'label'/'session'/'invalid argument' cue; err=%v stderr=%s",
-					tc.label, err, stderr.String())
+					tc.Label, err, stderr.String())
 			}
 		})
 	}

@@ -322,34 +322,6 @@ func TestSeshWorktree_RejectsLabelTraversal(t *testing.T) {
 		t.Skip("integration test")
 	}
 
-	cases := []struct {
-		name  string
-		label string
-	}{
-		{"empty", ""},
-		{"dot", "."},
-		{"dotdot", ".."},
-		{"slash_prefix", "/etc"},
-		{"slash_embedded", "foo/bar"},
-		{"backslash_embedded", "foo\\bar"},
-		{"dotdot_embedded", "alpha/../beta"},
-		{"dotdot_only_embedded", "x..y"},
-		{"nul_byte", "alpha\x00beta"},
-		{"leading_dot", ".sessions"},
-		{"whitespace_only", "   "},
-		{"control_char", "alpha\x01"},
-		{"newline", "alpha\nbeta"},
-		{"parent_sessions", "../sessions"},
-		{"deeper_traversal", "../../foo"},
-		// Unicode confusables — visually similar to ".." / "." but the
-		// validator runs on bytes-via-rune-iteration with no canonical
-		// normalisation, so the ASCII-only regex rejects them by the
-		// same code path that rejects raw "..".
-		{"unicode_two_dot_leader", "alpha‥beta"},   // U+2025 ‥
-		{"unicode_fullwidth_dot_prefix", "．alpha"}, // U+FF0E ．
-		{"unicode_fullwidth_dot_embedded", "alpha．beta"},
-	}
-
 	for _, scope := range []string{"session", "project"} {
 		scope := scope
 		t.Run("scope="+scope, func(t *testing.T) {
@@ -373,10 +345,10 @@ func TestSeshWorktree_RejectsLabelTraversal(t *testing.T) {
 			}
 			before := fingerprintTree(t, seshDir)
 
-			for _, tc := range cases {
+			for _, tc := range hostileLabelInputs {
 				tc := tc
-				t.Run(tc.name, func(t *testing.T) {
-					cmd := exec.Command(bin, "worktree", tc.label, "--scope="+scope)
+				t.Run(tc.Name, func(t *testing.T) {
+					cmd := exec.Command(bin, "worktree", tc.Label, "--scope="+scope)
 					cmd.Dir = project
 					cmd.Env = append(os.Environ(), "HOME="+home)
 					var stdout, stderrBuf bytes.Buffer
@@ -385,7 +357,7 @@ func TestSeshWorktree_RejectsLabelTraversal(t *testing.T) {
 					err := cmd.Run()
 					if err == nil {
 						t.Fatalf("worktree accepted hostile label %q under scope=%s; stdout=%q stderr=%q",
-							tc.label, scope, stdout.String(), stderrBuf.String())
+							tc.Label, scope, stdout.String(), stderrBuf.String())
 					}
 					// Either Kong rejects the arg (empty label) or
 					// the validator rejects it; both are acceptable

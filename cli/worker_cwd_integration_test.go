@@ -121,25 +121,6 @@ func TestSeshWorkerCwd_RejectsLabelTraversal(t *testing.T) {
 		t.Skip("integration test")
 	}
 
-	cases := []struct {
-		name  string
-		label string
-	}{
-		{"empty", ""},
-		{"dot", "."},
-		{"dotdot", ".."},
-		{"slash_prefix", "/etc"},
-		{"slash_embedded", "foo/bar"},
-		{"backslash_embedded", "foo\\bar"},
-		{"dotdot_embedded", "alpha/../beta"},
-		{"dotdot_only_embedded", "x..y"},
-		{"nul_byte", "alpha\x00beta"},
-		{"leading_dot", ".sessions"},
-		{"whitespace_only", "   "},
-		{"control_char", "alpha\x01"},
-		{"newline", "alpha\nbeta"},
-	}
-
 	for _, scope := range []string{"session", "project"} {
 		scope := scope
 		t.Run("scope="+scope, func(t *testing.T) {
@@ -161,10 +142,10 @@ func TestSeshWorkerCwd_RejectsLabelTraversal(t *testing.T) {
 			}
 			before := fingerprintTree(t, seshDir)
 
-			for _, tc := range cases {
+			for _, tc := range hostileLabelInputs {
 				tc := tc
-				t.Run(tc.name, func(t *testing.T) {
-					cmd := exec.Command(bin, "worker-cwd", tc.label, "--scope="+scope)
+				t.Run(tc.Name, func(t *testing.T) {
+					cmd := exec.Command(bin, "worker-cwd", tc.Label, "--scope="+scope)
 					cmd.Dir = project
 					cmd.Env = append(os.Environ(), "HOME="+home)
 					var stdout, stderr bytes.Buffer
@@ -173,7 +154,7 @@ func TestSeshWorkerCwd_RejectsLabelTraversal(t *testing.T) {
 					err := cmd.Run()
 					if err == nil {
 						t.Fatalf("worker-cwd accepted hostile label %q under scope=%s; stdout=%q stderr=%q",
-							tc.label, scope, stdout.String(), stderr.String())
+							tc.Label, scope, stdout.String(), stderr.String())
 					}
 					// Either Kong rejects the arg (empty label) or the
 					// validator rejects it; both are acceptable as long

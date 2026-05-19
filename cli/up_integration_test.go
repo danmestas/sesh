@@ -112,27 +112,6 @@ func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
 		t.Skip("integration test")
 	}
 
-	cases := []struct {
-		name  string
-		label string
-	}{
-		{"empty", ""},
-		{"dot", "."},
-		{"dotdot", ".."},
-		{"slash_prefix", "/etc"},
-		{"slash_embedded", "foo/bar"},
-		{"backslash_embedded", "foo\\bar"},
-		{"dotdot_embedded", "alpha/../beta"},
-		{"dotdot_only_embedded", "x..y"},
-		{"nul_byte", "alpha\x00beta"},
-		{"leading_dot", ".sessions"},
-		{"whitespace_only", "   "},
-		{"control_char", "alpha\x01"},
-		{"newline", "alpha\nbeta"},
-		{"parent_sessions", "../sessions"},
-		{"deeper_traversal", "../../foo"},
-	}
-
 	bin := buildSesh(t)
 	home := t.TempDir()
 	project := t.TempDir()
@@ -153,9 +132,9 @@ func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
 	}
 	before := fingerprintTree(t, seshDir)
 
-	for _, tc := range cases {
+	for _, tc := range hostileLabelInputs {
 		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.Name, func(t *testing.T) {
 			// Per-case deadline. validateLabel must reject and
 			// exit non-zero in well under a second; a regression
 			// that lets the label through would otherwise hang
@@ -164,7 +143,7 @@ func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
 			// failure rather than a 4-minute test-timeout panic.
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, bin, "up", "--session="+tc.label)
+			cmd := exec.CommandContext(ctx, bin, "up", "--session="+tc.Label)
 			cmd.Dir = project
 			cmd.Env = append(os.Environ(), "HOME="+home)
 			var stdout, stderr bytes.Buffer
@@ -173,7 +152,7 @@ func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
 			err := cmd.Run()
 			if err == nil {
 				t.Fatalf("sesh up accepted hostile label %q; stdout=%q stderr=%q",
-					tc.label, stdout.String(), stderr.String())
+					tc.Label, stdout.String(), stderr.String())
 			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				// Ctx-killed means sesh up didn't fail-fast on
@@ -181,7 +160,7 @@ func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
 				// the deadline elapsed. That's the regression
 				// signature we're guarding against.
 				t.Fatalf("sesh up failed to fail-fast on hostile label %q (deadline-killed); stdout=%q stderr=%q",
-					tc.label, stdout.String(), stderr.String())
+					tc.Label, stdout.String(), stderr.String())
 			}
 			// Either Kong rejects the flag (empty label), our
 			// validator rejects it, or os/exec refuses the
@@ -196,7 +175,7 @@ func TestSeshUp_RejectsLabelTraversal(t *testing.T) {
 			combined := strings.ToLower(stderr.String() + stdout.String() + err.Error())
 			if !strings.Contains(combined, "label") && !strings.Contains(combined, "session") && !strings.Contains(combined, "invalid argument") {
 				t.Errorf("hostile label %q rejected but no 'label'/'session'/'invalid argument' cue; err=%v stderr=%s",
-					tc.label, err, stderr.String())
+					tc.Label, err, stderr.String())
 			}
 		})
 	}
