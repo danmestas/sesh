@@ -1,3 +1,15 @@
+> **[SUPERSEDED 2026-05-22]** — The implementation diverged from this proposal during design review.
+>
+> What shipped (see `docs/synadia-agents-on-sesh.md` § 8.1 for the canonical contract):
+>
+> - **Wire shape:** `agents.<verb>.<machine>.<project>.<session>[.<role>[.<worker_id>]]` — the sesh-owned `sesh.*` namespace was dropped in favor of layering on Synadia's `agents.*` namespace with the verb at position 2 distinguishing intent. Token count selects tier (5 = orch front door, 6 = role pool with queue group, 7 = direct address by instance_id).
+> - **No `<scope>` or `<scope-id>` segments** — only project/session, which is what `scope=project` would have collapsed to in practice. Workflow/session/agent scopes are deferred until a real consumer needs them.
+> - **No `<target>` segment** — `workers`/`spies` redundancy with class metadata was eliminated; spy exclusion is **verb-based** (observers subscribe to `agents.report.*` only, never `agents.prompt.*`).
+> - **No `sesh.*` SDK package** — the 600 LoC of typed `Subject`/`Filter`/`Verb`/`Scope` ceremony was replaced with `fmt.Sprintf` at the ~3 call sites in `internal/refagent/coordinate.go`. NATS native subject-count matching does all the tier routing.
+> - **Heartbeat extension:** role/class added to the §8.3 heartbeat payload so coordinators build `{instance_id → role, class}` from passive heartbeat observation rather than `$SRV.INFO.agents` polling.
+>
+> The original 7-token shape `sesh.<verb>.<machine>.<scope>.<scope-id>.<target>.<role>` below is preserved for design history but is NOT the implemented contract.
+
 # Sesh Parallel Coordination Subjects (Scope 2)
 
 **Date:** 2026-05-20 (amended 2026-05-21)

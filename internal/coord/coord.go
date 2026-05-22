@@ -1,16 +1,23 @@
-// Package coord provides stable host identity and subject-construction
-// primitives for the sesh coordination subject hierarchy (sesh.*).
+// Package coord provides stable host identity for sesh coordination
+// subjects layered on top of the Synadia `agents.*` namespace.
 //
-// The machine identifier is a single resolved token used in the second
-// position of every sesh.* subject:
+// The machine identifier from Machine() occupies the third position
+// (after `agents.<verb>`) of every coordination subject:
 //
-//	sesh.<verb>.<machine>.<scope>.<scope-id>.<target>.<role>
+//	agents.<verb>.<machine>.<project>.<session>[.<role>[.<worker_id>]]
+//
+// Token count selects the addressing tier: 5 = session orch, 6 = role
+// pool (queue group on role), 7 = direct address by instance_id. See
+// docs/synadia-agents-on-sesh.md § 8.1 for the full contract.
 //
 // Resolution order for Machine():
 //  1. $SESH_MACHINE environment variable — explicit operator override.
 //  2. OS-specific stable host identity (IOPlatformUUID on darwin,
 //     /etc/machine-id on linux).
 //  3. MachineLocal — safe sentinel for single-host deployments.
+//
+// project-id derivation + pinning live in cli/paths.go (a separate
+// concern; this package owns only the host-identity resolver).
 package coord
 
 import "os"
