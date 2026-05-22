@@ -432,6 +432,62 @@ func TestAgentRef_JSONShapeIncludesRoleAndClass(t *testing.T) {
 	}
 }
 
+// TestSessionJSON_RoleAndClassRoundTrip writes an agents[] slice with role
+// + class through UpdateAgents and reads back the on-disk JSON. This pins
+// the JSON tag wiring — a stray `json:"-"` on Role would pass Task 4 but
+// fail here.
+func TestSessionJSON_RoleAndClassRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	sess, err := ClaimSession(dir, "rc")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Release() })
+
+	if err := sess.Publish(SessionState{PID: os.Getpid(), NATSURL: "nats://127.0.0.1:9999"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	agents := []AgentRef{
+		{
+			Agent:      "claude-code",
+			Owner:      "dmestas",
+			InstanceID: "ABC",
+			Subject:    "agents.prompt.cc.dmestas.rc",
+			Role:       "implementer",
+			Class:      "active",
+		},
+		{
+			Agent:      "pi",
+			Owner:      "dmestas",
+			InstanceID: "XYZ",
+			Subject:    "agents.prompt.pi.dmestas.rc",
+			Role:       "spy",
+			Class:      "observer",
+		},
+	}
+	if err := sess.UpdateAgents(agents); err != nil {
+		t.Fatalf("UpdateAgents: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "rc.json"))
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`"role":"implementer"`,
+		`"class":"active"`,
+		`"role":"spy"`,
+		`"class":"observer"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("session JSON missing %s\nfull:\n%s", want, body)
+		}
+	}
+}
+
 // TestAgentWatcher_PopulatesRoleAndClassFromMetadata verifies the watcher
 // reads metadata.role / metadata.class from $SRV.INFO.agents and stores
 // them on AgentRef. Covers both classes (active and observer).
