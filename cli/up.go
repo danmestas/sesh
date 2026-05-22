@@ -113,6 +113,7 @@ type Starter struct {
 	storeDir    string
 	freshRepo   bool
 	projectCode string
+	projectID   string
 
 	probe HubProbe
 	plan  Plan
@@ -150,6 +151,11 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 		_ = sess.Release()
 		return nil, fmt.Errorf("project-code: %w", err)
 	}
+	projectID, err := loadOrCreateProjectID(cwd, project)
+	if err != nil {
+		_ = sess.Release()
+		return nil, fmt.Errorf("project-id: %w", err)
+	}
 
 	scope := SeshScope(c.Scope)
 	repoPath, err := repoPathFor(scope, cwd, c.Session)
@@ -179,6 +185,7 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 		storeDir:    storeDir,
 		freshRepo:   freshRepo,
 		projectCode: projectCode,
+		projectID:   projectID,
 	}, nil
 }
 
