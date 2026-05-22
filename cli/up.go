@@ -14,6 +14,34 @@ import (
 	"github.com/danmestas/EdgeSync/hub"
 )
 
+// harnessEnv is the supporting struct for spawnHarness / Harness (Hybrid C).
+// It carries the five canonical SESH_* values (plus NATS_URL) plus the
+// Role/Class for coordination subjects. Extended here per decision A so the
+// single env-construction site in spawnHarness is the only place that ever
+// mentions the SESH_* names (ready for role/class Phase 4 without edit
+// amplification elsewhere).
+type harnessEnv struct {
+	Session   string
+	NATSURL   string
+	NATSWSURL string
+	FossilURL string
+	LeafURL   string
+	Role      string
+	Class     string
+}
+
+// Harness is the (initially thin) owner of one child coding-agent harness
+// process. Per locked Hybrid (C) it is introduced now inside cli/up.go even
+// though v1 keeps most logic in the free func + waiter; the type gives the
+// future daemon/wrapper modes, Done() chan, signal ownership, and extraction
+// point (see Future Extraction Commitment). A second caller (sesh exec, etc.)
+// will force the move to its own package.
+type Harness struct {
+	cmd  *exec.Cmd
+	done chan error
+	env  harnessEnv
+}
+
 // UpCmd brings a session up. Cwd-derived project; --session required.
 //
 // Run is intentionally thin: it constructs a Starter (which holds every
@@ -455,4 +483,70 @@ func spawnHub(projectCode string) error {
 	// Don't wait — the daemon owns the log file from here.
 	_ = cmd.Process.Release()
 	return nil
+}
+
+// spawnHarness fork-execs the user-provided --exec command string as an
+// interactive child "harness" (the coding agent). It is the happy-path
+// wrapper implementation of the hybrid Harness owner (locked C).
+//
+// For the skeleton step (TDD): always returns a closed chan (no-op).
+// Real body (sh -c, Setpgid, stdio inherit, env builder for the five
+// canonical SESH_* + NATS_URL + SESH_ROLE/CLASS, waiter goroutine) is
+// filled immediately after to keep the task atomic while still honoring
+// "skeleton first".
+//
+// Returns a buffered 1-slot <-chan error that receives the Wait result
+// (or start error) then closes. Callers select on it (future wiring in serve).
+func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan error {
+	ch := make(chan error, 1)
+
+	if cmdStr == "" {
+		close(ch)
+		return ch
+	}
+
+	// Locked Parsing (X): pass the entire --exec value verbatim to sh -c.
+	// This gives the operator full shell features (quotes, pipes, env vars,
+	// globs, && etc.) exactly as documented in the UpCmd help and proposal.
+	cmd := exec.Command("sh", "-c", cmdStr)
+
+	// Wrapper UX: child inherits our stdio/TTY so interactive TUIs
+	// (claude, pi, grok, ...) just work. Cwd is inherited automatically.
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Single named site for *all* SESH_* + NATS_* injection (plus role/class
+	// per decision A). Parent env is preserved (PATH, USER, TERM, etc.).
+	// Later callers (role Phase 4, etc.) only edit this list.
+	base := os.Environ()
+	cmd.Env = append(base,
+		"SESH_SESSION="+env.Session,
+		"NATS_URL="+env.NATSURL,
+		"SESH_NATS_WS_URL="+env.NATSWSURL,
+		"SESH_FOSSIL_URL="+env.FossilURL,
+		"SESH_LEAF_URL="+env.LeafURL,
+		"SESH_ROLE="+env.Role,
+		"SESH_CLASS="+env.Class,
+	)
+
+	// Setpgid for process-group signal forwarding (wrapper path of Hybrid C).
+	// The parent (sesh up) can later syscall.Kill(-pgid, sig) to deliver to
+	// the whole tree. Opposite of spawnHub's Setsid+daemon.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		ch <- fmt.Errorf("spawn harness: %w", err)
+		close(ch)
+		return ch
+	}
+
+	// Happy-path waiter goroutine. Always sends exactly once then closes.
+	// The returned chan is what serve() will select on (future task).
+	go func() {
+		ch <- cmd.Wait()
+		close(ch)
+	}()
+
+	return ch
 }
