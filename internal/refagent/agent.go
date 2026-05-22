@@ -29,6 +29,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danmestas/sesh/internal/agentmeta"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 )
@@ -42,6 +43,8 @@ import (
 //   - Agent:    "echo"
 //   - Owner:    $SESH_OWNER, else $USER, else os/user.Current().Username
 //   - Session:  $SESH_SESSION (may be empty for session-less harnesses)
+//   - Role:     $SESH_ROLE, else agentmeta.DefaultRole ("worker").
+//   - Class:    $SESH_CLASS, else agentmeta.DefaultClass ("active").
 //   - NATSURL:  $NATS_URL, else .sesh/sessions/<Session>.json#nats_url,
 //     else ~/.sesh/hub.url
 //   - Interval: 30s (Synadia §8.2 recommended cadence)
@@ -49,6 +52,8 @@ type Config struct {
 	Agent    string
 	Owner    string
 	Session  string
+	Role     string
+	Class    agentmeta.AgentClass
 	NATSURL  string
 	Interval time.Duration
 }
@@ -82,6 +87,12 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.applyDefaults()
 	if err := validateTokens(cfg); err != nil {
 		return err
+	}
+	if err := agentmeta.ValidateRole(cfg.Role); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	if err := agentmeta.ValidateClass(cfg.Class); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 
 	url, err := resolveNATSURL(cfg.NATSURL, cfg.Session)
@@ -135,6 +146,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Session == "" {
 		c.Session = os.Getenv("SESH_SESSION")
+	}
+	if c.Role == "" {
+		c.Role = agentmeta.DefaultedRole(os.Getenv("SESH_ROLE"))
+	}
+	if c.Class == "" {
+		c.Class = agentmeta.DefaultedClass(os.Getenv("SESH_CLASS"))
 	}
 	if c.Interval == 0 {
 		c.Interval = defaultInterval
