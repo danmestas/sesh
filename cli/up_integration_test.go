@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -289,6 +290,178 @@ func TestSeshUp_RegistersOperatorInFossilUserTable(t *testing.T) {
 	}
 	if !strings.Contains(tlOut, "operator commit") {
 		t.Errorf("expected 'operator commit' in fossil timeline; got:\n%s", tlOut)
+	}
+}
+
+// TestUp_ChildHarnessExitTriggersShutdown is the TDD integration test for
+// Task 4: wiring spawnHarness (via maybeSpawnHarness helper) into
+// Starter.serve's select. The --exec child exiting must cause serve() to
+// take the childErr arm and shut down (triggering defer Release etc.).
+// Without the arm the sesh up process would hang in select despite child
+// death. Existing non-exec paths are untouched. Uses a fast-exit command
+// so the test does not require external signals.
+func TestUp_ChildHarnessExitTriggersShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: builds binary + spawns subprocess")
+	}
+
+	bin := buildSesh(t)
+
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Use sh -c semantics (documented): "exit 0" is a no-op success child.
+	// Harness spawns quickly; its exit must unblock serve's select.
+	cmd := exec.Command(bin, "up", "--session=harness-child", "--exec=exit 0")
+	cmd.Dir = project
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sesh up --exec: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	// Block until sesh exits or timeout. 8s is generous for full bootstrap
+	// + spawnHarness + immediate child exit + select + shutdown.
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	select {
+	case err := <-waitCh:
+		// Success: process exited on child death, not hanging.
+		t.Logf("sesh up exited after harness child (expected for Task 4 wiring): %v", err)
+
+		// Release() must have run (via defer in Run) so state JSON is reaped.
+		statePath := filepath.Join(project, ".sesh", "sessions", "harness-child.json")
+		if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+			t.Errorf("state file lingered after child-triggered shutdown: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("timeout: sesh up did not shut down after --exec child exited (childErr select arm missing?)")
+	}
+}
+
+// TestUp_SignalForwardingToHarnessPgid is the TDD integration test for the
+// critical signal-forwarding work (Task 6 / the "hard part"). It demonstrates
+// that a SIGINT delivered to the `sesh up` process (the one that triggers
+// the existing NotifyContext cancel in Start) is forwarded to the --exec
+// child's process group via syscall.Kill(-pgid, sig) from inside the
+// spawnHarness site.
+//
+// The child is constructed to ignore SIGTERM (trap '' TERM) and only act on
+// the forwarded signal (trap on INT that touches a marker and exits). This
+// proves we are using the explicit forward path, not some incidental kill or
+// default TERM. Without the forwarder goroutine the child survives sesh up's
+// shutdown as an orphan (reparented to 1), recreating exactly the shim/orphan
+// bug class flagged in the proposal and Ousterhout audit. The test is the
+// red->green proof for centralizing on the *existing* ctx (no second Notify).
+//
+// Uses the same binary+subprocess pattern as TestUp_ChildHarnessExitTriggersShutdown.
+func TestUp_SignalForwardingToHarnessPgid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: builds binary + spawns subprocess")
+	}
+
+	bin := buildSesh(t)
+
+	home := t.TempDir()
+	project := t.TempDir()
+	markerDir := t.TempDir()
+	pidFile := filepath.Join(markerDir, "child-pgid")
+	gotFile := filepath.Join(markerDir, "got-int")
+
+	// sh -c child: writes its own pid (the pg leader under Setpgid), ignores
+	// TERM, installs INT handler that touches marker+exits, *then* touches a
+	// ready file (so test can wait for traps to be live), then sleeps.
+	// This eliminates race between "send SIGINT" and "trap installed".
+	// The outer sesh up's sh -c receives the string verbatim (locked X).
+	readyFile := filepath.Join(markerDir, "traps-ready")
+	childCmd := fmt.Sprintf(
+		`echo $$ > '%s' && trap '' TERM && trap 'touch "%s"; exit 0' INT && touch '%s' && sleep 30; exit 99`,
+		pidFile, gotFile, readyFile,
+	)
+
+	cmd := exec.Command(bin, "up", "--session=signal-fwd-harness", "--exec="+childCmd)
+	cmd.Dir = project
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sesh up --exec for signal test: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	// Wait for the harness child (the sh) to write its pid file and the
+	// traps-ready sentinel — proves spawnHarness + sh -c parsed, traps
+	// installed, and we are past the race window for signal delivery.
+	deadline := time.Now().Add(15 * time.Second)
+	var childPgid int
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &childPgid); scanErr == nil && childPgid > 0 {
+				if _, rerr := os.Stat(readyFile); rerr == nil {
+					break
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if childPgid == 0 {
+		t.Fatal("harness child never wrote its pid + ready files (spawn or sh -c failed to start/traps)")
+	}
+
+	// Simulate operator Ctrl-C (or `sesh down`): SIGINT to the sesh up process.
+	// Its NotifyContext will cancel; the forwarder (once implemented) must
+	// react to that ctx.Done() and Kill(-pgid, SIGINT) so the child's trap fires.
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatalf("SIGINT to sesh up: %v", err)
+	}
+
+	// The proof: the forwarded INT caused the trap to create the gotFile
+	// within a tight window (5s). If forwarding is missing the child keeps
+	// sleeping, marker never appears, test fails — exactly the red state
+	// before the fix.
+	gotDeadline := time.Now().Add(5 * time.Second)
+	received := false
+	for time.Now().Before(gotDeadline) {
+		if _, err := os.Stat(gotFile); err == nil {
+			received = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !received {
+		t.Fatal("forwarded-signal marker never appeared within 5s — forwarding to harness pgid is missing (child would have been orphaned)")
+	}
+
+	// sesh up itself must exit promptly after its ctx cancel (it does the
+	// hub teardown etc.).
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	select {
+	case err := <-waitCh:
+		t.Logf("sesh up exited cleanly after forwarding SIGINT (err=%v)", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout: sesh up did not exit after SIGINT + forwarded child signal")
+	}
+
+	// Final orphan check: the child's pg should no longer exist.
+	if err := syscall.Kill(childPgid, 0); err == nil {
+		t.Error("harness child process group still alive after sesh up shutdown (orphan/shim bug not mitigated)")
+	} else if !errors.Is(err, syscall.ESRCH) {
+		t.Logf("child pg existence check gave non-ESRCH err (ok if raced): %v", err)
 	}
 }
 

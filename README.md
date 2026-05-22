@@ -56,6 +56,23 @@ cat .sesh/sessions/morning.json                  # {"pid":..,"nats_url":..,"nats
 sesh down --session=morning
 ```
 
+### Recommended runbook for coding agents (`--exec`)
+
+The canonical way to start an interactive coding-agent harness inside the session (resolving the prior chicken-and-egg discovery race) is:
+
+```diff
+- cd ~/projects/foo
+- claude --dangerously-skip-permissions --dangerously-load-development-channels
+- # (agree to dev-channels prompt)
+- # (ask claude to run `sesh up --session=foo` in background)
+- # (cross fingers that the plugin re-resolves; it doesn't)
++ cd ~/projects/foo
++ sesh up --session=foo --exec='claude --dangerously-skip-permissions --dangerously-load-development-channels'
++ # one Ctrl-C tears everything down cleanly
+```
+
+`--exec` is passed verbatim to `sh -c` (full shell features). Use `--role`/`--class` alongside it to control the harness's coordination subjects via `SESH_ROLE`/`SESH_CLASS`.
+
 ### Attaching to a running session
 
 A live `sesh up` publishes its NATS client URL and leafnode listener URL in

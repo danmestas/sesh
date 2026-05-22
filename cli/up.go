@@ -14,6 +14,34 @@ import (
 	"github.com/danmestas/EdgeSync/hub"
 )
 
+// harnessEnv is the supporting struct for spawnHarness / Harness (Hybrid C).
+// It carries the five canonical SESH_* values (plus NATS_URL) plus the
+// Role/Class for coordination subjects. Extended here per decision A so the
+// single env-construction site in spawnHarness is the only place that ever
+// mentions the SESH_* names (ready for role/class Phase 4 without edit
+// amplification elsewhere).
+type harnessEnv struct {
+	Session   string
+	NATSURL   string
+	NATSWSURL string
+	FossilURL string
+	LeafURL   string
+	Role      string
+	Class     string
+}
+
+// Harness is the (initially thin) owner of one child coding-agent harness
+// process. Per locked Hybrid (C) it is introduced now inside cli/up.go even
+// though v1 keeps most logic in the free func + waiter; the type gives the
+// future daemon/wrapper modes, Done() chan, signal ownership, and extraction
+// point (see Future Extraction Commitment). A second caller (sesh exec, etc.)
+// will force the move to its own package.
+type Harness struct {
+	cmd  *exec.Cmd
+	done chan error
+	env  harnessEnv
+}
+
 // UpCmd brings a session up. Cwd-derived project; --session required.
 //
 // Run is intentionally thin: it constructs a Starter (which holds every
@@ -54,6 +82,14 @@ type UpCmd struct {
 	// can mix in the same project — see cli/scope.go for the full
 	// trade-off rationale.
 	Scope string `help:"Fossil repo scope: session (per-session repo) or project (shared file)" enum:"session,project" default:"session"`
+
+	// Exec, when non-empty, causes sesh up to spawn the given command as a
+	// child harness after the session is ready (wrapper lifecycle by default).
+	Exec string `name:"exec" help:"Run <cmd> as a child coding-agent harness after the session is ready. Passed verbatim to sh -c (full shell features: quoting, pipes, &&, globs, etc.). Example: --exec='claude --dangerously-skip-permissions'"`
+
+	// Role and Class (locked decision A) — propagated to the harness for sesh.* coordination subjects.
+	Role  string `name:"role"  help:"Role for coordination subjects (e.g. implementer, verifier, spy). Passed as SESH_ROLE to --exec child (falls back to 'worker')."`
+	Class string `name:"class" help:"Class for coordination subjects: active (default) or observer. Passed as SESH_CLASS to --exec child." enum:"active,observer" default:"active"`
 }
 
 func (c *UpCmd) Run() error {
@@ -102,6 +138,9 @@ func (c *UpCmd) Run() error {
 // process.
 type Starter struct {
 	cmd     *UpCmd
+	execCmd string // threaded from UpCmd.Exec (wrapper path; Harness later per hybrid C)
+	role    string // threaded from UpCmd.Role (propagated per decision A)
+	class   string // threaded from UpCmd.Class (propagated per decision A)
 	project string
 	cwd     string
 
@@ -175,6 +214,9 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 
 	return &Starter{
 		cmd:         c,
+		execCmd:     c.Exec,
+		role:        c.Role,
+		class:       c.Class,
 		project:     project,
 		cwd:         cwd,
 		stateDir:    stateDir,
@@ -332,10 +374,40 @@ func (s *Starter) publishSession() error {
 	return nil
 }
 
+// maybeSpawnHarness returns the error chan from spawnHarness when
+// --exec was supplied (first real usage of the Harness/spawnHarness path
+// for the exec feature). When execCmd is empty it returns nil so the
+// corresponding receive case in serve's select is inert (a nil chan is
+// never ready for communication). This extracts the harness construction
+// + env population into a small helper, keeping serve() focused on its
+// lifecycle select rather than growing a second unrelated responsibility
+// (per the Ousterhout audit guidance for this slice).
+//
+// The harnessEnv is populated from the already-bound hub (post-publish)
+// using the exact same expressions as publishSession so the child
+// receives identical SESH_* / NATS / ROLE/CLASS topology.
+func (s *Starter) maybeSpawnHarness(ctx context.Context) <-chan error {
+	if s.execCmd == "" {
+		return nil
+	}
+	env := harnessEnv{
+		Session:   s.cmd.Session,
+		NATSURL:   s.h.NATSURL(),
+		NATSWSURL: s.h.NATSWebSocketURL(),
+		FossilURL: "http://" + s.h.HTTPAddr() + "/",
+		LeafURL:   s.h.LeafURL(),
+		Role:      s.role,
+		Class:     s.class,
+	}
+	return spawnHarness(ctx, s.execCmd, env)
+}
+
 // serve runs the HTTP serve loop. Returns when ctx cancels (SIGINT /
-// SIGTERM from the operator) or the serve goroutine reports an error.
-// h.Stop is called in either path so the hub's NATS server, leaf, and
-// JetStream WAL all shut down cleanly.
+// SIGTERM from the operator), the serve goroutine reports an error, or
+// the child harness (when --exec was given) exits. The latter case makes
+// child death an explicit shutdown trigger for the whole session (first
+// exercising the exec path). h.Stop is called in all paths so the hub's
+// NATS server, leaf, and JetStream WAL all shut down cleanly.
 func (s *Starter) serve(ctx context.Context) error {
 	slog.Info("sesh up running",
 		"name", s.h.ServerName(),
@@ -356,12 +428,25 @@ func (s *Starter) serve(ctx context.Context) error {
 	// errors are logged, not fatal.
 	go runAgentWatcher(ctx, s.h.NATSURL(), s.sessHandle, s.cmd.Session)
 
+	// First real usage of the exec harness (Task 4 slice).
+	// Placed after watcher (and after publishSession readiness in Start)
+	// so the hub is fully bound and URLs are live. Child exit will
+	// unblock the select below and drive shutdown.
+	childErr := s.maybeSpawnHarness(ctx)
+
 	select {
 	case <-ctx.Done():
 	case err := <-serveErr:
 		if err != nil {
 			slog.Error("HTTP serve error", "err", err)
 		}
+	case err := <-childErr:
+		if err != nil {
+			slog.Error("child harness exited", "err", err)
+		}
+		// err==nil is normal exit of the coding agent (e.g. user quit
+		// claude); still shut the session down cleanly. Signal forwarding
+		// (when the operator interrupts) is owned inside spawnHarness.
 	}
 
 	slog.Info("sesh up shutting down", "name", s.name)
@@ -441,4 +526,98 @@ func spawnHub(projectCode string) error {
 	// Don't wait — the daemon owns the log file from here.
 	_ = cmd.Process.Release()
 	return nil
+}
+
+// spawnHarness fork-execs the user-provided --exec command string as an
+// interactive child "harness" (the coding agent). It is the happy-path
+// wrapper implementation of the hybrid Harness owner (locked C).
+//
+// sh -c (locked X), inherits stdio/TTY + cwd, builds the canonical
+// SESH_* + NATS + ROLE/CLASS env (single site per decision A), uses
+// Setpgid so the whole child tree can be signaled as a group.
+//
+// On the ctx (from the one NotifyContext in Start) cancelling, a forwarder
+// goroutine does syscall.Kill(-pgid, SIGINT) to propagate the operator
+// interrupt. This is deliberately the *only* Kill site and uses the
+// existing ctx (no additional Notify) to avoid the dual-notify/orphan
+// bugs called out in the proposal + Ousterhout audit.
+//
+// Returns a buffered 1-slot <-chan error that receives the Wait result
+// (or start error) then closes. Callers select on it (wired in serve via
+// maybeSpawnHarness).
+func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan error {
+	ch := make(chan error, 1)
+
+	if cmdStr == "" {
+		close(ch)
+		return ch
+	}
+
+	// Locked Parsing (X): pass the entire --exec value verbatim to sh -c.
+	// This gives the operator full shell features (quotes, pipes, env vars,
+	// globs, && etc.) exactly as documented in the UpCmd help and proposal.
+	cmd := exec.Command("sh", "-c", cmdStr)
+
+	// Wrapper UX: child inherits our stdio/TTY so interactive TUIs
+	// (claude, pi, grok, ...) just work. Cwd is inherited automatically.
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Single named site for *all* SESH_* + NATS_* injection (plus role/class
+	// per decision A). Parent env is preserved (PATH, USER, TERM, etc.).
+	// Later callers (role Phase 4, etc.) only edit this list.
+	base := os.Environ()
+	cmd.Env = append(base,
+		"SESH_SESSION="+env.Session,
+		"NATS_URL="+env.NATSURL,
+		"SESH_NATS_WS_URL="+env.NATSWSURL,
+		"SESH_FOSSIL_URL="+env.FossilURL,
+		"SESH_LEAF_URL="+env.LeafURL,
+		"SESH_ROLE="+env.Role,
+		"SESH_CLASS="+env.Class,
+	)
+
+	// Setpgid for process-group signal forwarding (wrapper path of Hybrid C).
+	// The parent (sesh up) can later syscall.Kill(-pgid, sig) to deliver to
+	// the whole tree. Opposite of spawnHub's Setsid+daemon. The actual
+	// forwarding logic (below) lives inside this spawn site so it is owned
+	// by the harness path, not scattered across serve().
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		ch <- fmt.Errorf("spawn harness: %w", err)
+		close(ch)
+		return ch
+	}
+
+	// Happy-path waiter goroutine. Always sends exactly once then closes.
+	// The returned chan is what serve() will select on.
+	go func() {
+		ch <- cmd.Wait()
+		close(ch)
+	}()
+
+	// Signal forwarding (the critical "hard part"). We react exclusively to
+	// cancellation of the ctx passed in from serve() — which itself comes
+	// from the *single* signal.NotifyContext installed in Starter.Start.
+	// This centralizes all signal handling for the up process (no second
+	// independent signal.Notify / NotifyContext anywhere in the child path).
+	// On cancel we forward SIGINT (the interactive/Ctrl-C signal used by
+	// tests and `sesh down`) to the child's pgid. ESRCH is normal if the
+	// child already exited (race with natural death or prior signal); we
+	// ignore it. The goroutine is detached so spawn returns immediately.
+	// This lives here (creation + cmd) rather than in serve or a separate
+	// forwarder, keeping ownership with the Harness spawn logic per the
+	// Ousterhout guidance and audit fix for "obscure dependencies".
+	pgid := cmd.Process.Pid
+	go func() {
+		<-ctx.Done()
+		slog.Info("forwarding SIGINT to harness pgid (reacting to ctx cancel from outer NotifyContext)", "pgid", pgid)
+		if err := syscall.Kill(-pgid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
+			slog.Warn("forward SIGINT to harness pgid failed (non-ESRCH)", "pgid", pgid, "err", err)
+		}
+	}()
+
+	return ch
 }

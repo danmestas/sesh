@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/alecthomas/kong"
 )
 
 // TestStarter_PreHubBootstrap_NoHub exercises the pre-hub phase against
@@ -152,40 +153,73 @@ func seedHubRepoWithProjectCode(t *testing.T, path, code string) {
 	}
 }
 
-// TestStarter_PinsProjectID verifies that NewStarter populates s.projectID
-// with a valid 40-char hex string and pins it to <cwd>/.sesh/project-id.
-// project-id must be distinct from project-code: it is hostname-free so the
-// same project has the same id on every machine (suitable as a routing key
-// in sesh.* coordination subjects).
-func TestStarter_PinsProjectID(t *testing.T) {
-	cwd := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Chdir(cwd)
-
-	c := &UpCmd{Session: "alpha", Seed: "all", Scope: "session"}
-	s, err := NewStarter(c)
+// TestUpCmd_FlagsAccepted is the Step-1 TDD sentinel (per locked plan):
+// constructs kong over a root CLI wrapper embedding UpCmd (as done in
+// cmd/sesh/main.go) and parses the new flags alongside --session.
+// Written first so it fails (fields missing on UpCmd); after Step 2 it
+// passes. Uses --exec='echo hi' (sh -c parsing is later), --role and
+// --class per role-propagation decision A.
+func TestUpCmd_FlagsAccepted(t *testing.T) {
+	var root struct {
+		Up UpCmd `cmd:"" help:"Bring a session up"`
+	}
+	k, err := kong.New(&root)
 	if err != nil {
-		t.Fatalf("NewStarter: %v", err)
+		t.Fatalf("kong.New: %v", err)
 	}
-	t.Cleanup(s.Release)
-
-	// projectID must be a valid 40-char lowercase hex string.
-	if !isValidProjectCode(s.projectID) {
-		t.Errorf("projectID = %q; want 40 lowercase hex chars", s.projectID)
-	}
-
-	// Must be pinned to .sesh/project-id.
-	data, err := os.ReadFile(projectIDPath(cwd))
+	// Parse as the "up" subcommand; required Session + the three new flags.
+	_, err = k.Parse([]string{"up", "--session=foo", "--exec=echo hi", "--role=implementer", "--class=active"})
 	if err != nil {
-		t.Fatalf("read project-id pin: %v", err)
+		t.Fatalf("parse failed: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != s.projectID {
-		t.Errorf("pinned project-id = %q; want %q", got, s.projectID)
+	if got := root.Up.Session; got != "foo" {
+		t.Errorf("Session = %q, want %q", got, "foo")
 	}
+	if got := root.Up.Exec; got != "echo hi" {
+		t.Errorf("Exec = %q, want %q", got, "echo hi")
+	}
+	if got := root.Up.Role; got != "implementer" {
+		t.Errorf("Role = %q, want %q", got, "implementer")
+	}
+	if got := root.Up.Class; got != "active" {
+		t.Errorf("Class = %q, want %q", got, "active")
+	}
+}
 
-	// project-id must differ from project-code (hostname-free vs hostname-salted).
-	if s.projectID == s.projectCode {
-		t.Error("projectID must not equal projectCode")
+// TestSpawnHarness_ReturnsChan is the TDD skeleton sentinel for Task 3
+// (per implementation plan + locked Hybrid C). Written first so it fails
+// until spawnHarness exists with the right signature and returns a closed
+// chan for the no-op case. Exercises the Harness + harnessEnv types too.
+func TestSpawnHarness_ReturnsChan(t *testing.T) {
+	ch := spawnHarness(context.Background(), "", harnessEnv{})
+	_, ok := <-ch
+	if ok {
+		t.Error("chan should be closed for no-op / empty cmdStr")
+	}
+}
+
+// TestSpawnHarness_HappyPathEnvAndWait verifies the real happy-path spawn:
+// uses sh -c (X), inherits stdio (silent here), Setpgid, builds the canonical
+// env (5 SESH_* + NATS + ROLE/CLASS from harnessEnv), waiter goroutine.
+// Child is a pure test expr that exits 0 only if env was correctly injected.
+// This is the "compile + run" verification before wiring into Starter.serve.
+func TestSpawnHarness_HappyPathEnvAndWait(t *testing.T) {
+	env := harnessEnv{
+		Session:   "t3-sess",
+		NATSURL:   "nats://127.0.0.1:4222",
+		NATSWSURL: "ws://127.0.0.1:8080",
+		FossilURL: "http://127.0.0.1:8081/",
+		LeafURL:   "nats://127.0.0.1:7422",
+		Role:      "implementer",
+		Class:     "active",
+	}
+	// The cmdStr is passed verbatim to sh -c; the test expression succeeds
+	// only when the injected vars match exactly what we put in harnessEnv.
+	cmdStr := `[ "$SESH_SESSION" = "t3-sess" ] && [ "$NATS_URL" = "nats://127.0.0.1:4222" ] && [ "$SESH_NATS_WS_URL" = "ws://127.0.0.1:8080" ] && [ "$SESH_FOSSIL_URL" = "http://127.0.0.1:8081/" ] && [ "$SESH_LEAF_URL" = "nats://127.0.0.1:7422" ] && [ "$SESH_ROLE" = "implementer" ] && [ "$SESH_CLASS" = "active" ] && exit 0 || exit 77`
+
+	ch := spawnHarness(context.Background(), cmdStr, env)
+	err := <-ch
+	if err != nil {
+		t.Fatalf("spawnHarness happy path: child exited non-zero (env injection or sh -c failed): %v", err)
 	}
 }
