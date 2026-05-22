@@ -340,3 +340,33 @@ Two e2e test variants live in `cli/`:
   — `TestSwarmTBD_TwoWorkers_ConvergeOnSharedTrunk`. Empirical proof of
   the end-to-end loop; the runbook commands above are the operator
   surface of what that test asserts mechanically.
+
+## Coordination subject wire shape
+
+Swarm participants coordinate via the `sesh.*` subject space (proposal: `docs/proposals/2026-05-20-sesh-parallel-coordination-subjects.md`; SDK: `internal/coord/`). The wire shape is seven tokens:
+
+```
+sesh.<verb>.<machine>.<scope>.<scope-id>.<target>.<role>
+```
+
+| Segment | Source | Example |
+|---|---|---|
+| `verb` | one of `task`, `broadcast`, `control`, `announce`, `blackboard`, `report` | `task` |
+| `machine` | `coord.Machine()` — `$SESH_MACHINE` env, platform-derived 8-hex, or `_local` | `_local` |
+| `scope` | one of `hub`, `project`, `session`, `workflow`, `agent` | `project` |
+| `scope-id` | for `project`: `.sesh/project-id` (40-hex, hostname-FREE) | `a3f2c1d8...` |
+| `target` | logical grouping inside the scope | `workers` |
+| `role` | the function the agent plays (from `SESH_ROLE`) | `implementer` |
+
+End-to-end example: an active-class agent with `SESH_ROLE=implementer` running on a single-host setup in project `myproj` subscribes to:
+
+```
+sesh.task._local.project.<sha1>.workers.implementer
+```
+
+with queue group `implementer` (work-stealing across same-role peers). The proposal's "Concrete Examples" section and `docs/coordination-patterns.md`'s "Sesh coordination subjects in practice" section enumerate the remaining patterns.
+
+Operators reading this doc end-to-end:
+1. Bring sessions up with `sesh up` — each session writes `.sesh/project-id` on first run (foundations Phase 1).
+2. Launch adapters with `SESH_ROLE=<role>` `SESH_CLASS=active|observer` so the role-aware subjects (Phase 1 of `docs/proposals/2026-05-21-agent-role-registration.md`) land in metadata.
+3. Use `coord.*` helpers from Go code, or hand-craft the seven-token subject for non-Go consumers.
