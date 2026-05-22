@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -395,5 +396,58 @@ func TestConnectWithBackoff_HonorsCtxCancel(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("connectWithBackoff didn't exit promptly on ctx cancel: %v", elapsed)
+	}
+}
+
+// ---------- AgentRef role / class -------------------------------------
+
+// TestAgentRef_JSONShapeIncludesRoleAndClass pins the wire shape — the JSON
+// keys the session manifest exposes to dashboards / sesh-ops / outside tools.
+func TestAgentRef_JSONShapeIncludesRoleAndClass(t *testing.T) {
+	ref := AgentRef{
+		Agent:      "claude-code",
+		Owner:      "dmestas",
+		InstanceID: "ABC123",
+		Subject:    "agents.prompt.cc.dmestas.foo",
+		Role:       "implementer",
+		Class:      "active",
+	}
+	b, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := []string{
+		`"agent":"claude-code"`,
+		`"owner":"dmestas"`,
+		`"instance_id":"ABC123"`,
+		`"subject":"agents.prompt.cc.dmestas.foo"`,
+		`"role":"implementer"`,
+		`"class":"active"`,
+	}
+	got := string(b)
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Errorf("marshaled AgentRef missing %s\nfull: %s", w, got)
+		}
+	}
+}
+
+// TestAgentRef_JSONOmitsEmptyRoleAndClass asserts the omitempty tags work —
+// an old AgentRef constructed before the watcher knew about role/class
+// must not pollute the session JSON with empty strings.
+func TestAgentRef_JSONOmitsEmptyRoleAndClass(t *testing.T) {
+	ref := AgentRef{
+		Agent:      "claude-code",
+		Owner:      "dmestas",
+		InstanceID: "ABC123",
+		Subject:    "agents.prompt.cc.dmestas.foo",
+	}
+	b, _ := json.Marshal(ref)
+	got := string(b)
+	if strings.Contains(got, `"role"`) {
+		t.Errorf("expected role to be omitted when empty: %s", got)
+	}
+	if strings.Contains(got, `"class"`) {
+		t.Errorf("expected class to be omitted when empty: %s", got)
 	}
 }

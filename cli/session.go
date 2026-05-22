@@ -21,11 +21,15 @@ import (
 //   - InstanceID ← service id (the framework-assigned opaque string)
 //   - Subject    ← the "prompt" endpoint's subject (first endpoint named "prompt",
 //     or the first endpoint if none is named "prompt")
+//   - Role       ← metadata.role  (defaults to "worker" when absent)
+//   - Class      ← metadata.class (defaults to "active" when absent)
 type AgentRef struct {
 	Agent      string `json:"agent"`
 	Owner      string `json:"owner"`
 	InstanceID string `json:"instance_id"`
 	Subject    string `json:"subject"`
+	Role       string `json:"role,omitempty"`
+	Class      string `json:"class,omitempty"`
 }
 
 // SessionState is the project-local JSON at <cwd>/.sesh/sessions/<label>.json.
