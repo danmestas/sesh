@@ -441,3 +441,130 @@ the hub. Small extension when geo-distribution becomes a requirement.
 - [Microsoft AZD-for-beginners — Multi-Agent Coordination Patterns](https://github.com/microsoft/AZD-for-beginners/blob/main/docs/chapter-06-pre-deployment/coordination-patterns.md)
 - [NATS by Example](https://natsbyexample.com/)
 - [NATS JetStream concepts](https://docs.nats.io/nats-concepts/jetstream)
+
+## Sesh coordination subjects in practice
+
+The `internal/coord/` SDK (proposal: `docs/proposals/2026-05-20-sesh-parallel-coordination-subjects.md`) gives each pattern a concrete subject shape under the `sesh.*` namespace. The examples below assume:
+
+- `pid` = project-id read from `.sesh/project-id` (hostname-FREE — same on every host working on this project)
+- `_local` machine — single-host setup; replace with `coord.Machine()` for mesh deployments
+- Adapter env: `SESH_ROLE=<role>`, `SESH_CLASS=active|observer` (see `docs/proposals/2026-05-21-agent-role-registration.md`)
+
+### Generator–verifier
+
+Generator publishes work; verifier role subscribes to the verifier lane only.
+
+```go
+// Generator side
+subj := coord.ProjectTaskSubject(coord.Machine(), pid, "workers", "verifier")
+nc.Publish(subj.String(), payload)
+
+// Verifier side (subscribe inside coordinateLoop or your adapter)
+filter := coord.ProjectTaskFilter(coord.Machine(), pid, "workers", "verifier")
+qg := coord.VerbTask.QueueGroup("verifier") // → "verifier"; work-stealing across N verifiers
+nc.QueueSubscribe(filter.String(), qg, handle)
+```
+
+### Orchestrator–subagent
+
+Orchestrator publishes tasks per role; subagents reply on `agents.*` (direct streaming) or on `sesh.report.*` (fan-out updates).
+
+```go
+// Dispatch one task per planned subagent.
+for _, role := range []string{"researcher", "drafter", "editor"} {
+    subj := coord.ProjectTaskSubject(coord.Machine(), pid, "workers", role)
+    nc.Publish(subj.String(), payload)
+}
+
+// Subagents listen on their role lane:
+//   sesh.task.<machine>.project.<pid>.workers.<role>
+// Each subagent's coordinateLoop installs the right filter via SESH_ROLE.
+```
+
+### Agent teams (swarms)
+
+Each swarm has its own `<target>` segment; the role differentiates members.
+
+```go
+subj := coord.Subject{
+    Verb:    coord.VerbTask,
+    Machine: coord.Machine(),
+    Scope:   coord.ScopeProject,
+    ScopeID: pid,
+    Target:  "swarm-alpha",
+    Role:    "worker",
+}
+// → sesh.task._local.project.<pid>.swarm-alpha.worker
+```
+
+Operator listening on the whole swarm regardless of role:
+
+```go
+filter := coord.Filter{
+    Verb: string(coord.VerbTask), Machine: coord.Machine(),
+    Scope: string(coord.ScopeProject), ScopeID: pid,
+    Target: "swarm-alpha", Role: coord.WildOne,
+}
+// → sesh.task._local.project.<pid>.swarm-alpha.*
+```
+
+### Message bus (announcements)
+
+Fire-and-forget pub/sub across the project. No queue group — every listener sees the message.
+
+```go
+subj := coord.Subject{
+    Verb: coord.VerbAnnounce, Machine: coord.Machine(),
+    Scope: coord.ScopeProject, ScopeID: pid,
+    Target: "all", Role: "system",
+}
+// → sesh.announce._local.project.<pid>.all.system
+```
+
+### Blackboard
+
+Shared findings under a project (or workflow); every watcher sees every update.
+
+```go
+subj := coord.WorkflowBlackboardSubject(coord.Machine(), workflowID, "findings", "research")
+// → sesh.blackboard._local.workflow.<wid>.findings.research
+
+// All blackboard updates for the project:
+filter := coord.ProjectBlackboardFilter(coord.Machine(), pid)
+// → sesh.blackboard._local.project.<pid>.>
+```
+
+### Hierarchical multi-tier
+
+Use the scope segment to encode tier: top-level orchestrator uses `scope=project`; mid-level managers use `scope=workflow`; per-agent traffic uses `scope=agent`.
+
+```go
+// Top-tier publishes work-package dispatch:
+coord.ProjectTaskSubject(machine, pid, "managers", "research-mgr")
+
+// Mid-tier publishes aggregated results back up to the project:
+coord.Subject{Verb: coord.VerbReport, Machine: machine,
+    Scope: coord.ScopeProject, ScopeID: pid,
+    Target: "managers", Role: "research-mgr"}
+
+// Per-agent status (narrow, process lifetime):
+coord.Subject{Verb: coord.VerbReport, Machine: machine,
+    Scope: coord.ScopeAgent, ScopeID: instanceID,
+    Target: "self", Role: "status"}
+```
+
+### Spy exclusion
+
+The single load-bearing property: observer-class agents subscribe to `report.*` and `blackboard.*`, never `task.*` or `control.*`. The SDK's `ObserverFilters` enforces this:
+
+```go
+// Observer wiring (sesh-ref-agent's coordinateLoop does this when cfg.Class == ClassObserver)
+for _, f := range coord.ObserverFilters(coord.Machine(), pid) {
+    nc.Subscribe(f.String(), handle)
+}
+// → sesh.report._local.project.<pid>.>
+// → sesh.blackboard._local.project.<pid>.>
+// (never sesh.task.* or sesh.control.*)
+```
+
+Test-enforced by `internal/coord/helpers_test.go::TestObserverFilter_NoTaskingTraffic`.
