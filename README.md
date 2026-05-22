@@ -94,6 +94,10 @@ nats --server="$NATS" sub '>'
 ├── messaging/        ← JetStream storage (persistent)
 └── hub.log           ← stderr from auto-spawned hub
 
+<cwd>/.sesh/
+├── project-code      ← hostname-salted project hash (fossil sync key); pinned on first sesh up
+└── project-id        ← hostname-free project hash (sesh.* coordination subjects); pinned on first sesh up
+
 <cwd>/.sesh/sessions/
 ├── <label>.json      ← {pid, nats_url, nats_ws_url, leaf_url, fossil_url, agents[]} — claimed
 │                       PID-only via O_EXCL, URLs filled in once the embedded hub
