@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -119,6 +120,29 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("register service: %w", err)
 	}
 	defer a.shutdown()
+
+	// Coordination loop: subscribes to sesh-tier subjects
+	// (agents.<verb>.<machine>.<project>.<session>[.<role>[.<worker_id>]])
+	// per cfg.Class. Runs as a goroutine because subscriptions are
+	// passive — the heartbeat loop below is the primary cadence driver.
+	//
+	// coordDone closes only after the loop's deferred unsubscribes complete,
+	// so Run's `defer nc.Drain()` does not race the goroutine. Without this
+	// synchronization, $SRV.INFO can linger past the operator's observable
+	// shutdown boundary.
+	projectID, err := resolveProjectID()
+	if err != nil {
+		slog.Warn("coordinate: resolveProjectID failed; coordination subscriptions disabled", "err", err)
+		projectID = ""
+	}
+	coordDone := make(chan struct{})
+	go func() {
+		defer close(coordDone)
+		if err := coordinateLoop(ctx, a.nc, cfg, projectID, a.instanceID()); err != nil {
+			slog.Warn("coordinate: loop exited with error", "err", err)
+		}
+	}()
+	defer func() { <-coordDone }()
 
 	// Emit an immediate heartbeat so observers see the agent before the
 	// first interval elapses. Mirrors the TS reference agent (§8.5).
@@ -230,7 +254,12 @@ func (a *agent) register() error {
 	return nil
 }
 
-// shutdown drains the service. Idempotent.
+// shutdown drains the service. Per Synadia §8.6, publishes one final
+// empty-payload heartbeat before stopping so observers see immediate
+// offline without waiting for 3× interval missed-beats. Idempotent.
+//
+// Best-effort: a failed final-heartbeat publish does not block svc.Stop —
+// the missed-beats fallback still triggers within ~3× cadence.
 func (a *agent) shutdown() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -238,6 +267,9 @@ func (a *agent) shutdown() {
 		return
 	}
 	a.stopped = true
+	if a.nc != nil {
+		_ = a.nc.Publish(a.hbSubject(), nil)
+	}
 	if a.svc != nil {
 		_ = a.svc.Stop()
 	}
@@ -500,8 +532,14 @@ func (a *agent) handleStatus(req micro.Request) {
 // heartbeatPayload returns the §8.3 dict for both periodic heartbeats
 // and status replies. `session` is omitted when empty per §3.2.
 //
-// Field order in the encoded JSON matches Appendix B.11 to keep
-// byte-for-byte comparisons easy in upstream tests.
+// Sesh extension: `role` and `class` from cfg are included as a sesh-
+// specific tail when set. Convergent with the task-management heartbeat
+// extension (`docs/task-management.md`), and lets coordinators build
+// `{instance_id → role, class}` maps from passive heartbeat observation
+// without polling $SRV.INFO.agents.
+//
+// Field order in the encoded JSON matches Appendix B.11 for the Synadia
+// fields; sesh-extension fields are appended in source order.
 func (a *agent) heartbeatPayload(now time.Time) map[string]any {
 	p := map[string]any{
 		"agent":       a.cfg.Agent,
@@ -512,6 +550,12 @@ func (a *agent) heartbeatPayload(now time.Time) map[string]any {
 	}
 	if a.cfg.Session != "" {
 		p["session"] = a.cfg.Session
+	}
+	if a.cfg.Role != "" {
+		p["role"] = a.cfg.Role
+	}
+	if a.cfg.Class != "" {
+		p["class"] = string(a.cfg.Class)
 	}
 	return p
 }
@@ -609,6 +653,38 @@ func readHubURL() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// resolveProjectID walks from CWD up to root looking for
+// .sesh/project-id and returns the pinned id (hostname-FREE routing
+// key written by `sesh up` per cli/paths.go::loadOrCreateProjectID).
+// Returns ("", nil) when no such file exists — the agent is running
+// outside a sesh project; coordinateLoop will skip subscriptions in
+// that case rather than refuse startup.
+//
+// Mirrors readSessionNATSURL's walk: same up-to-root traversal, same
+// ENOENT-tolerant policy, same plain-text file shape.
+func resolveProjectID() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	dir := cwd
+	for {
+		path := filepath.Join(dir, ".sesh", "project-id")
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data)), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("read %s: %w", path, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
 }
 
 // ---------- misc helpers -------------------------------------------

@@ -177,6 +177,81 @@ func TestHeartbeatPayloadShape(t *testing.T) {
 			t.Fatalf("session should be absent: %+v", p)
 		}
 	})
+
+	t.Run("sesh extension: role and class included when set", func(t *testing.T) {
+		a := &agent{cfg: Config{
+			Agent: "claude-code", Owner: "alice", Session: "s1",
+			Role: "implementer", Class: agentmeta.ClassActive,
+			Interval: 30 * time.Second,
+		}}
+		p := a.heartbeatPayload(now)
+		if p["role"] != "implementer" {
+			t.Errorf("role = %v, want implementer", p["role"])
+		}
+		if p["class"] != "active" {
+			t.Errorf("class = %v, want active", p["class"])
+		}
+	})
+
+	t.Run("sesh extension: role and class omitted when empty", func(t *testing.T) {
+		a := &agent{cfg: Config{
+			Agent: "echo", Owner: "u", Session: "s",
+			Interval: 30 * time.Second,
+			// Role and Class deliberately zero
+		}}
+		p := a.heartbeatPayload(now)
+		if _, ok := p["role"]; ok {
+			t.Errorf("role should be absent when empty: %+v", p)
+		}
+		if _, ok := p["class"]; ok {
+			t.Errorf("class should be absent when empty: %+v", p)
+		}
+	})
+}
+
+// TestShutdownPublishesFinalHeartbeat covers Synadia §8.6 — agents
+// SHOULD publish one final heartbeat with an empty payload to the same
+// heartbeat subject before graceful shutdown, signalling immediate
+// offline so observers don't have to wait for 3× interval missed-beats.
+func TestShutdownPublishesFinalHeartbeat(t *testing.T) {
+	url := startBroker(t)
+	t.Setenv("NATS_URL", url)
+
+	// Subscribe to the hb subject BEFORE the agent starts so the empty
+	// final heartbeat isn't missed.
+	probe := testConn(t, url)
+	hbSub := subSync(t, probe, "agents.hb.echo.alice.s1")
+
+	cancel, done := runAgent(t, Config{
+		Agent: "echo", Owner: "alice", Session: "s1",
+		Interval: 30 * time.Second, // long enough that periodic hb doesn't fire during the test
+	})
+	waitForService(t, probe)
+
+	// Drain the immediate-on-startup heartbeat (Run line ~148) so the
+	// shutdown heartbeat we're looking for isn't masked.
+	if _, err := hbSub.NextMsg(500 * time.Millisecond); err != nil {
+		t.Fatalf("startup heartbeat not received: %v", err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of cancel")
+	}
+
+	// The shutdown defer publishes an empty-payload heartbeat per §8.6.
+	final, err := hbSub.NextMsg(500 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("no final heartbeat after shutdown: %v", err)
+	}
+	if len(final.Data) != 0 {
+		t.Errorf("final heartbeat payload len = %d, want 0 (§8.6 immediate-offline)", len(final.Data))
+	}
 }
 
 func TestFormatMaxPayload(t *testing.T) {
