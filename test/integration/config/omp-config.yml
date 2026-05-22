@@ -1,0 +1,9 @@
+# Oh My Pi config — points at the omp-nats-channel extension by absolute
+# path, matching the install instructions in
+# sesh-channels/omp-nats-channel/README.md.
+#
+# Extensions are loaded at OMP startup; the channel registers as agent
+# kind `op` on `agents.prompt.op.<owner>.<session>` and starts heartbeats.
+
+extensions:
+  - /opt/sesh-channels/omp-nats-channel/extensions/nats-channel.ts
