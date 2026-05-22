@@ -242,6 +242,8 @@ Recommended cadence: **30 s** (§8.2). Payload (§8.3):
 | `instance_id` | string | Yes                  | Framework-assigned service `id` (§3.4)   |
 | `ts`          | string | Yes                  | RFC 3339 UTC                             |
 | `interval_s`  | number | Yes                  | Heartbeat cadence in seconds             |
+| `role`        | string | Sesh extension       | `metadata.role`; omitted when unset. Lets coordinators build `{instance_id → role}` from heartbeats. |
+| `class`       | string | Sesh extension       | `metadata.class`; omitted when unset. `active` or `observer`. |
 
 Observers key liveness on `instance_id` and consider an instance offline
 after 3× `interval_s` of silence (§8.2).
@@ -296,6 +298,53 @@ this as Synadia §5 upstream is tracked in sesh#51.
 **Hub does not register an `agents` service** — the sesh hub is a
 substrate, not an agent. Only harnesses running inside a session register
 under `name = "agents"`. This is a locked decision for v1.
+
+### 8.1 Coordination tiers
+
+Sesh layers its multi-agent coordination on top of the Synadia `agents.*`
+namespace by extending the verb-first 5-token Synadia shape with three
+sesh-owned segments. The result is a tier hierarchy where the token count
+itself selects the addressing granularity — native NATS subject matching
+does the routing, no application-level dispatcher is required.
+
+| Tier | Subject shape | Token count | Reaches |
+|------|---------------|-------------|---------|
+| Session front door | `agents.<verb>.<machine>.<project>.<session>` | 5 | The session's `orch` agent (one per sesh) |
+| Role pool | `agents.<verb>.<machine>.<project>.<session>.<role>` | 6 | All workers of that role in the session, via queue group `<role>` (work-stealing — exactly one receives) |
+| Direct address | `agents.<verb>.<machine>.<project>.<session>.<role>.<worker_id>` | 7 | One specific worker by `instance_id` |
+
+**Verbs:**
+
+| Verb | Tier semantics | Subscriber model |
+|------|----------------|------------------|
+| `agents.prompt.*` | Work dispatch — orch front door, role pool, direct address | Active workers + orch; class=observer NEVER subscribes |
+| `agents.report.*` | Status / blackboard / observability traffic | Anyone, including observers (`class=observer` subscribes here only) |
+| `agents.hb.*` | Synadia §8.3 heartbeats | All agents (Synadia spec); coordinators key off `instance_id` to build presence + `role` + `class` maps |
+| `agents.status.*` | Synadia §8.7 status endpoint | Synadia spec; same shape as heartbeats |
+
+**Spy exclusion** is verb-based, not subject-shape-based. Observers
+(`class=observer`) subscribe to `agents.report.<machine>.<project>.<session>.>`
+ONLY — never to any `agents.prompt.*` subject. Verb separation makes
+accidental dispatch to an observer structurally impossible at the NATS
+matching layer.
+
+**Segment definitions:**
+
+| Segment | Source |
+|---------|--------|
+| `<machine>` | `coord.Machine()` resolves `$SESH_MACHINE` env → platform-derived 8-hex (darwin `IOPlatformUUID`, linux `/etc/machine-id`) → `MachineLocal` sentinel (`_local`). Same value for the process lifetime. |
+| `<project>` | The hostname-FREE `project-id` pinned at `<cwd>/.sesh/project-id` by `sesh up` (distinct from `project-code`, which IS hostname-salted for fossil-sync isolation). |
+| `<session>` | The session label passed to `sesh up --session=<label>`. |
+| `<role>` | The agent's role from `$SESH_ROLE` / `cfg.Role` / `metadata.role`. Reserved value `orch` identifies the session orchestrator. |
+| `<worker_id>` | The Synadia framework-assigned `instance_id` (§3.4). |
+
+**Subscription policy by class:**
+
+- `class=observer`: one subscription on `agents.report.<m>.<p>.<s>.>`.
+- `class=active`, `role=orch`: two subscriptions — `agents.prompt.<m>.<p>.<s>` (5-token front door) AND `agents.prompt.<m>.<p>.<s>.orch.<instance_id>` (7-token direct).
+- `class=active`, `role=<worker>`: two subscriptions — `agents.prompt.<m>.<p>.<s>.<role>` (6-token role pool, queue group `<role>`) AND `agents.prompt.<m>.<p>.<s>.<role>.<instance_id>` (7-token direct).
+
+Reference implementation: `internal/refagent/coordinate.go`.
 
 ---
 
@@ -433,13 +482,16 @@ Field sources:
 > `spy`, `planner`. Defaults to `worker` when unset.
 >
 > **`class`** is `active` (agent expects work) or `observer` (read-only watcher;
-> spies). Defaults to `active`. Coordination subjects (see
-> `docs/proposals/2026-05-20-sesh-parallel-coordination-subjects.md`) target by
-> class — `workers.*` reaches active agents, `spies.*` reaches observers.
+> spies). Defaults to `active`. Sesh's coordination tiers (see § 8 below) key
+> off both `role` and `class`: active agents subscribe to `agents.prompt.*`
+> tiers for dispatch, observers subscribe to `agents.report.*` only — verb-
+> based separation enforces spy exclusion.
 >
 > Both fields are set via the `SESH_ROLE` and `SESH_CLASS` environment variables
 > read by adapters (e.g. `claude-nats-channel`) at boot. Adapters that don't set
-> the metadata appear with the default values.
+> the metadata appear with the default values. Both fields are also included in
+> the sesh-extension heartbeat payload (§ 7.1) so coordinators can build
+> `{instance_id → role, class}` maps from passive heartbeat observation.
 
 `agents[]` is absent from files written by older `sesh` versions; readers
 MUST treat a missing field as an empty array. Write is atomic (temp-file +
