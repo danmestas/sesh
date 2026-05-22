@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"log/slog"
 	"unicode/utf8"
 
 	"github.com/danmestas/sesh/internal/agentmeta"
@@ -119,6 +120,17 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("register service: %w", err)
 	}
 	defer a.shutdown()
+	projectID, err := resolveProjectID()
+	if err != nil {
+		slog.Warn("coordinate: resolveProjectID failed; coordination subscriptions disabled", "err", err)
+		projectID = ""
+	}
+	go func() {
+		if err := coordinateLoop(ctx, a.nc, cfg, projectID); err != nil {
+			slog.Warn("coordinate: loop exited with error", "err", err)
+		}
+	}()
+
 
 	// Emit an immediate heartbeat so observers see the agent before the
 	// first interval elapses. Mirrors the TS reference agent (§8.5).
