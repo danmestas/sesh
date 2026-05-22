@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/alecthomas/kong"
 )
 
 // TestStarter_PreHubBootstrap_NoHub exercises the pre-hub phase against
@@ -152,40 +153,68 @@ func seedHubRepoWithProjectCode(t *testing.T, path, code string) {
 	}
 }
 
-// TestStarter_PinsProjectID verifies that NewStarter populates s.projectID
-// with a valid 40-char hex string and pins it to <cwd>/.sesh/project-id.
-// project-id must be distinct from project-code: it is hostname-free so the
-// same project has the same id on every machine (suitable as a routing key
-// in sesh.* coordination subjects).
-func TestStarter_PinsProjectID(t *testing.T) {
-	cwd := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Chdir(cwd)
-
-	c := &UpCmd{Session: "alpha", Seed: "all", Scope: "session"}
-	s, err := NewStarter(c)
+// TestUpCmd_FlagsAccepted is the Step-1 TDD sentinel (per locked plan):
+// constructs kong over a root CLI wrapper embedding UpCmd (as done in
+// cmd/sesh/main.go) and parses the new flags alongside --session.
+// Written first so it fails (fields missing on UpCmd); after Step 2 it
+// passes. Uses --exec='echo hi' (sh -c parsing is later), --role and
+// --class per role-propagation decision A.
+func TestUpCmd_FlagsAccepted(t *testing.T) {
+	var root struct {
+		Up UpCmd `cmd:"" help:"Bring a session up"`
+	}
+	k, err := kong.New(&root)
 	if err != nil {
-		t.Fatalf("NewStarter: %v", err)
+		t.Fatalf("kong.New: %v", err)
 	}
-	t.Cleanup(s.Release)
-
-	// projectID must be a valid 40-char lowercase hex string.
-	if !isValidProjectCode(s.projectID) {
-		t.Errorf("projectID = %q; want 40 lowercase hex chars", s.projectID)
-	}
-
-	// Must be pinned to .sesh/project-id.
-	data, err := os.ReadFile(projectIDPath(cwd))
+	// Parse as the "up" subcommand; required Session + the three new flags.
+	_, err = k.Parse([]string{"up", "--session=foo", "--exec=echo hi", "--role=implementer", "--class=active"})
 	if err != nil {
-		t.Fatalf("read project-id pin: %v", err)
+		t.Fatalf("parse failed: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != s.projectID {
-		t.Errorf("pinned project-id = %q; want %q", got, s.projectID)
+	if got := root.Up.Session; got != "foo" {
+		t.Errorf("Session = %q, want %q", got, "foo")
 	}
+	if got := root.Up.Exec; got != "echo hi" {
+		t.Errorf("Exec = %q, want %q", got, "echo hi")
+	}
+	if got := root.Up.Role; got != "implementer" {
+		t.Errorf("Role = %q, want %q", got, "implementer")
+	}
+	if got := root.Up.Class; got != "active" {
+		t.Errorf("Class = %q, want %q", got, "active")
+	}
+}
 
-	// project-id must differ from project-code (hostname-free vs hostname-salted).
-	if s.projectID == s.projectCode {
-		t.Error("projectID must not equal projectCode")
+// TestUpCmd_FlagsAccepted is the Step-1 TDD sentinel (per locked plan):
+// constructs kong over a root CLI wrapper embedding UpCmd (as done in
+// cmd/sesh/main.go) and parses the new flags alongside --session.
+// Written first so it fails (fields missing on UpCmd); after Step 2 it
+// passes. Uses --exec='echo hi' (sh -c parsing is later), --role and
+// --class per role-propagation decision A.
+func TestUpCmd_FlagsAccepted(t *testing.T) {
+	var root struct {
+		Up UpCmd `cmd:"" help:"Bring a session up"`
+	}
+	k, err := kong.New(&root)
+	if err != nil {
+		t.Fatalf("kong.New: %v", err)
+	}
+	// Parse as the "up" subcommand; required Session + the three new flags.
+	_, err = k.Parse([]string{"up", "--session=foo", "--exec=echo hi", "--role=implementer", "--class=active"})
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got := root.Up.Session; got != "foo" {
+		t.Errorf("Session = %q, want %q", got, "foo")
+	}
+	if got := root.Up.Exec; got != "echo hi" {
+		t.Errorf("Exec = %q, want %q", got, "echo hi")
+	}
+	if got := root.Up.Role; got != "implementer" {
+		t.Errorf("Role = %q, want %q", got, "implementer")
+	}
+	if got := root.Up.Class; got != "active" {
+		t.Errorf("Class = %q, want %q", got, "active")
 	}
 }

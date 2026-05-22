@@ -54,6 +54,14 @@ type UpCmd struct {
 	// can mix in the same project — see cli/scope.go for the full
 	// trade-off rationale.
 	Scope string `help:"Fossil repo scope: session (per-session repo) or project (shared file)" enum:"session,project" default:"session"`
+
+	// Exec, when non-empty, causes sesh up to spawn the given command as a
+	// child harness after the session is ready (wrapper lifecycle by default).
+	Exec string `name:"exec" help:"Run <cmd> as a child coding-agent harness after the session is ready. Passed to sh -c. Example: --exec='claude --dangerously-skip-permissions'"`
+
+	// Role and Class (locked decision A) — propagated to the harness for sesh.* coordination subjects.
+	Role  string `name:"role"  help:"Role for coordination subjects (e.g. implementer, verifier, spy). Default: worker"`
+	Class string `name:"class" help:"Class for coordination subjects: active (default) or observer" enum:"active,observer" default:"active"`
 }
 
 func (c *UpCmd) Run() error {
