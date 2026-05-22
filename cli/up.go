@@ -110,6 +110,9 @@ func (c *UpCmd) Run() error {
 // process.
 type Starter struct {
 	cmd     *UpCmd
+	execCmd string // threaded from UpCmd.Exec (wrapper path; Harness later per hybrid C)
+	role    string // threaded from UpCmd.Role (propagated per decision A)
+	class   string // threaded from UpCmd.Class (propagated per decision A)
 	project string
 	cwd     string
 
@@ -183,6 +186,9 @@ func NewStarter(c *UpCmd) (*Starter, error) {
 
 	return &Starter{
 		cmd:         c,
+		execCmd:     c.Exec,
+		role:        c.Role,
+		class:       c.Class,
 		project:     project,
 		cwd:         cwd,
 		stateDir:    stateDir,
