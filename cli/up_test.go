@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +149,43 @@ func seedHubRepoWithProjectCode(t *testing.T, path, code string) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close seeded db: %v", err)
+	}
+}
+
+// TestStarter_PinsProjectID verifies that NewStarter populates s.projectID
+// with a valid 40-char hex string and pins it to <cwd>/.sesh/project-id.
+// project-id must be distinct from project-code: it is hostname-free so the
+// same project has the same id on every machine (suitable as a routing key
+// in sesh.* coordination subjects).
+func TestStarter_PinsProjectID(t *testing.T) {
+	cwd := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(cwd)
+
+	c := &UpCmd{Session: "alpha", Seed: "all", Scope: "session"}
+	s, err := NewStarter(c)
+	if err != nil {
+		t.Fatalf("NewStarter: %v", err)
+	}
+	t.Cleanup(s.Release)
+
+	// projectID must be a valid 40-char lowercase hex string.
+	if !isValidProjectCode(s.projectID) {
+		t.Errorf("projectID = %q; want 40 lowercase hex chars", s.projectID)
+	}
+
+	// Must be pinned to .sesh/project-id.
+	data, err := os.ReadFile(projectIDPath(cwd))
+	if err != nil {
+		t.Fatalf("read project-id pin: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != s.projectID {
+		t.Errorf("pinned project-id = %q; want %q", got, s.projectID)
+	}
+
+	// project-id must differ from project-code (hostname-free vs hostname-salted).
+	if s.projectID == s.projectCode {
+		t.Error("projectID must not equal projectCode")
 	}
 }

@@ -316,3 +316,66 @@ func defaultProject() (string, error) {
 	}
 	return base, nil
 }
+
+// deriveProjectID produces a deterministic 40-char lowercase hex project-id
+// from projectName alone — no hostname salt. Unlike project-code (which is
+// hostname-salted to prevent fossil cross-leaf collisions), project-id is
+// the same value across every host that works on the same project. It is
+// the correct routing key for sesh.* coordination subjects scoped to a
+// project.
+//
+// Pure delegate to deriveProjectIDFromName. The two-function shape matches
+// the deriveProjectCode / deriveProjectCodeFromHost pair so the
+// hostname-free property can be asserted directly in tests without
+// shelling out to the OS.
+func deriveProjectID(projectName string) string {
+	return deriveProjectIDFromName(projectName)
+}
+
+// deriveProjectIDFromName is the pure form of deriveProjectID. Takes no
+// host input — the hostname-free property is structural, not behavioral.
+// Derivation: SHA1("sesh:project:" + projectName).
+func deriveProjectIDFromName(projectName string) string {
+	sum := sha1.Sum([]byte("sesh:project:" + projectName))
+	return hex.EncodeToString(sum[:])
+}
+
+// projectIDPath returns <cwd>/.sesh/project-id — the pinned project-id file
+// written on first sesh up.
+func projectIDPath(cwd string) string {
+	return filepath.Join(projectSeshDir(cwd), "project-id")
+}
+
+// loadOrCreateProjectID returns the project-id for cwd, reading the pinned
+// value from <cwd>/.sesh/project-id when present, or deriving a fresh one
+// via deriveProjectID(projectName) and atomically writing it to disk for
+// future runs. Semantics mirror loadOrCreateProjectCode but without the
+// hostname-adoption path — project-id is hostname-free by design.
+//
+// If the file is present but doesn't validate as 40 lowercase hex chars,
+// returns an error rather than silently overwriting.
+func loadOrCreateProjectID(cwd, projectName string) (string, error) {
+	path := projectIDPath(cwd)
+
+	data, err := os.ReadFile(path)
+	if err == nil {
+		id := strings.TrimSpace(string(data))
+		if !isValidProjectCode(id) { // same shape: 40 lowercase hex
+			return "", fmt.Errorf("invalid project-id in %s: expected 40 lowercase hex chars", path)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("read project-id %s: %w", path, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+
+	id := deriveProjectID(projectName)
+	if err := writeAtomic(path, id+"\n"); err != nil {
+		return "", fmt.Errorf("seed project-id %s: %w", path, err)
+	}
+	return id, nil
+}
