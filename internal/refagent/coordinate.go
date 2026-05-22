@@ -19,7 +19,7 @@ import (
 //
 //   - class=observer:       ObserverFilters(<machine>, <projectID>)
 //   - class=active, role=*: ProjectTaskFilter(<machine>, <projectID>, "workers", role)
-//                             + ProjectBlackboardFilter(<machine>, <projectID>)
+//   - ProjectBlackboardFilter(<machine>, <projectID>)
 //
 // projectID may be empty (the agent is not running inside a sesh
 // project). In that case the loop registers no subscriptions and

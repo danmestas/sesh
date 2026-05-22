@@ -671,7 +671,6 @@ func TestRegister_EmitsRoleAndClassMetadata(t *testing.T) {
 	}
 }
 
-
 // TestApplyDefaults_RoleAndClassFromEnv exercises the env-read path:
 // SESH_ROLE / SESH_CLASS populate the typed Config fields.
 func TestApplyDefaults_RoleAndClassFromEnv(t *testing.T) {

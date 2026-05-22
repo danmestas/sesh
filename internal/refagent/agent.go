@@ -21,13 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-	"log/slog"
 	"unicode/utf8"
 
 	"github.com/danmestas/sesh/internal/agentmeta"
@@ -125,12 +125,19 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.Warn("coordinate: resolveProjectID failed; coordination subscriptions disabled", "err", err)
 		projectID = ""
 	}
+	// coordinateLoop holds subscriptions on a.nc; we MUST wait for it to
+	// unsubscribe before nc.Drain() fires (deferred above), otherwise the
+	// connection drain races the goroutine's deferred Unsubscribe and
+	// $SRV.INFO can linger past the operator's observable shutdown
+	// boundary. coordDone closes only after the loop's defers complete.
+	coordDone := make(chan struct{})
 	go func() {
+		defer close(coordDone)
 		if err := coordinateLoop(ctx, a.nc, cfg, projectID); err != nil {
 			slog.Warn("coordinate: loop exited with error", "err", err)
 		}
 	}()
-
+	defer func() { <-coordDone }()
 
 	// Emit an immediate heartbeat so observers see the agent before the
 	// first interval elapses. Mirrors the TS reference agent (§8.5).
