@@ -292,6 +292,61 @@ func TestSeshUp_RegistersOperatorInFossilUserTable(t *testing.T) {
 	}
 }
 
+// TestUp_ChildHarnessExitTriggersShutdown is the TDD integration test for
+// Task 4: wiring spawnHarness (via maybeSpawnHarness helper) into
+// Starter.serve's select. The --exec child exiting must cause serve() to
+// take the childErr arm and shut down (triggering defer Release etc.).
+// Without the arm the sesh up process would hang in select despite child
+// death. Existing non-exec paths are untouched. Uses a fast-exit command
+// so the test does not require external signals.
+func TestUp_ChildHarnessExitTriggersShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: builds binary + spawns subprocess")
+	}
+
+	bin := buildSesh(t)
+
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Use sh -c semantics (documented): "exit 0" is a no-op success child.
+	// Harness spawns quickly; its exit must unblock serve's select.
+	cmd := exec.Command(bin, "up", "--session=harness-child", "--exec=exit 0")
+	cmd.Dir = project
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sesh up --exec: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	// Block until sesh exits or timeout. 8s is generous for full bootstrap
+	// + spawnHarness + immediate child exit + select + shutdown.
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	select {
+	case err := <-waitCh:
+		// Success: process exited on child death, not hanging.
+		t.Logf("sesh up exited after harness child (expected for Task 4 wiring): %v", err)
+
+		// Release() must have run (via defer in Run) so state JSON is reaped.
+		statePath := filepath.Join(project, ".sesh", "sessions", "harness-child.json")
+		if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+			t.Errorf("state file lingered after child-triggered shutdown: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("timeout: sesh up did not shut down after --exec child exited (childErr select arm missing?)")
+	}
+}
+
 // readTrimmed reads a file and trims trailing whitespace. The hub
 // writes its NATS URL with a trailing newline; clients trim before use.
 func readTrimmed(t *testing.T, path string) string {

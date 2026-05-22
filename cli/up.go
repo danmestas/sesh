@@ -374,10 +374,40 @@ func (s *Starter) publishSession() error {
 	return nil
 }
 
+// maybeSpawnHarness returns the error chan from spawnHarness when
+// --exec was supplied (first real usage of the Harness/spawnHarness path
+// for the exec feature). When execCmd is empty it returns nil so the
+// corresponding receive case in serve's select is inert (a nil chan is
+// never ready for communication). This extracts the harness construction
+// + env population into a small helper, keeping serve() focused on its
+// lifecycle select rather than growing a second unrelated responsibility
+// (per the Ousterhout audit guidance for this slice).
+//
+// The harnessEnv is populated from the already-bound hub (post-publish)
+// using the exact same expressions as publishSession so the child
+// receives identical SESH_* / NATS / ROLE/CLASS topology.
+func (s *Starter) maybeSpawnHarness(ctx context.Context) <-chan error {
+	if s.execCmd == "" {
+		return nil
+	}
+	env := harnessEnv{
+		Session:   s.cmd.Session,
+		NATSURL:   s.h.NATSURL(),
+		NATSWSURL: s.h.NATSWebSocketURL(),
+		FossilURL: "http://" + s.h.HTTPAddr() + "/",
+		LeafURL:   s.h.LeafURL(),
+		Role:      s.role,
+		Class:     s.class,
+	}
+	return spawnHarness(ctx, s.execCmd, env)
+}
+
 // serve runs the HTTP serve loop. Returns when ctx cancels (SIGINT /
-// SIGTERM from the operator) or the serve goroutine reports an error.
-// h.Stop is called in either path so the hub's NATS server, leaf, and
-// JetStream WAL all shut down cleanly.
+// SIGTERM from the operator), the serve goroutine reports an error, or
+// the child harness (when --exec was given) exits. The latter case makes
+// child death an explicit shutdown trigger for the whole session (first
+// exercising the exec path). h.Stop is called in all paths so the hub's
+// NATS server, leaf, and JetStream WAL all shut down cleanly.
 func (s *Starter) serve(ctx context.Context) error {
 	slog.Info("sesh up running",
 		"name", s.h.ServerName(),
@@ -398,12 +428,25 @@ func (s *Starter) serve(ctx context.Context) error {
 	// errors are logged, not fatal.
 	go runAgentWatcher(ctx, s.h.NATSURL(), s.sessHandle, s.cmd.Session)
 
+	// First real usage of the exec harness (Task 4 slice).
+	// Placed after watcher (and after publishSession readiness in Start)
+	// so the hub is fully bound and URLs are live. Child exit will
+	// unblock the select below and drive shutdown.
+	childErr := s.maybeSpawnHarness(ctx)
+
 	select {
 	case <-ctx.Done():
 	case err := <-serveErr:
 		if err != nil {
 			slog.Error("HTTP serve error", "err", err)
 		}
+	case err := <-childErr:
+		if err != nil {
+			slog.Error("child harness exited", "err", err)
+		}
+		// err==nil is normal exit of the coding agent (e.g. user quit
+		// claude); still shut the session down cleanly. No signal
+		// forwarding in this slice (future work).
 	}
 
 	slog.Info("sesh up shutting down", "name", s.name)
