@@ -445,8 +445,8 @@ func (s *Starter) serve(ctx context.Context) error {
 			slog.Error("child harness exited", "err", err)
 		}
 		// err==nil is normal exit of the coding agent (e.g. user quit
-		// claude); still shut the session down cleanly. No signal
-		// forwarding in this slice (future work).
+		// claude); still shut the session down cleanly. Signal forwarding
+		// (when the operator interrupts) is owned inside spawnHarness.
 	}
 
 	slog.Info("sesh up shutting down", "name", s.name)
@@ -532,14 +532,19 @@ func spawnHub(projectCode string) error {
 // interactive child "harness" (the coding agent). It is the happy-path
 // wrapper implementation of the hybrid Harness owner (locked C).
 //
-// For the skeleton step (TDD): always returns a closed chan (no-op).
-// Real body (sh -c, Setpgid, stdio inherit, env builder for the five
-// canonical SESH_* + NATS_URL + SESH_ROLE/CLASS, waiter goroutine) is
-// filled immediately after to keep the task atomic while still honoring
-// "skeleton first".
+// sh -c (locked X), inherits stdio/TTY + cwd, builds the canonical
+// SESH_* + NATS + ROLE/CLASS env (single site per decision A), uses
+// Setpgid so the whole child tree can be signaled as a group.
+//
+// On the ctx (from the one NotifyContext in Start) cancelling, a forwarder
+// goroutine does syscall.Kill(-pgid, SIGINT) to propagate the operator
+// interrupt. This is deliberately the *only* Kill site and uses the
+// existing ctx (no additional Notify) to avoid the dual-notify/orphan
+// bugs called out in the proposal + Ousterhout audit.
 //
 // Returns a buffered 1-slot <-chan error that receives the Wait result
-// (or start error) then closes. Callers select on it (future wiring in serve).
+// (or start error) then closes. Callers select on it (wired in serve via
+// maybeSpawnHarness).
 func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan error {
 	ch := make(chan error, 1)
 
@@ -575,7 +580,9 @@ func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan err
 
 	// Setpgid for process-group signal forwarding (wrapper path of Hybrid C).
 	// The parent (sesh up) can later syscall.Kill(-pgid, sig) to deliver to
-	// the whole tree. Opposite of spawnHub's Setsid+daemon.
+	// the whole tree. Opposite of spawnHub's Setsid+daemon. The actual
+	// forwarding logic (below) lives inside this spawn site so it is owned
+	// by the harness path, not scattered across serve().
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -585,10 +592,31 @@ func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan err
 	}
 
 	// Happy-path waiter goroutine. Always sends exactly once then closes.
-	// The returned chan is what serve() will select on (future task).
+	// The returned chan is what serve() will select on.
 	go func() {
 		ch <- cmd.Wait()
 		close(ch)
+	}()
+
+	// Signal forwarding (the critical "hard part"). We react exclusively to
+	// cancellation of the ctx passed in from serve() — which itself comes
+	// from the *single* signal.NotifyContext installed in Starter.Start.
+	// This centralizes all signal handling for the up process (no second
+	// independent signal.Notify / NotifyContext anywhere in the child path).
+	// On cancel we forward SIGINT (the interactive/Ctrl-C signal used by
+	// tests and `sesh down`) to the child's pgid. ESRCH is normal if the
+	// child already exited (race with natural death or prior signal); we
+	// ignore it. The goroutine is detached so spawn returns immediately.
+	// This lives here (creation + cmd) rather than in serve or a separate
+	// forwarder, keeping ownership with the Harness spawn logic per the
+	// Ousterhout guidance and audit fix for "obscure dependencies".
+	pgid := cmd.Process.Pid
+	go func() {
+		<-ctx.Done()
+		slog.Info("forwarding SIGINT to harness pgid (reacting to ctx cancel from outer NotifyContext)", "pgid", pgid)
+		if err := syscall.Kill(-pgid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
+			slog.Warn("forward SIGINT to harness pgid failed (non-ESRCH)", "pgid", pgid, "err", err)
+		}
 	}()
 
 	return ch
