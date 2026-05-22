@@ -324,8 +324,18 @@ func defaultProject() (string, error) {
 // the correct routing key for sesh.* coordination subjects scoped to a
 // project.
 //
-// Derivation: SHA1("sesh:project:" + projectName).
+// Pure delegate to deriveProjectIDFromName. The two-function shape matches
+// the deriveProjectCode / deriveProjectCodeFromHost pair so the
+// hostname-free property can be asserted directly in tests without
+// shelling out to the OS.
 func deriveProjectID(projectName string) string {
+	return deriveProjectIDFromName(projectName)
+}
+
+// deriveProjectIDFromName is the pure form of deriveProjectID. Takes no
+// host input — the hostname-free property is structural, not behavioral.
+// Derivation: SHA1("sesh:project:" + projectName).
+func deriveProjectIDFromName(projectName string) string {
 	sum := sha1.Sum([]byte("sesh:project:" + projectName))
 	return hex.EncodeToString(sum[:])
 }
