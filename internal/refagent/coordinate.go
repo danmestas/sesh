@@ -69,6 +69,17 @@ func coordinateLoop(ctx context.Context, nc *nats.Conn, cfg Config, projectID, i
 			slog.Info("coordinate: received",
 				"verb", verb, "subject", msg.Subject,
 				"reply", msg.Reply, "size", len(msg.Data))
+			// Ack the message when the publisher set a reply inbox.
+			// The ack carries the receiving agent's identity so the
+			// dispatcher can confirm WHICH worker accepted the message.
+			// Load-bearing for tier-routing tests (each tier asserts the
+			// expected agent responded); also useful in production
+			// (an orch learns which worker picked up a queue-group task).
+			if msg.Reply != "" {
+				ack := fmt.Sprintf(`{"instance_id":%q,"role":%q,"class":%q,"verb":%q}`,
+					instanceID, cfg.Role, string(cfg.Class), verb)
+				_ = msg.Respond([]byte(ack))
+			}
 		}
 	}
 
