@@ -36,7 +36,7 @@ Or, for the full adapter config (NATS_URL + agent + owner + session + role + cla
 ```ts
 import { readAdapterConfig } from "@agent-ops/sesh-channels";
 
-const cfg = readAdapterConfig({ defaultAgent: "claude-code" }); // throws ConfigError on bad role/class
+const cfg = readAdapterConfig("claude-code"); // throws ConfigError on bad role/class
 
 const svc = new AgentService({
   nc,
@@ -52,7 +52,7 @@ const svc = new AgentService({
 | Symbol | Purpose |
 |---|---|
 | `readRoleClass()` | Read `SESH_ROLE` / `SESH_CLASS` from env, apply defaults, validate. Returns `{ role, class }`. Throws `ConfigError` on invalid input. |
-| `readAdapterConfig({ defaultAgent })` | Compose `readRoleClass` with NATS_URL / SESH_AGENT / SESH_OWNER / SESH_SESSION env reads. Returns a full `AdapterConfig`. Throws on bad role/class. |
+| `readAdapterConfig(defaultAgent)` | Compose `readRoleClass` with NATS_URL / SESH_AGENT / SESH_OWNER / SESH_SESSION env reads. Returns a full `AdapterConfig`. Throws on bad role/class. |
 | `ConfigError` | Thrown on invalid input. Distinct class so callers can `instanceof` check. |
 | `AgentClass` (type) | Literal union `"active" \| "observer"`. |
 | `AdapterRoleClass` (type) | `{ role: string; class: AgentClass }`. |

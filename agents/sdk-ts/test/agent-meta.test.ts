@@ -60,7 +60,7 @@ describe("readAdapterConfig", () => {
     process.env.SESH_SESSION = "rc-test";
     process.env.SESH_ROLE = "implementer";
     process.env.SESH_CLASS = "active";
-    const c = readAdapterConfig({ defaultAgent: "claude-code" });
+    const c = readAdapterConfig("claude-code");
     expect(c.natsUrl).toBe("nats://example:4222");
     expect(c.agent).toBe("claude-code");
     expect(c.owner).toBe("dmestas");
@@ -71,7 +71,7 @@ describe("readAdapterConfig", () => {
 
   test("SESH_AGENT env var overrides defaultAgent", () => {
     process.env.SESH_AGENT = "custom-bot";
-    const c = readAdapterConfig({ defaultAgent: "claude-code" });
+    const c = readAdapterConfig("claude-code");
     expect(c.agent).toBe("custom-bot");
   });
 
@@ -81,7 +81,7 @@ describe("readAdapterConfig", () => {
     delete process.env.SESH_SESSION;
     delete process.env.USER;
     delete process.env.SESH_AGENT;
-    const c = readAdapterConfig({ defaultAgent: "pi" });
+    const c = readAdapterConfig("pi");
     expect(c.natsUrl).toBe("nats://localhost:4222");
     expect(c.owner).toBe("anon");
     expect(c.session).toBe("");

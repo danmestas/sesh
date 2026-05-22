@@ -46,8 +46,7 @@ function validateClass(c: string): asserts c is AgentClass {
 }
 
 /**
- * Read role and class from process.env (SESH_ROLE / SESH_CLASS), apply
- * defaults, then validate. Throws ConfigError on invalid input.
+ * Read SESH_ROLE / SESH_CLASS from env, apply defaults, validate.
  */
 export function readRoleClass(): AdapterRoleClass {
   const role = ((process.env.SESH_ROLE ?? "").trim()) || DEFAULT_ROLE;
@@ -58,18 +57,16 @@ export function readRoleClass(): AdapterRoleClass {
 }
 
 /**
- * Read the full adapter config (NATS_URL, agent, owner, session, role, class)
- * from process.env. `defaultAgent` is the adapter's canonical agent name —
- * the only knob that differs across adapters.
- *
- * Throws ConfigError on invalid role/class. NATS_URL / owner / session fall
- * back to defaults when unset; nothing else throws.
+ * Compose `readRoleClass` with NATS_URL / SESH_AGENT / SESH_OWNER / SESH_SESSION
+ * env reads. `defaultAgent` is the adapter's canonical agent name — the only
+ * field that differs across adapters when env is unset. NATS_URL / owner /
+ * session fall back to their own defaults; role / class throw on invalid input.
  */
-export function readAdapterConfig(opts: { defaultAgent: string }): AdapterConfig {
+export function readAdapterConfig(defaultAgent: string): AdapterConfig {
   const { role, class: cls } = readRoleClass();
   return {
     natsUrl: process.env.NATS_URL ?? "nats://localhost:4222",
-    agent: process.env.SESH_AGENT ?? opts.defaultAgent,
+    agent: process.env.SESH_AGENT ?? defaultAgent,
     owner: process.env.SESH_OWNER ?? process.env.USER ?? "anon",
     session: process.env.SESH_SESSION ?? "",
     role,
