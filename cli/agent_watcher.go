@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/danmestas/sesh/internal/agentmeta"
 	"github.com/nats-io/nats.go"
 )
 
@@ -177,6 +178,8 @@ func queryAgents(nc *nats.Conn, label string, window time.Duration) []AgentRef {
 				Agent:      info.Metadata["agent"],
 				Owner:      info.Metadata["owner"],
 				InstanceID: info.ID,
+				Role:       agentmeta.DefaultedRole(info.Metadata["role"]),
+				Class:      string(agentmeta.DefaultedClass(info.Metadata["class"])),
 			}
 			// Use the "prompt" endpoint subject if available; fall back to first endpoint.
 			for _, ep := range info.Endpoints {
