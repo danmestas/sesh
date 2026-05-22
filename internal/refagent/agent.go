@@ -611,6 +611,39 @@ func readHubURL() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+// resolveProjectID walks from CWD up to root looking for
+// .sesh/project-id and returns the pinned id (the routing key for
+// scope=project coordination subjects per the parallel-coordination-
+// subjects proposal). Returns ("", nil) when no such file exists,
+// allowing the caller (coordinateLoop) to skip project-scope
+// subscriptions rather than fail startup.
+//
+// Mirrors readSessionNATSURL's walk pattern verbatim — same file
+// shape (plain text, trailing newline), same up-to-root traversal,
+// same ENOENT-tolerance.
+func resolveProjectID() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	dir := cwd
+	for {
+		path := filepath.Join(dir, ".sesh", "project-id")
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data)), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("read %s: %w", path, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
+}
+
 // ---------- misc helpers -------------------------------------------
 
 // validateTokens rejects identifiers that would produce illegal subject

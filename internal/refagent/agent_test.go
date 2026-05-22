@@ -757,3 +757,49 @@ func drain(t *testing.T, sub *nats.Subscription, n int, timeout time.Duration) [
 	}
 	return msgs
 }
+
+// TestResolveProjectID_WalksUpFromCWD verifies the same up-walk pattern
+// readSessionNATSURL uses: the function finds .sesh/project-id in CWD
+// or any ancestor, returns ("", nil) when absent.
+func TestResolveProjectID_WalksUpFromCWD(t *testing.T) {
+	root := t.TempDir()
+	seshDir := filepath.Join(root, ".sesh")
+	if err := os.MkdirAll(seshDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const want = "a3f2c1d8b9e0a3f2c1d8b9e0a3f2c1d8b9e0a3f2" // 40 hex
+	if err := os.WriteFile(filepath.Join(seshDir, "project-id"), []byte(want+"\n"), 0o644); err != nil {
+		t.Fatalf("seed project-id: %v", err)
+	}
+
+	// Run from a nested subdir to prove the walk-up works.
+	nested := filepath.Join(root, "a", "b", "c")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	t.Chdir(nested) // Go 1.24+
+
+	got, err := resolveProjectID()
+	if err != nil {
+		t.Fatalf("resolveProjectID: %v", err)
+	}
+	if got != want {
+		t.Errorf("resolveProjectID = %q, want %q", got, want)
+	}
+}
+
+// TestResolveProjectID_AbsentReturnsEmpty verifies the no-file case
+// returns ("", nil) — refagent should degrade to "no coordination
+// subscriptions" rather than refuse to start when there's no project
+// pinned.
+func TestResolveProjectID_AbsentReturnsEmpty(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	got, err := resolveProjectID()
+	if err != nil {
+		t.Fatalf("resolveProjectID: %v", err)
+	}
+	if got != "" {
+		t.Errorf("resolveProjectID = %q, want empty", got)
+	}
+}
