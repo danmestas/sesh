@@ -85,11 +85,11 @@ type UpCmd struct {
 
 	// Exec, when non-empty, causes sesh up to spawn the given command as a
 	// child harness after the session is ready (wrapper lifecycle by default).
-	Exec string `name:"exec" help:"Run <cmd> as a child coding-agent harness after the session is ready. Passed to sh -c. Example: --exec='claude --dangerously-skip-permissions'"`
+	Exec string `name:"exec" help:"Run <cmd> as a child coding-agent harness after the session is ready. Passed verbatim to sh -c (full shell features: quoting, pipes, &&, globs, etc.). Example: --exec='claude --dangerously-skip-permissions'"`
 
 	// Role and Class (locked decision A) — propagated to the harness for sesh.* coordination subjects.
-	Role  string `name:"role"  help:"Role for coordination subjects (e.g. implementer, verifier, spy). Default: worker"`
-	Class string `name:"class" help:"Class for coordination subjects: active (default) or observer" enum:"active,observer" default:"active"`
+	Role  string `name:"role"  help:"Role for coordination subjects (e.g. implementer, verifier, spy). Passed as SESH_ROLE to --exec child (falls back to 'worker')."`
+	Class string `name:"class" help:"Class for coordination subjects: active (default) or observer. Passed as SESH_CLASS to --exec child." enum:"active,observer" default:"active"`
 }
 
 func (c *UpCmd) Run() error {
