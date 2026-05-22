@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -395,5 +396,254 @@ func TestConnectWithBackoff_HonorsCtxCancel(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("connectWithBackoff didn't exit promptly on ctx cancel: %v", elapsed)
+	}
+}
+
+// ---------- AgentRef role / class -------------------------------------
+
+// TestAgentRef_JSONShapeIncludesRoleAndClass pins the wire shape — the JSON
+// keys the session manifest exposes to dashboards / sesh-ops / outside tools.
+func TestAgentRef_JSONShapeIncludesRoleAndClass(t *testing.T) {
+	ref := AgentRef{
+		Agent:      "claude-code",
+		Owner:      "dmestas",
+		InstanceID: "ABC123",
+		Subject:    "agents.prompt.cc.dmestas.foo",
+		Role:       "implementer",
+		Class:      "active",
+	}
+	b, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := []string{
+		`"agent":"claude-code"`,
+		`"owner":"dmestas"`,
+		`"instance_id":"ABC123"`,
+		`"subject":"agents.prompt.cc.dmestas.foo"`,
+		`"role":"implementer"`,
+		`"class":"active"`,
+	}
+	got := string(b)
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Errorf("marshaled AgentRef missing %s\nfull: %s", w, got)
+		}
+	}
+}
+
+// TestSessionJSON_RoleAndClassRoundTrip writes an agents[] slice with role
+// + class through UpdateAgents and reads back the on-disk JSON. This pins
+// the JSON tag wiring — a stray `json:"-"` on Role would pass Task 4 but
+// fail here.
+func TestSessionJSON_RoleAndClassRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	sess, err := ClaimSession(dir, "rc")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Release() })
+
+	if err := sess.Publish(SessionState{PID: os.Getpid(), NATSURL: "nats://127.0.0.1:9999"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	agents := []AgentRef{
+		{
+			Agent:      "claude-code",
+			Owner:      "dmestas",
+			InstanceID: "ABC",
+			Subject:    "agents.prompt.cc.dmestas.rc",
+			Role:       "implementer",
+			Class:      "active",
+		},
+		{
+			Agent:      "pi",
+			Owner:      "dmestas",
+			InstanceID: "XYZ",
+			Subject:    "agents.prompt.pi.dmestas.rc",
+			Role:       "spy",
+			Class:      "observer",
+		},
+	}
+	if err := sess.UpdateAgents(agents); err != nil {
+		t.Fatalf("UpdateAgents: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "rc.json"))
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`"role":"implementer"`,
+		`"class":"active"`,
+		`"role":"spy"`,
+		`"class":"observer"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("session JSON missing %s\nfull:\n%s", want, body)
+		}
+	}
+}
+
+// TestAgentWatcher_PopulatesRoleAndClassFromMetadata verifies the watcher
+// reads metadata.role / metadata.class from $SRV.INFO.agents and stores
+// them on AgentRef. Covers both classes (active and observer).
+func TestAgentWatcher_PopulatesRoleAndClassFromMetadata(t *testing.T) {
+	_, url := startTestNATSServer(t)
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+
+	subject1 := "agents.prompt.claude-code.dmestas.testlabel"
+	svc1, err := micro.AddService(nc, micro.Config{
+		Name:    "agents",
+		Version: "0.1.0",
+		Metadata: map[string]string{
+			"agent":   "claude-code",
+			"owner":   "dmestas",
+			"session": "testlabel",
+			"role":    "implementer",
+			"class":   "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("svc1: %v", err)
+	}
+	defer svc1.Stop()
+	_ = svc1.AddEndpoint("prompt", micro.HandlerFunc(func(m micro.Request) { _ = m.Respond(nil) }),
+		micro.WithEndpointSubject(subject1))
+
+	subject2 := "agents.prompt.pi.dmestas.testlabel"
+	svc2, err := micro.AddService(nc, micro.Config{
+		Name:    "agents",
+		Version: "0.1.0",
+		Metadata: map[string]string{
+			"agent":   "pi",
+			"owner":   "dmestas",
+			"session": "testlabel",
+			"role":    "spy",
+			"class":   "observer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("svc2: %v", err)
+	}
+	defer svc2.Stop()
+	_ = svc2.AddEndpoint("prompt", micro.HandlerFunc(func(m micro.Request) { _ = m.Respond(nil) }),
+		micro.WithEndpointSubject(subject2))
+
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Poll up to 2s for both agents to appear.
+	var agents []AgentRef
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		agents = queryAgents(nc, "testlabel", 500*time.Millisecond)
+		if len(agents) == 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("queryAgents returned %d agents, want 2", len(agents))
+	}
+
+	byAgent := map[string]AgentRef{}
+	for _, a := range agents {
+		byAgent[a.Agent] = a
+	}
+	if byAgent["claude-code"].Role != "implementer" {
+		t.Errorf("claude-code Role = %q, want implementer", byAgent["claude-code"].Role)
+	}
+	if byAgent["claude-code"].Class != "active" {
+		t.Errorf("claude-code Class = %q, want active", byAgent["claude-code"].Class)
+	}
+	if byAgent["pi"].Role != "spy" {
+		t.Errorf("pi Role = %q, want spy", byAgent["pi"].Role)
+	}
+	if byAgent["pi"].Class != "observer" {
+		t.Errorf("pi Class = %q, want observer", byAgent["pi"].Class)
+	}
+}
+
+// TestAgentWatcher_DefaultsForMissingRoleClassMetadata covers back-compat:
+// an old adapter that registered before the role/class fields existed must
+// still appear in agents[] with the canonical defaults.
+func TestAgentWatcher_DefaultsForMissingRoleClassMetadata(t *testing.T) {
+	_, url := startTestNATSServer(t)
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+
+	subject := "agents.prompt.legacy.dmestas.bclabel"
+	svc, err := micro.AddService(nc, micro.Config{
+		Name:    "agents",
+		Version: "0.1.0",
+		Metadata: map[string]string{
+			"agent":   "legacy",
+			"owner":   "dmestas",
+			"session": "bclabel",
+			// No role / class — back-compat.
+		},
+	})
+	if err != nil {
+		t.Fatalf("svc: %v", err)
+	}
+	defer svc.Stop()
+	_ = svc.AddEndpoint("prompt", micro.HandlerFunc(func(m micro.Request) { _ = m.Respond(nil) }),
+		micro.WithEndpointSubject(subject))
+
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	var agents []AgentRef
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		agents = queryAgents(nc, "bclabel", 500*time.Millisecond)
+		if len(agents) == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("queryAgents returned %d, want 1", len(agents))
+	}
+	if agents[0].Role != "worker" {
+		t.Errorf("default Role = %q, want worker", agents[0].Role)
+	}
+	if agents[0].Class != "active" {
+		t.Errorf("default Class = %q, want active", agents[0].Class)
+	}
+}
+
+// TestAgentRef_JSONOmitsEmptyRoleAndClass asserts the omitempty tags work —
+// an old AgentRef constructed before the watcher knew about role/class
+// must not pollute the session JSON with empty strings.
+func TestAgentRef_JSONOmitsEmptyRoleAndClass(t *testing.T) {
+	ref := AgentRef{
+		Agent:      "claude-code",
+		Owner:      "dmestas",
+		InstanceID: "ABC123",
+		Subject:    "agents.prompt.cc.dmestas.foo",
+	}
+	b, _ := json.Marshal(ref)
+	got := string(b)
+	if strings.Contains(got, `"role"`) {
+		t.Errorf("expected role to be omitted when empty: %s", got)
+	}
+	if strings.Contains(got, `"class"`) {
+		t.Errorf("expected class to be omitted when empty: %s", got)
 	}
 }

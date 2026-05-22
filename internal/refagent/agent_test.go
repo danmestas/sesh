@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danmestas/sesh/internal/agentmeta"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -641,6 +642,99 @@ func TestShutdownDrains(t *testing.T) {
 		t.Error("$SRV.INFO.agents still responds after shutdown")
 	} else if !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, nats.ErrNoResponders) {
 		t.Errorf("unexpected error type %v", err)
+	}
+}
+
+// ---------- Role / Class config + metadata -------------------------
+
+// TestRegister_EmitsRoleAndClassMetadata asserts the on-the-wire INFO
+// response carries role / class keys, the source of truth for downstream
+// parsers (agent_watcher, helper SDKs, coordination-subject dispatchers).
+func TestRegister_EmitsRoleAndClassMetadata(t *testing.T) {
+	url := startBroker(t)
+	t.Setenv("NATS_URL", url)
+
+	runAgent(t, Config{
+		Agent: "echo", Owner: "alice", Session: "rc-test",
+		Role: "implementer", Class: agentmeta.ClassActive,
+		Interval: 1 * time.Second,
+	})
+
+	nc := testConn(t, url)
+	info := waitForService(t, nc)
+	body := string(info)
+	if !strings.Contains(body, `"role":"implementer"`) {
+		t.Errorf("INFO body missing role=implementer:\n%s", body)
+	}
+	if !strings.Contains(body, `"class":"active"`) {
+		t.Errorf("INFO body missing class=active:\n%s", body)
+	}
+}
+
+
+// TestApplyDefaults_RoleAndClassFromEnv exercises the env-read path:
+// SESH_ROLE / SESH_CLASS populate the typed Config fields.
+func TestApplyDefaults_RoleAndClassFromEnv(t *testing.T) {
+	t.Setenv("SESH_ROLE", "implementer")
+	t.Setenv("SESH_CLASS", "active")
+
+	var c Config
+	c.applyDefaults()
+
+	if c.Role != "implementer" {
+		t.Errorf("Role = %q, want implementer", c.Role)
+	}
+	if c.Class != agentmeta.ClassActive {
+		t.Errorf("Class = %v, want active", c.Class)
+	}
+}
+
+// TestApplyDefaults_RoleAndClassDefaults asserts the back-compat defaults
+// when neither env nor explicit Config field is set.
+func TestApplyDefaults_RoleAndClassDefaults(t *testing.T) {
+	t.Setenv("SESH_ROLE", "")
+	t.Setenv("SESH_CLASS", "")
+
+	var c Config
+	c.applyDefaults()
+
+	if c.Role != agentmeta.DefaultRole {
+		t.Errorf("Role default = %q, want %q", c.Role, agentmeta.DefaultRole)
+	}
+	if c.Class != agentmeta.DefaultClass {
+		t.Errorf("Class default = %v, want %v", c.Class, agentmeta.DefaultClass)
+	}
+}
+
+// TestRun_RejectsBadClassAtBoot asserts the agent refuses to start with an
+// unknown SESH_CLASS value rather than silently coercing.
+func TestRun_RejectsBadClassAtBoot(t *testing.T) {
+	t.Setenv("SESH_CLASS", "passive")
+	t.Setenv("SESH_ROLE", "worker")
+	t.Setenv("NATS_URL", "nats://127.0.0.1:1") // unreachable; should never be dialed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := Run(ctx, Config{Agent: "echo", Owner: "alice"})
+	if err == nil || !strings.Contains(err.Error(), "class") {
+		t.Fatalf("Run with SESH_CLASS=passive: err = %v, want class error", err)
+	}
+}
+
+// TestRun_RejectsBadRoleAtBoot asserts the agent refuses to start with a
+// role that doesn't match the canonical regex.
+func TestRun_RejectsBadRoleAtBoot(t *testing.T) {
+	t.Setenv("SESH_ROLE", "Bad Role")
+	t.Setenv("SESH_CLASS", "active")
+	t.Setenv("NATS_URL", "nats://127.0.0.1:1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := Run(ctx, Config{Agent: "echo", Owner: "alice"})
+	if err == nil || !strings.Contains(err.Error(), "role") {
+		t.Fatalf("Run with SESH_ROLE=\"Bad Role\": err = %v, want role error", err)
 	}
 }
 

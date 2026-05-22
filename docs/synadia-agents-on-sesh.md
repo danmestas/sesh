@@ -401,7 +401,17 @@ The bus is authoritative; the file is a convenience.
       "agent": "claude-code",
       "owner": "aconnolly",
       "instance_id": "VMKS6MHK71PCPWGY38A7N5",
-      "subject": "agents.prompt.claude-code.aconnolly.synadia-com-2"
+      "subject": "agents.prompt.claude-code.aconnolly.synadia-com-2",
+      "role": "implementer",
+      "class": "active"
+    },
+    {
+      "agent": "pi",
+      "owner": "aconnolly",
+      "instance_id": "XYZ789",
+      "subject": "agents.prompt.pi.aconnolly.synadia-com-2",
+      "role": "spy",
+      "class": "observer"
     }
   ]
 }
@@ -409,12 +419,27 @@ The bus is authoritative; the file is a convenience.
 
 Field sources:
 
-| Field         | Source in `$SRV.INFO.agents` response           |
-|---------------|-------------------------------------------------|
-| `agent`       | `metadata.agent`                                |
-| `owner`       | `metadata.owner`                                |
-| `instance_id` | top-level `id` (framework-assigned opaque ID)   |
-| `subject`     | the `prompt` endpoint's `subject`               |
+| Field         | Source in `$SRV.INFO.agents` response                                              |
+|---------------|------------------------------------------------------------------------------------|
+| `agent`       | `metadata.agent`                                                                   |
+| `owner`       | `metadata.owner`                                                                   |
+| `instance_id` | top-level `id` (framework-assigned opaque ID)                                      |
+| `subject`     | the `prompt` endpoint's `subject`                                                  |
+| `role`        | `metadata.role` (defaults to `"worker"` when absent)                               |
+| `class`       | `metadata.class` (defaults to `"active"` when absent; one of `active`, `observer`) |
+
+> **`role`** is a free-form short token (`^[a-z0-9_-]+$`, 1–63 chars) identifying
+> the function an agent plays in the swarm — e.g. `implementer`, `verifier`,
+> `spy`, `planner`. Defaults to `worker` when unset.
+>
+> **`class`** is `active` (agent expects work) or `observer` (read-only watcher;
+> spies). Defaults to `active`. Coordination subjects (see
+> `docs/proposals/2026-05-20-sesh-parallel-coordination-subjects.md`) target by
+> class — `workers.*` reaches active agents, `spies.*` reaches observers.
+>
+> Both fields are set via the `SESH_ROLE` and `SESH_CLASS` environment variables
+> read by adapters (e.g. `claude-nats-channel`) at boot. Adapters that don't set
+> the metadata appear with the default values.
 
 `agents[]` is absent from files written by older `sesh` versions; readers
 MUST treat a missing field as an empty array. Write is atomic (temp-file +
