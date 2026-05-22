@@ -1,0 +1,46 @@
+# Docker Compose for the sesh integration rig.
+#
+# Single service; the rig runs as one container with multiple processes
+# under tini. Two named build contexts are used so the Dockerfile can pull
+# both the sesh source tree and the sesh-channels source tree:
+#   - default context: ../.. (the sesh repo, where this directory lives)
+#   - additional `channels`: ${SESH_CHANNELS_DIR:-../../../sesh-channels}
+#
+# Mounts:
+#   - /root/.claude/.credentials.json  (RO)  — operator's Claude OAuth blob
+#   - /root/.omp/agent                  (RW)  — copy of operator's OMP db
+#                                              (RW because SQLite WAL/SHM
+#                                              needs to checkpoint)
+#   - /var/artifacts                    (RW)  — results.txt, session.json,
+#                                              adapter logs land here
+#
+# Cred mount paths are wired in by scripts/stage-creds.sh, which writes a
+# .env file consumed by this compose.
+
+services:
+  sesh-integ:
+    container_name: sesh-integ
+    build:
+      context: ../..
+      dockerfile: test/integration/Dockerfile
+      additional_contexts:
+        channels: ${SESH_CHANNELS_DIR:-../../../sesh-channels}
+    # `tty: true` is what gives both claude and omp a PTY — they refuse to
+    # boot cleanly without one (claude's trust dialog flow, OMP's terminal
+    # detection). The entrypoint wraps each agent in `script -qfc` so even
+    # if this stops working we get per-agent PTYs.
+    tty: true
+    stdin_open: true
+    environment:
+      USER: integ
+      HOME: /root
+      # Claude reads .credentials.json directly, but exporting the token
+      # belt-and-braces survives if the file format ever changes.
+      # entrypoint.sh extracts it from the mounted credentials file.
+    volumes:
+      - ${HOST_CLAUDE_CREDS:?run scripts/stage-creds.sh first}:/root/.claude/.credentials.json:ro
+      - ${HOST_OMP_DIR:?run scripts/stage-creds.sh first}:/root/.omp/agent:rw
+      - ${HOST_ARTIFACTS_DIR:?run scripts/stage-creds.sh first}:/var/artifacts:rw
+    # No exposed ports — everything is internal NATS over loopback inside
+    # the container. The harness reaches the bus through the same hub URL
+    # the adapters use (~/.sesh/hub.nats.url).

@@ -1,0 +1,6 @@
+# Generated at rig-up by stage-creds.sh — contains absolute paths to
+# operator-specific tmpdirs and isn't useful in source control.
+.env
+
+# Per-run artifacts.
+artifacts/
