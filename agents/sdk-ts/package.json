@@ -1,0 +1,37 @@
+{
+  "name": "@agent-ops/sesh-channels",
+  "version": "0.1.0",
+  "description": "Canonical role/class types, validators, and defaults for the sesh agent registration protocol. TS port of github.com/danmestas/sesh/internal/agentmeta.",
+  "license": "Apache-2.0",
+  "author": "Dan Mestas",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danmestas/sesh.git",
+    "directory": "agents/sdk-ts"
+  },
+  "homepage": "https://github.com/danmestas/sesh/tree/main/agents/sdk-ts#readme",
+  "bugs": "https://github.com/danmestas/sesh/issues",
+  "keywords": ["sesh", "nats", "agent", "synadia-agent-protocol", "role", "class"],
+  "type": "module",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist/", "README.md", "CHANGELOG.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsup",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0"
+  }
+}
