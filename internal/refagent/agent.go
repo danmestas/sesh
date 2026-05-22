@@ -189,6 +189,8 @@ func (a *agent) register() error {
 		"agent":            a.cfg.Agent,
 		"owner":            a.cfg.Owner,
 		"protocol_version": protocolVersion,
+		"role":             a.cfg.Role,
+		"class":            string(a.cfg.Class),
 	}
 	if a.cfg.Session != "" {
 		metadata["session"] = a.cfg.Session

@@ -647,6 +647,31 @@ func TestShutdownDrains(t *testing.T) {
 
 // ---------- Role / Class config + metadata -------------------------
 
+// TestRegister_EmitsRoleAndClassMetadata asserts the on-the-wire INFO
+// response carries role / class keys, the source of truth for downstream
+// parsers (agent_watcher, helper SDKs, coordination-subject dispatchers).
+func TestRegister_EmitsRoleAndClassMetadata(t *testing.T) {
+	url := startBroker(t)
+	t.Setenv("NATS_URL", url)
+
+	runAgent(t, Config{
+		Agent: "echo", Owner: "alice", Session: "rc-test",
+		Role: "implementer", Class: agentmeta.ClassActive,
+		Interval: 1 * time.Second,
+	})
+
+	nc := testConn(t, url)
+	info := waitForService(t, nc)
+	body := string(info)
+	if !strings.Contains(body, `"role":"implementer"`) {
+		t.Errorf("INFO body missing role=implementer:\n%s", body)
+	}
+	if !strings.Contains(body, `"class":"active"`) {
+		t.Errorf("INFO body missing class=active:\n%s", body)
+	}
+}
+
+
 // TestApplyDefaults_RoleAndClassFromEnv exercises the env-read path:
 // SESH_ROLE / SESH_CLASS populate the typed Config fields.
 func TestApplyDefaults_RoleAndClassFromEnv(t *testing.T) {
