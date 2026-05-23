@@ -228,7 +228,7 @@ func renderTree(agents []MeshAgent) string {
 // All flags are optional. Defaults: connect via ReadHubInfo(stateDir),
 // format=table, no filters (show every agent the local hub knows about).
 type MeshCmd struct {
-	NATSURL string `help:"NATS URL to query (overrides hub discovery)" env:"NATS_URL"`
+	NATSURL string `name:"nats-url" help:"NATS URL to query (overrides hub discovery)" env:"NATS_URL"`
 	Format  string `short:"o" help:"Output format: table | json | tree" default:"table" enum:"table,json,tree"`
 
 	// Filter flags (all AND-combined; empty = no filter)
