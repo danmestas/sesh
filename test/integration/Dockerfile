@@ -109,6 +109,12 @@ RUN mkdir -p /home/integ/.claude /home/integ/.omp/agent /home/integ/.sesh \
 COPY --chown=integ:integ test/integration/config/claude.mcp.json /opt/claude.mcp.json
 COPY --chown=integ:integ test/integration/config/omp-config.yml  /home/integ/.omp/agent/config.yml
 
+# Skip the "Bypass Permissions mode" warning dialog at startup. Without this,
+# claude-code 2.1.126 renders a TTY-only dialog that requires "2\n" input,
+# which the rig was previously feeding via a FIFO timing kludge. The
+# managed-settings key dismisses the dialog at the source. (F4.3)
+COPY --chown=integ:integ test/integration/config/claude-settings.json /home/integ/.claude/settings.json
+
 # Harness — TS test program. Copy + bun install for fast container start.
 COPY --chown=integ:integ test/integration/harness /opt/harness
 RUN cd /opt/harness && bun install --no-summary && chown -R integ:integ /opt/harness

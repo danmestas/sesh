@@ -160,11 +160,61 @@ former is what makes Claude Code treat the `nats` MCP server as a *channel*
 `notifications/claude/channel` from the channel server are silently dropped
 by claude-code, and case 03/05/06 hang.
 
-The rig also auto-feeds two `2\n` inputs over the claude FIFO:
-
-1. Bypass-Permissions warning dialog (~6 s after launch)
-2. Loading-Development-Channels warning dialog (~10 s after launch)
+The rig auto-feeds one `2\n` input over the claude FIFO to dismiss the
+Loading-Development-Channels warning dialog (~10 s after launch). The
+older Bypass-Permissions warning dialog is dismissed at the source via
+`skipDangerousModePermissionPrompt: true` in
+`/home/integ/.claude/settings.json` (see F4.3 below).
 
 To debug the channel gate, set `RIG_DEBUG_MCP=1` in the rig's environment;
 `--debug=mcp` is then appended to the claude invocation and the relevant
 gate decisions appear in `/var/log/claude.log`.
+
+## Claude Code unattended-mode workarounds (F4)
+
+The rig works around four real Claude Code 2.1.126 ergonomic gaps for
+containerized / unattended runs. Each is documented here so future operators
+don't rediscover them.
+
+### F4.1 — Non-root user required
+
+`claude --dangerously-skip-permissions` refuses to run when `geteuid() == 0`.
+The Dockerfile creates a non-root `integ` user (uid 1500) and runs the
+entrypoint as that user. See `Dockerfile` (`useradd -ms /bin/bash -u 1500 integ`).
+
+### F4.2 — `.mcp.json` auto-discovery dialog
+
+A project-local `.mcp.json` triggers a "New MCP server found" 1/2/3 trust
+dialog at first sight, even with `--dangerously-skip-permissions`. The rig
+does not bake any `.mcp.json` into `/workspace`. claude-code is launched
+with `--strict-mcp-config --mcp-config /opt/claude.mcp.json` instead.
+`--strict-mcp-config` disables `.mcp.json` discovery; the explicit
+`--mcp-config` is treated as operator-supplied and pre-trusted.
+See `Dockerfile` (the `claude.mcp.json` COPY) and the `claude` launch in
+`entrypoint.sh`.
+
+### F4.3 — Bypass-Permissions warning dialog
+
+claude-code renders `WARNING: Claude Code running in Bypass Permissions mode`
+at first run. The managed-settings key
+`skipDangerousModePermissionPrompt: true` dismisses it at the source.
+The rig copies `test/integration/config/claude-settings.json` to
+`/home/integ/.claude/settings.json` to enable this. Prior to F4 the rig
+fed a timed `2\n` into the claude FIFO ~6 s after startup; the
+managed-setting removes the dialog and the timed feed.
+
+### F4.4 — Non-TTY stdin behavior
+
+claude under non-TTY stdin (containerized stdout redirect) behaves
+inconsistently with `--print` + `--dangerously-skip-permissions`. The rig
+wraps claude with `script -qfc <cmd> /dev/null` (Linux PTY wrapper) so
+claude thinks it's running on a TTY. See the `claude` launch in
+`entrypoint.sh`.
+
+### Dev-channels warning dialog (covered by F1, not F4)
+
+`--dangerously-load-development-channels` (required by F1) raises a
+separate "Loading development channels" dialog. The rig auto-feeds `2\n`
+to dismiss it ~10 s after startup. See F1's plan for context. There is
+currently no managed-settings equivalent to dismiss this dialog at the
+source; the timed feed is the only known mechanism.
