@@ -106,22 +106,15 @@ echo "[exec-wrapper] starting; SESH_SESSION=${SESH_SESSION:-} SESH_ROLE=${SESH_R
 # Two fifos — keep claude/omp stdin held open with `sleep infinity > fifo`
 # in the background, so neither sees EOF and exits.
 mkfifo /tmp/claude.fifo /tmp/omp.fifo
-# Hold both FIFOs open by writing zero bytes forever. For claude we also
-# auto-feed two "2\n" inputs:
-#   1. The "Yes, I accept" choice in the Bypass-Permissions warning dialog
-#      that --dangerously-skip-permissions raises on first run.
-#   2. The "I am using this for local development" choice in the
-#      Loading-Development-Channels warning dialog that
-#      --dangerously-load-development-channels raises every run.
-# Both dialogs' first option is "1" (the safe choice) and second is the
-# accept choice we want; we send "2\n" to pick the accept option, twice
-# with a delay between them so claude has time to render the next one.
+# Hold both FIFOs open by writing zero bytes forever. The bypass-
+# permissions warning dialog is dismissed at the source via
+# `skipDangerousModePermissionPrompt: true` in ~/.claude/settings.json
+# (copied in by the Dockerfile — see F4.3). The only dialog that still
+# fires under --dangerously-load-development-channels is the dev-channels
+# warning (~10s after startup), which we auto-feed "2\n" to accept.
 (
-  # First dialog: bypass-permissions (~6s into startup).
-  sleep 6
-  printf '2\n'
-  # Second dialog: dev-channels (~4s after the first is accepted).
-  sleep 4
+  # Dev-channels warning dialog (~10s into startup).
+  sleep 10
   printf '2\n'
   sleep infinity
 ) > /tmp/claude.fifo &
