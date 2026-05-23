@@ -10,9 +10,9 @@ Spins up a container that:
 2. Installs Claude Code (`@anthropic-ai/claude-code`) and Oh My Pi (`@oh-my-pi/pi-coding-agent`).
 3. Mounts the operator's local OAuth state from macOS keychain (Claude) and `~/.omp/agent` (OMP) so no API keys go through env vars.
 4. Runs two parallel `sesh up --exec` invocations against a single session `smoke-test`:
-   - `--role=implementer --class=active` spawns `claude` with the `claude-nats-channel` MCP server
+   - `--role=implementer --class=active` spawns `claude` in **plugin-mode**, with the `nats-channel@sesh-channels` plugin pre-installed at image-build time (mirrors the operator's production invocation)
    - `--role=planner --class=active` spawns `omp` with the `omp-nats-channel` extension
-5. Executes a TypeScript harness with 8 ordered cases — registration, heartbeats, prompt/reply on each agent, attachment round-trip, cross-adapter chatter, session JSON shape, and a steady-state stability window.
+5. Executes a TypeScript harness with 8 ordered cases — registration, heartbeats, prompt/reply on each agent, attachment round-trip, multi-round cross-adapter conversation (3 alternating rounds, claude ↔ omp), session JSON shape, and a steady-state stability window.
 
 Findings land in `artifacts/results.txt` + `artifacts/session-smoke-test.json` + per-agent logs.
 
@@ -95,7 +95,7 @@ After a run, `test/integration/artifacts/` contains:
 | 03 | prompt-claude | Stream + reply via Synadia SDK contains "SUCCESS" |
 | 04 | prompt-omp | Same shape against OMP (longer budget) |
 | 05 | attachment | 10-byte attachment delivered to claude; response cites length 10 |
-| 06 | cross-adapter | Caller-mediated A→harness→B chatter (v1 interpretation per plan) |
+| 06 | cross-adapter | 3-round chained-arithmetic conversation: claude → omp → claude, harness-mediated relay |
 | 07 | session-json | `agents[]` in session JSON has both agents with correct subject + role/class |
 | 08 | steady-state | 60s window — heartbeat count grows monotonically, agent set stable |
 
@@ -113,7 +113,7 @@ docker compose run --rm sesh-integ /bin/bash  # interactive shell
 
 - macOS-only cred staging (the rig itself runs Linux containers; only the host script is mac-specific).
 - 60s steady-state window is short; raise `WINDOW_MS` in `08-steady-state.ts` if you need a longer soak.
-- Cross-adapter case is caller-mediated only — no claude→omp tool surface today (tracked as an enhancement note in `FINDINGS.md`).
+- Cross-adapter case is caller-mediated only — the harness brokers each round, no direct claude→omp tool surface (tracked as an enhancement note in `FINDINGS.md`).
 
 ## Log readability (F7)
 
@@ -164,30 +164,43 @@ than crashing.
 
 The rig avoids this by:
 
-1. Not baking a `.mcp.json` into `/workspace`. claude is launched with
-   `--strict-mcp-config --mcp-config /opt/claude.mcp.json` (path outside
-   the workspace, invisible to OMP's discovery walk).
-2. Setting `NATS_CHANNEL_STRICT=1` in the claude MCP server's env block
-   (see `config/claude.mcp.json`). If a duplicate registration ever does
-   happen — operator misconfiguration, future regression — the second
-   instance fails loudly with exit code 2 rather than registering as a
-   phantom `cc-2`.
+1. Not baking any `.mcp.json` into `/workspace`. claude is launched in
+   **plugin-mode** — the `nats-channel@sesh-channels` plugin (pre-installed
+   into `~/.claude/plugins/` at image-build time) provides the MCP server,
+   so no project-level config file is needed at all.
+2. Setting `NATS_CHANNEL_STRICT=1` in the plugin's MCP server env (declared
+   in `claude-nats-channel/plugin.json` / the plugin manifest, not in the
+   rig). If a duplicate registration ever does happen — operator
+   misconfiguration, future regression — the second instance fails loudly
+   with exit code 2 rather than registering as a phantom `cc-2`.
 
 When co-locating claude + OMP in a real workspace, apply the same two
-rules. The strict-mode flag is documented in
-`sesh-channels/claude-nats-channel/README.md#strict-mode`. For
-operator-facing notes on the underlying OMP feature gap (no exclusion
+rules: prefer plugin-mode (or `--mcp-config` outside the workspace) for
+the claude MCP config, and keep strict-mode on. The strict-mode flag is
+documented in `sesh-channels/claude-nats-channel/README.md#strict-mode`.
+For operator-facing notes on the underlying OMP feature gap (no exclusion
 mechanism for `mcp.discoveryMode`), see
 [`docs/upstream-notes-omp-mcp-discovery.md`](../../docs/upstream-notes-omp-mcp-discovery.md).
 
 ## Claude Code channel-enablement (F1 workaround)
 
-The rig launches `claude` with `--dangerously-load-development-channels nats`
-in addition to `--strict-mcp-config --mcp-config /opt/claude.mcp.json`. The
-former is what makes Claude Code treat the `nats` MCP server as a *channel*
-(inbound-push enabled) instead of a plain tool provider. Without the flag,
-`notifications/claude/channel` from the channel server are silently dropped
-by claude-code, and case 03/05/06 hang.
+The rig launches `claude` with `--dangerously-load-development-channels
+plugin:nats-channel@sesh-channels`. The `plugin:<name>@<marketplace>` form
+opts the plugin's MCP server into Claude Code's *channel* gate (inbound-push
+enabled) instead of treating it as a plain tool provider. Without the
+channel flag, `notifications/claude/channel` from the channel server are
+silently dropped by claude-code, and case 03/05/06 hang.
+
+This is the exact production invocation the operator runs:
+
+```sh
+sesh up --session=<label> --role=<role> \
+  --exec 'claude --dangerously-skip-permissions \
+                 --dangerously-load-development-channels plugin:nats-channel@sesh-channels'
+```
+
+The plugin itself is pre-registered into `~/.claude/plugins/` at image-build
+time. See **Plugin-mode install** below for the on-disk shape.
 
 The rig auto-feeds one `2\n` input over the claude FIFO to dismiss the
 Loading-Development-Channels warning dialog (~10 s after launch). The
@@ -215,12 +228,10 @@ entrypoint as that user. See `Dockerfile` (`useradd -ms /bin/bash -u 1500 integ`
 
 A project-local `.mcp.json` triggers a "New MCP server found" 1/2/3 trust
 dialog at first sight, even with `--dangerously-skip-permissions`. The rig
-does not bake any `.mcp.json` into `/workspace`. claude-code is launched
-with `--strict-mcp-config --mcp-config /opt/claude.mcp.json` instead.
-`--strict-mcp-config` disables `.mcp.json` discovery; the explicit
-`--mcp-config` is treated as operator-supplied and pre-trusted.
-See `Dockerfile` (the `claude.mcp.json` COPY) and the `claude` launch in
-`entrypoint.sh`.
+sidesteps this entirely by using **plugin-mode** — the MCP server is
+declared inside the `nats-channel@sesh-channels` plugin manifest and
+loaded by Claude Code as part of plugin activation. No project `.mcp.json`,
+no `--mcp-config` flag. See **Plugin-mode install** below.
 
 ### F4.3 — Bypass-Permissions warning dialog
 
@@ -247,3 +258,55 @@ separate "Loading development channels" dialog. The rig auto-feeds `2\n`
 to dismiss it ~10 s after startup. See F1's plan for context. There is
 currently no managed-settings equivalent to dismiss this dialog at the
 source; the timed feed is the only known mechanism.
+
+## Plugin-mode install
+
+The rig matches the operator's production invocation shape:
+
+```sh
+claude --dangerously-skip-permissions \
+       --dangerously-load-development-channels plugin:nats-channel@sesh-channels
+```
+
+For `plugin:nats-channel@sesh-channels` to resolve, two pieces of state must
+exist on disk before `claude` launches:
+
+1. **A `directory`-source marketplace** named `sesh-channels`, pointing at
+   the sesh-channels checkout (the `.claude-plugin/marketplace.json` inside
+   that directory declares the `nats-channel` plugin).
+2. **An installed plugin entry** for `nats-channel@sesh-channels`, user-
+   scoped, pointing at the plugin's source directory.
+
+Operators register these by running:
+
+```sh
+claude plugin marketplace add ~/projects/sesh-channels
+claude plugin install nats-channel@sesh-channels -s user
+```
+
+Both commands prompt for confirmation today, so they can't run unattended
+inside a Dockerfile build. The rig instead **pre-bakes the equivalent
+on-disk state** by COPYing three JSONs into `/home/integ/.claude/plugins/`:
+
+- `known_marketplaces.json` — declares the `sesh-channels` marketplace,
+  source `directory: /opt/sesh-channels`.
+- `installed_plugins.json` — declares the `nats-channel@sesh-channels`
+  install, user-scoped, `installPath: /opt/sesh-channels/claude-nats-channel`.
+- `config.json` — the (empty) `repositories` map, present for completeness
+  so claude doesn't re-write it on first launch.
+
+These files are the on-disk surface claude-code reads at startup; the
+shape mirrors the operator's `~/.claude/plugins/` exactly (verified by
+direct inspection). The bake happens during `docker build` so the image
+is self-contained — no install at runtime.
+
+If a future claude-code release adds a non-interactive flag to
+`claude plugin install` (`-y`, `--yes`, etc.), the rig can switch to the
+canonical CLI path — just add the install command to the Dockerfile and
+drop the JSON COPYs. Until then, the JSON-bake is the only deterministic
+path.
+
+The Dockerfile copies `/opt/sesh-channels/.claude-plugin/marketplace.json`
+in alongside the adapter source so the marketplace pointer resolves. See
+`Dockerfile` block "Plugin-mode install for claude-nats-channel" for the
+exact COPY ordering.

@@ -23,23 +23,31 @@
 ### F1 — Inbound prompt does not trigger an agent turn (load-bearing)
 
 **Severity:** P0 — single root cause for cases 03 / 04 / 05 / 06.
-**Owner:** sesh-channels (most likely) or claude-code product behavior.
+**Owner:** claude-code's `--dangerously-load-development-channels` gate.
+**Status:** FIXED. The rig now matches the operator's production invocation
+shape — plugin-mode (`--dangerously-load-development-channels plugin:nats-channel@sesh-channels`),
+which routes `notifications/claude/channel` through Claude Code's channel
+gate and drives a model turn. The previous `--strict-mcp-config / --mcp-config`
+form bypassed the channel gate by registering the MCP server outside the
+plugin path, so notifications were silently dropped.
 
-**Symptom:** Caller publishes to `agents.prompt.cc.<owner>.<session>`. The channel's MCP server receives the request, forwards it as an `notifications/claude/channel` MCP notification, and emits the mandatory §6.4 `{"type":"status","data":"ack"}` chunk on the reply subject. **Then nothing.** Claude does not invoke its `reply` tool. Ack-timers fire (every 30s — `ACK_INTERVAL_MS = 30_000` in `claude-nats-channel/server.ts`) until the caller times out at 90s.
+**Symptom (pre-fix):** Caller publishes to `agents.prompt.cc.<owner>.<session>`. The channel's MCP server receives the request, forwards it as a `notifications/claude/channel` MCP notification, and emits the mandatory §6.4 `{"type":"status","data":"ack"}` chunk on the reply subject. **Then nothing.** Claude does not invoke its `reply` tool. Ack-timers fire (every 30s — `ACK_INTERVAL_MS = 30_000` in `claude-nats-channel/server.ts`) until the caller times out at 90s.
 
 Same shape on OMP — receives ack, emits terminator immediately (so the reply *terminates*, but with no response chunks).
 
-**Diagnosis:** The model only produces output during an active conversation turn. Claude and OMP sitting idle in their TUIs receive the channel notification but don't start a turn. `--dangerously-skip-permissions` auto-accepts *tool calls*; a channel notification isn't a tool call — it's an inbound prompt waiting for the model to begin a turn.
+**Diagnosis (pre-fix):** The model only produces output during an active conversation turn. The `--dangerously-load-development-channels nats` form (matching an MCP server name) did not opt the server into the channel gate; `plugin:<name>@<marketplace>` does. With the gate inactive, claude-code dropped the channel notifications, leaving the channel waiting for a reply that never came.
 
-Both `claude-nats-channel/server.ts:587-589` and the channel README mention experimental MCP capabilities `'claude/channel'` + `'claude/channel/permission'` that *should* drive auto-processing, but they don't in our setup.
+**Reproduction (pre-fix):** Run rig before this commit. Watch `harness/results.txt`. Cases 03/05/06 time out; case 04 returns empty response.
 
-**Reproduction:** Run rig as-is. Watch `harness/results.txt`. Cases 03/05/06 time out; case 04 returns empty response.
-
-**Suggested fix shape (incomplete — needs brainstorm):** Either (a) the channel synthesizes a user-turn when an inbound prompt arrives, (b) the channel's MCP capability handshake actually does drive a turn and we're misusing it, or (c) the operator setup needs a documented prerequisite (background daemon / persistent active state). Investigation needed.
+**Fix shipped:**
+- Rig: claude is now installed via plugin-mode at image-build time (Dockerfile bakes `~/.claude/plugins/{known_marketplaces,installed_plugins,config}.json`) and launched with `--dangerously-load-development-channels plugin:nats-channel@sesh-channels`. The `--strict-mcp-config / --mcp-config` flags are dropped; the plugin's MCP server is loaded by Claude Code as part of plugin activation, and the channel gate is engaged by the `plugin:` form of the channel flag.
+- This matches the operator's production invocation byte-for-byte (except `--continue`, which the rig deliberately omits — fresh session per run).
 
 **Cross-references:**
-- `~/projects/sesh-channels/claude-nats-channel/server.ts` lines 580-620 (capabilities handshake), 850+ (notification dispatch), `ACK_INTERVAL_MS` constant
-- `~/projects/sesh-channels/omp-nats-channel/extensions/nats-channel.ts` analogous notification path
+- `test/integration/Dockerfile` (Plugin-mode install block)
+- `test/integration/entrypoint.sh` (claude launch line)
+- `test/integration/config/claude-plugins/` (baked plugin enablement JSONs)
+- Operator reference: `~/.claude/plugins/installed_plugins.json` + `known_marketplaces.json` (the schema the rig mirrors)
 
 ---
 
@@ -97,15 +105,15 @@ Both `claude-nats-channel/server.ts:587-589` and the channel README mention expe
 **Symptoms (each is a real workaround in the rig):**
 
 1. **Refuses `--dangerously-skip-permissions` under root** — claude exits with "for security reasons" when uid=0. Rig added a non-root `integ` user (uid 1500).
-2. **`.mcp.json` auto-discovery dialog blocks even with `--dangerously-skip-permissions`** — Claude prompts "New MCP server found in .mcp.json: nats — 1/2/3". Workaround: `--strict-mcp-config --mcp-config /opt/claude.mcp.json` and no project `.mcp.json`.
+2. **`.mcp.json` auto-discovery dialog blocks even with `--dangerously-skip-permissions`** — Claude prompts "New MCP server found in .mcp.json: nats — 1/2/3". Rig sidesteps entirely via plugin-mode (MCP server declared inside the `nats-channel@sesh-channels` plugin manifest, no project `.mcp.json` at all). Pre-plugin-mode workaround was `--strict-mcp-config --mcp-config /opt/claude.mcp.json`.
 3. **First-run "Bypass Permissions mode" warning dialog blocks startup** — `bypassPermissionsModeAccepted: true` in `~/.claude.json` doesn't persist across containers (claude reads `.config.json`, which is different). Rig auto-feeds `2\n` via a FIFO.
 4. **`--print` and `--dangerously-skip-permissions` interact oddly when stdin isn't a TTY** — bypass-permissions still wants interactive input even in `--print` mode.
 
 **Suggested fix shape:** Upstream issues at `anthropic/claude-code`. Either separate small issues or one "containerized claude ergonomics" umbrella. Per CLAUDE.md no-third-party-filing rule, we don't file these — but the rig README should document the workarounds so anyone else running containerized claude doesn't rediscover them.
 
 **Cross-references:**
-- `test/integration/entrypoint.sh` (FIFO + `--strict-mcp-config` workarounds)
-- `test/integration/Dockerfile` (non-root `integ` user)
+- `test/integration/entrypoint.sh` (FIFO + plugin-mode invocation)
+- `test/integration/Dockerfile` (non-root `integ` user + plugin-mode install)
 
 ---
 

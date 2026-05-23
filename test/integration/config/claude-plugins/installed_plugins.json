@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "plugins": {
+    "nats-channel@sesh-channels": [
+      {
+        "scope": "user",
+        "installPath": "/opt/sesh-channels/claude-nats-channel",
+        "version": "0.4.1",
+        "installedAt": "2026-05-22T00:00:00.000Z",
+        "lastUpdated": "2026-05-22T00:00:00.000Z",
+        "gitCommitSha": "0000000000000000000000000000000000000000"
+      }
+    ]
+  }
+}
