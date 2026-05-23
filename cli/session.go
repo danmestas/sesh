@@ -60,6 +60,10 @@ type SessionState struct {
 // sesh down (via package-level Terminate) reads the published PID and
 // signals the owner.
 //
+// One owner per label is enforced; see docs/synadia-agents-on-sesh.md
+// "Session ownership" for the rationale and the wrapper-exec pattern for
+// running multiple adapters in one session.
+//
 // The file is the registry — no in-process state, no shared bus. A live PID
 // in the file means a live session; a missing file means none; a dead PID
 // in the file is a stale claim that gets reaped on the next ClaimSession or
