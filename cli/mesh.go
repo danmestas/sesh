@@ -61,3 +61,48 @@ func QueryMesh(nc *nats.Conn, window time.Duration) []MeshAgent {
 	}
 	return agents
 }
+
+// MeshFilter selects a subset of agents. Empty fields are wildcards.
+// All set fields combine as AND.
+type MeshFilter struct {
+	Agent   string
+	Owner   string
+	Session string
+	Role    string
+	Class   string
+	Machine string
+}
+
+// ApplyFilter returns a new slice containing only agents matching every
+// non-empty field in f. An empty MeshFilter returns the input unchanged
+// (modulo slice copy).
+func ApplyFilter(agents []MeshAgent, f MeshFilter) []MeshAgent {
+	if (f == MeshFilter{}) {
+		out := make([]MeshAgent, len(agents))
+		copy(out, agents)
+		return out
+	}
+	var out []MeshAgent
+	for _, a := range agents {
+		if f.Agent != "" && a.Agent != f.Agent {
+			continue
+		}
+		if f.Owner != "" && a.Owner != f.Owner {
+			continue
+		}
+		if f.Session != "" && a.Session != f.Session {
+			continue
+		}
+		if f.Role != "" && a.Role != f.Role {
+			continue
+		}
+		if f.Class != "" && string(a.Class) != f.Class {
+			continue
+		}
+		if f.Machine != "" && a.Machine != f.Machine {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}

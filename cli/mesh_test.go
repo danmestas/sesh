@@ -103,3 +103,49 @@ func TestQueryMesh_MalformedReplyIsSkipped(t *testing.T) {
 		t.Errorf("want exactly 1 cc agent (garbage skipped), got %+v", got)
 	}
 }
+
+func TestApplyFilter_BySession(t *testing.T) {
+	all := []MeshAgent{
+		{Agent: "cc", Session: "alpha", InstanceID: "1"},
+		{Agent: "op", Session: "alpha", InstanceID: "2"},
+		{Agent: "cc", Session: "beta", InstanceID: "3"},
+	}
+	got := ApplyFilter(all, MeshFilter{Session: "alpha"})
+	if len(got) != 2 {
+		t.Fatalf("got %d agents, want 2: %+v", len(got), got)
+	}
+}
+
+func TestApplyFilter_ByRoleAndClass(t *testing.T) {
+	all := []MeshAgent{
+		{Agent: "cc", Role: "implementer", Class: "active", InstanceID: "1"},
+		{Agent: "cc", Role: "implementer", Class: "observer", InstanceID: "2"},
+		{Agent: "cc", Role: "planner", Class: "active", InstanceID: "3"},
+	}
+	got := ApplyFilter(all, MeshFilter{Role: "implementer", Class: "active"})
+	if len(got) != 1 {
+		t.Fatalf("got %d, want 1: %+v", len(got), got)
+	}
+	if got[0].InstanceID != "1" {
+		t.Errorf("wrong agent: %+v", got[0])
+	}
+}
+
+func TestApplyFilter_AllFiltersConjunct(t *testing.T) {
+	all := []MeshAgent{
+		{Agent: "cc", Owner: "dmestas", Session: "alpha", Role: "implementer", Class: "active", Machine: "abc12345", InstanceID: "1"},
+		{Agent: "cc", Owner: "dmestas", Session: "alpha", Role: "implementer", Class: "active", Machine: "def67890", InstanceID: "2"},
+	}
+	got := ApplyFilter(all, MeshFilter{Agent: "cc", Owner: "dmestas", Session: "alpha", Role: "implementer", Class: "active", Machine: "abc12345"})
+	if len(got) != 1 || got[0].InstanceID != "1" {
+		t.Fatalf("conjunct filter wrong: %+v", got)
+	}
+}
+
+func TestApplyFilter_EmptyFilterReturnsAll(t *testing.T) {
+	all := []MeshAgent{{InstanceID: "1"}, {InstanceID: "2"}}
+	got := ApplyFilter(all, MeshFilter{})
+	if len(got) != 2 {
+		t.Errorf("empty filter dropped agents: got %d want 2", len(got))
+	}
+}
