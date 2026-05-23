@@ -19,7 +19,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HUB_URL_FILE = "/root/.sesh/hub.nats.url";
+// Hub URL: prefer the live file (it tracks restarts); fall back to the
+// snapshot the entrypoint cached at first sighting so a hub that's gone
+// idle and exited still leaves us a debug artifact.
+const HUB_URL_FILE_PRIMARY = `${process.env.HOME ?? "/home/integ"}/.sesh/hub.nats.url`;
+const HUB_URL_FILE_CACHED  = "/var/artifacts/hub.nats.url";
 const OWNER = process.env.USER || "integ";
 const SESSION = "smoke-test";
 
@@ -42,9 +46,15 @@ export interface CaseResult {
 export type CaseRunner = (ctx: CaseContext) => Promise<CaseResult>;
 
 function readHubUrl(): string {
-  const url = readFileSync(HUB_URL_FILE, "utf8").trim();
-  if (!url) throw new Error(`${HUB_URL_FILE} is empty`);
-  return url;
+  for (const p of [HUB_URL_FILE_PRIMARY, HUB_URL_FILE_CACHED]) {
+    try {
+      const url = readFileSync(p, "utf8").trim();
+      if (url) return url;
+    } catch {
+      // fall through
+    }
+  }
+  throw new Error(`no hub URL at ${HUB_URL_FILE_PRIMARY} or ${HUB_URL_FILE_CACHED}`);
 }
 
 async function loadCases(): Promise<Array<{ file: string; run: CaseRunner }>> {

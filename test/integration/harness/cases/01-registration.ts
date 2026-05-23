@@ -10,7 +10,7 @@
 // This is the foundational case — every other case depends on adapters
 // being reachable on the bus, so a failure here cascades.
 
-import { Empty, type ServiceInfoResponse } from "@nats-io/services";
+import { createInbox } from "@nats-io/transport-node";
 import type { CaseContext, CaseResult } from "../harness";
 
 const WINDOW_MS = 3000;
@@ -25,7 +25,7 @@ interface ServiceInfo {
 }
 
 async function collectInfo(ctx: CaseContext): Promise<ServiceInfo[]> {
-  const inbox = ctx.nc.newInbox();
+  const inbox = createInbox();
   const sub = ctx.nc.subscribe(inbox);
   ctx.nc.publish("$SRV.INFO.agents", new Uint8Array(0), { reply: inbox });
   const out: ServiceInfo[] = [];

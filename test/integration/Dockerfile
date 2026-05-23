@@ -15,15 +15,18 @@
 # ──────────────────────────────────────────────────────────────────────
 FROM golang:1.26-bookworm AS sesh-builder
 
+# sesh has a `replace github.com/danmestas/EdgeSync => ../EdgeSync` in
+# go.mod, so we need EdgeSync's source available at the relative path Go
+# expects. Bring it in via the `edgesync` build context (configured in
+# compose.yaml) at /EdgeSync, and place the sesh tree at /src — the
+# relative `../EdgeSync` then resolves correctly during go mod download.
+WORKDIR /
+COPY --from=edgesync . /EdgeSync/
 WORKDIR /src
 
-# Pre-pull module deps using the lockfile so the actual source COPY below
-# stays cache-friendly when only Go files change.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Now bring in the rest of the tree. The build context is the repo root
-# (see compose.yaml / scripts/run.sh — `context: ../..`).
 COPY . .
 
 ENV CGO_ENABLED=0
@@ -52,8 +55,15 @@ RUN dbus-uuidgen --ensure=/etc/machine-id && cat /etc/machine-id
 # Claude Code CLI (binary: `claude`).
 RUN npm install -g --no-progress @anthropic-ai/claude-code && claude --version
 
-# Oh My Pi (binary: `omp`).
-RUN bun install -g @oh-my-pi/pi-coding-agent && omp --version
+# Oh My Pi (binary: `omp`). We install with bun into /usr/local-style
+# globals so the binary lands on a path readable by the non-root `integ`
+# user introduced below. The default `bun install -g` puts binaries in
+# /root/.bun/bin/, which integ cannot read.
+ENV BUN_INSTALL=/usr/local/bun-global
+ENV PATH=${BUN_INSTALL}/bin:${PATH}
+RUN bun install -g @oh-my-pi/pi-coding-agent && \
+    chmod -R a+rX ${BUN_INSTALL} && \
+    omp --version
 
 # Bring in the sesh binary from Stage 1.
 COPY --from=sesh-builder /out/sesh /usr/local/bin/sesh
@@ -80,21 +90,28 @@ ENV WORKSPACE=/workspace
 RUN mkdir -p ${WORKSPACE}/.sesh && \
     printf '%s\n' "$(openssl rand -hex 20)" > ${WORKSPACE}/.sesh/project-id
 
+# Create a non-root user; claude refuses --dangerously-skip-permissions
+# as root for security reasons, so the agent processes (and the harness)
+# run as `integ` instead.
+RUN useradd -ms /bin/bash -u 1500 integ
+
 # Mount points for the operator's Claude + OMP OAuth — directories created
 # here, files arrive at `docker run` via -v binds from scripts/stage-creds.sh.
-RUN mkdir -p /root/.claude /root/.omp/agent /root/.sesh /var/log /var/artifacts
+# Owned by integ so the bind mount and writes line up.
+RUN mkdir -p /home/integ/.claude /home/integ/.omp/agent /home/integ/.sesh \
+             /var/log /var/artifacts && \
+    chown -R integ:integ /home/integ /var/log /var/artifacts /workspace /opt/sesh-channels
 
-# Static configs baked into the image.
-#   - claude.mcp.json → /workspace/.mcp.json (Claude reads it at startup;
-#     CLAUDE_PLUGIN_ROOT is the env var the channel template uses, so we
-#     hard-substitute the absolute path at the copy site below).
-#   - omp-config.yml  → /root/.omp/agent/config.yml.
-COPY test/integration/config/claude.mcp.json /workspace/.mcp.json
-COPY test/integration/config/omp-config.yml  /root/.omp/agent/config.yml
+# Claude's .mcp.json is NOT baked into /workspace — auto-discovery of
+# .mcp.json triggers a "New MCP server found" 1/2/3 trust dialog claude
+# refuses to bypass even with --dangerously-skip-permissions. Instead we
+# pass the config explicitly via --mcp-config flag in the entrypoint.
+COPY --chown=integ:integ test/integration/config/claude.mcp.json /opt/claude.mcp.json
+COPY --chown=integ:integ test/integration/config/omp-config.yml  /home/integ/.omp/agent/config.yml
 
 # Harness — TS test program. Copy + bun install for fast container start.
-COPY test/integration/harness /opt/harness
-RUN cd /opt/harness && bun install --no-summary
+COPY --chown=integ:integ test/integration/harness /opt/harness
+RUN cd /opt/harness && bun install --no-summary && chown -R integ:integ /opt/harness
 
 # Entrypoint orchestrates: prelude (OAuth) → `sesh up --exec` x2 → harness.
 COPY test/integration/entrypoint.sh /opt/entrypoint.sh
@@ -104,7 +121,9 @@ RUN chmod +x /opt/entrypoint.sh
 # Without this, owner falls back to "unknown" — registration would still
 # work but harness's discovery filters break.
 ENV USER=integ
-ENV HOME=/root
+ENV HOME=/home/integ
+
+USER integ
 
 WORKDIR /workspace
 
