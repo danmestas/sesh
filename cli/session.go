@@ -81,6 +81,13 @@ type Session struct {
 // The returned Session must be released via Session.Release (typically
 // deferred) so the file does not outlive the owning process.
 func ClaimSession(stateDir, label string) (*Session, error) {
+	// Reap stale session JSONs across ALL labels in this stateDir, not just
+	// our own. Sesh up's deferred Release() only runs on graceful exit; a
+	// kill -9, OOM kill, or system crash leaves a manifest behind with a
+	// dead pid. The next ClaimSession (any label) walks the dir and reaps
+	// those — the operator's "I see 6 .json files but only spun up 1"
+	// surprise that motivated this fix.
+	reapStaleSessions(stateDir)
 	path := sessionFilePath(stateDir, label)
 	if existing, err := readSessionFile(path); err == nil {
 		if alive(existing.PID) {
@@ -106,6 +113,33 @@ func ClaimSession(stateDir, label string) (*Session, error) {
 		return nil, err
 	}
 	return &Session{stateDir: stateDir, label: label}, nil
+}
+
+// reapStaleSessions removes any <stateDir>/*.json whose recorded pid is no
+// longer alive. Best-effort: read errors, unmarshal errors, and remove
+// errors are all swallowed (the worst case is a stale file sticks around
+// one more cycle). Idempotent and safe to call from ClaimSession on every
+// `sesh up`. Files without a pid field are left alone (they were never a
+// valid claim, may be operator-authored future schema, etc.).
+func reapStaleSessions(stateDir string) {
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return // dir doesn't exist yet or unreadable — nothing to reap
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(stateDir, e.Name())
+		st, err := readSessionFile(path)
+		if err != nil {
+			continue
+		}
+		if st.PID == 0 || alive(st.PID) {
+			continue
+		}
+		_ = os.Remove(path)
+	}
 }
 
 // Publish overwrites the session file with state. The file must still

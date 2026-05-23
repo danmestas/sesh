@@ -234,6 +234,65 @@ func TestClaimSession_ReapsStaleDeadPID(t *testing.T) {
 	t.Cleanup(func() { _ = sess.Release() })
 }
 
+// TestClaimSession_ReapsStaleOtherLabels pins the multi-label reaper.
+// When several sessions in the same stateDir have been kill -9'd / OOM'd
+// (deferred Release never ran), the next ClaimSession — even for a fresh
+// unrelated label — should sweep all dead-pid manifests in the dir, not
+// just the one it's trying to claim.
+func TestClaimSession_ReapsStaleOtherLabels(t *testing.T) {
+	dir := t.TempDir()
+
+	deadPID := exitedSubprocessPID(t)
+	stalePayload, err := json.Marshal(SessionState{PID: deadPID})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	livePayload, err := json.Marshal(SessionState{PID: os.Getpid()})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Seed: two stale (alpha/beta), one live (gamma).
+	for name, body := range map[string][]byte{
+		"alpha.json": stalePayload,
+		"beta.json":  stalePayload,
+		"gamma.json": livePayload,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	// Also a non-json file — must be ignored, not touched.
+	if err := os.WriteFile(filepath.Join(dir, "alpha.repo"), []byte("opaque"), 0o644); err != nil {
+		t.Fatalf("seed alpha.repo: %v", err)
+	}
+
+	// Claim a brand-new label — the reaper runs as a side effect.
+	sess, err := ClaimSession(dir, "delta")
+	if err != nil {
+		t.Fatalf("claim delta: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Release() })
+
+	// alpha + beta should be gone.
+	for _, n := range []string{"alpha.json", "beta.json"} {
+		if _, err := os.Stat(filepath.Join(dir, n)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s not reaped: stat err=%v", n, err)
+		}
+	}
+	// gamma (live owner) must survive.
+	if _, err := os.Stat(filepath.Join(dir, "gamma.json")); err != nil {
+		t.Errorf("gamma.json (live) was reaped: %v", err)
+	}
+	// non-json sibling must survive.
+	if _, err := os.Stat(filepath.Join(dir, "alpha.repo")); err != nil {
+		t.Errorf("alpha.repo (non-json) was touched: %v", err)
+	}
+	// And of course our own claim went through.
+	if _, err := os.Stat(filepath.Join(dir, "delta.json")); err != nil {
+		t.Errorf("delta claim file missing: %v", err)
+	}
+}
+
 // TestTerminate_NoFile: missing state file → no error, no-op.
 func TestTerminate_NoFile(t *testing.T) {
 	dir := t.TempDir()
