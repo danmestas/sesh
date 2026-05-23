@@ -136,6 +136,13 @@ echo "[exec-wrapper] claude pid=$CLAUDE" >&2
 (
   export SESH_ROLE=planner
   export SESH_CLASS=active
+  # Suppress ANSI color codes at the source (NO_COLOR is the no-color.org
+  # convention; TERM=dumb is the historical fallback) and pipe the
+  # remaining output through `col -b` to strip any escape sequences that
+  # slip through the PTY wrapper. Without both, /var/log/omp.log is
+  # unreadable without an ANSI-stripping post-processor. (F7)
+  export NO_COLOR=1
+  export TERM=dumb
   # omp-nats-channel/extensions/nats-channel.ts only reads NATS_SESSION_NAME
   # for the session token — it does NOT consult SESH_SESSION like
   # claude-nats-channel/server.ts does (claude calls discoverSessionLabel
@@ -145,7 +152,7 @@ echo "[exec-wrapper] claude pid=$CLAUDE" >&2
   export NATS_SESSION_NAME="${SESH_SESSION:-}"
   echo "[omp-side] SESH_SESSION=$SESH_SESSION NATS_SESSION_NAME=$NATS_SESSION_NAME SESH_ROLE=$SESH_ROLE SESH_CLASS=$SESH_CLASS HOME=$HOME PATH=$PATH NATS_URL=$NATS_URL" >&2
   exec script -qfc "omp" /dev/null < /tmp/omp.fifo
-) > /var/log/omp.log 2>&1 &
+) 2>&1 | col -b > /var/log/omp.log &
 OMP=$!
 echo "[exec-wrapper] omp pid=$OMP" >&2
 
