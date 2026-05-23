@@ -609,6 +609,55 @@ agent set on the bus.
 
 ---
 
+## 13. Mesh observability
+
+The `sesh mesh` subcommand answers "who is on the mesh right now?" without needing to learn the NATS CLI or grep the session JSON. It queries `$SRV.INFO.agents` against the local hub and renders the responders.
+
+### Snapshot — default tabular output
+
+```
+$ sesh mesh
+AGENT  OWNER     SESSION     ROLE         CLASS    MACHINE   INSTANCE
+cc     dmestas   smoke-test  implementer  active   f9a1b2c3  ABC12345
+op     dmestas   smoke-test  planner      active   f9a1b2c3  XYZ98765
+```
+
+Instance IDs are truncated to 8 chars for readability; use `-o json` or `--id <full-id>` (when the inspect mode lands in v2) to see the full value.
+
+### Output formats
+
+- `sesh mesh` — default tabular table-aligned output (for humans)
+- `sesh mesh -o json` — array of MeshAgent objects (for scripts and other agents)
+- `sesh mesh -o tree` — hierarchical machine → project → session → role view (for topology at-a-glance)
+
+### Filtering
+
+All filter flags AND-combine; empty = wildcard.
+
+```
+sesh mesh --session=smoke-test
+sesh mesh --role=implementer --class=active
+sesh mesh --agent=cc --owner=dmestas
+sesh mesh --machine=f9a1b2c3
+```
+
+### Hub URL discovery
+
+By default `sesh mesh` reads the NATS URL from `~/.sesh/hub.nats.url` (written by `sesh up` — see §2.1). Override with `--nats-url` or `NATS_URL` env var.
+
+If the hub URL file is missing (no `sesh up` running), the command exits with a hint: run `sesh up` first or pass `--nats-url`.
+
+### What's NOT in v1
+
+- Live mode (`--watch` redraws as heartbeats arrive)
+- Per-agent inspect detail (`sesh mesh --id <instance>`)
+- Cross-machine federated view
+- Traffic tap (`sesh mesh tap <subject>`)
+
+These are deferred to a v2 PR. v1 is snapshot-only, single-hub.
+
+---
+
 ## Further reading
 
 - [`docs/synadia-comparison.md`](./synadia-comparison.md) — layer map and rationale for adopting Synadia §3
