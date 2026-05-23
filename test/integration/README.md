@@ -128,3 +128,25 @@ belt-and-braces.
 If you ever need to inspect OMP's log without stripping (e.g., debugging
 the TUI itself), comment out the `| col -b` in `entrypoint.sh` and
 unset `NO_COLOR` / `TERM`.
+
+## NATS URL caching (F6)
+
+`~/.sesh/hub.nats.url` is alive iff the hub daemon is alive. The hub auto-
+shuts-down when its last leaf disconnects, so the file vanishes when
+`sesh up` exits — *before* the harness has finished snapshotting artifacts.
+
+The entrypoint caches the URL on first sighting:
+
+```bash
+cp -f ~/.sesh/hub.nats.url /var/artifacts/hub.nats.url
+```
+
+Downstream tools (the harness, post-run inspection scripts) read from
+`/var/artifacts/hub.nats.url`, not from `~/.sesh/hub.nats.url`. This
+matches the documented lifecycle in
+[`docs/synadia-agents-on-sesh.md` § 2.1](../../docs/synadia-agents-on-sesh.md#21-nats-url-discovery-and-lifecycle).
+
+For per-session URL discovery (which session owns which hub), prefer
+`<cwd>/.sesh/sessions/<label>.json#nats_url` over `hub.nats.url` — the
+session JSON's `nats_url` field is written at `sesh up` boot and is the
+canonical per-session reference.

@@ -60,6 +60,51 @@ The JSON file at `.sesh/sessions/<label>.json` also carries `leaf_url` and
 file. `$SESH_SESSION` (the label) is set by `sesh up` and names the JSON
 file.
 
+### 2.1 NATS URL discovery and lifecycle
+
+Sesh publishes the hub's NATS client URL in two places, each with a
+different lifecycle. Picking the wrong one — or assuming either outlives
+its owner — is the most common failure mode for harnesses that snapshot
+artifacts after `sesh up` exits.
+
+#### `~/.sesh/hub.nats.url` (hub-lifetime)
+
+Written atomically by `sesh hub serve` (`cli/hub_serve.go` via
+`WriteHubInfo`). Cleared on hub exit by `ClearHubInfo`
+(`cli/hubinfo.go`). The file exists iff a hub daemon is currently
+running. The hub auto-shuts-down when its last leaf disconnects, so this
+file can vanish on its own as soon as the last `sesh up` exits.
+
+Use when: you're a process that wants to attach to "the current sesh
+hub" without knowing which session brought it up.
+
+#### `<cwd-walk>/.sesh/sessions/<label>.json#nats_url` (session-lifetime)
+
+Written by `Session.Publish` (`cli/session.go`) at the start of `sesh
+up`. Removed by `Session.Release` when `sesh up` exits. The file exists
+iff a session is currently held under that label.
+
+Use when: you're a process that wants the NATS URL for a *specific*
+session, identified by label — this is the canonical per-session
+reference. Prefer this over `~/.sesh/hub.nats.url` when the session
+label is known.
+
+#### Caching across exit
+
+Both files are lifecycle-bound by design — a stale URL pointing at a
+dead port is a worse failure mode than ENOENT. If your tool needs the
+URL after the hub / session has exited (e.g., post-run analysis on an
+integration test rig), cache the URL to your tool's own artifact
+directory on first sighting:
+
+```bash
+# Inside an entrypoint, while sesh up is alive:
+cp -f ~/.sesh/hub.nats.url /var/artifacts/hub.nats.url
+```
+
+Do NOT rely on either file existing after the owning process has
+exited. Downstream tools that need post-exit access own the cache.
+
 ---
 
 ## 3. Subjects
