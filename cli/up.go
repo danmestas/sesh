@@ -52,7 +52,7 @@ type Harness struct {
 // agent attach, etc.) means registering a step on Starter rather than
 // editing this method.
 type UpCmd struct {
-	Session string `required:"" help:"Session label (free-form)"`
+	Session string `required:"" help:"Session label (free-form). Held exclusively by this sesh up — a second sesh up --session=<same-label> in another shell will fail. Run multiple adapters in one session by passing a multiplex wrapper to --exec."`
 
 	HTTPPort          int `help:"Fossil HTTP port (0 = auto)" default:"0"`
 	NATSClientPort    int `help:"NATS client port (0 = auto)" default:"0"`

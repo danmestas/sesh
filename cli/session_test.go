@@ -90,6 +90,53 @@ func TestSessionState_BackCompat(t *testing.T) {
 	}
 }
 
+// TestSessionStatePersistsNATSURL verifies the session JSON written by
+// Session.Publish carries the NATSURL field, so downstream tools can read
+// it from <cwd>/.sesh/sessions/<label>.json#nats_url. The session JSON is
+// the canonical per-session source for the hub's NATS URL — see F6 in the
+// integration-rig findings and docs/synadia-agents-on-sesh.md
+// "NATS URL discovery and lifecycle". This test is a regression guard:
+// removing NATSURL from the SessionState publish path (or changing the
+// JSON tag) would silently break every downstream tool that reads
+// nats_url from the session JSON. Asserts both the raw JSON tag presence
+// (the on-disk contract) and the round-tripped Go field.
+func TestSessionStatePersistsNATSURL(t *testing.T) {
+	dir := t.TempDir()
+
+	sess, err := ClaimSession(dir, "f6-test")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Release() })
+
+	wantURL := "nats://127.0.0.1:65535"
+	if err := sess.Publish(SessionState{
+		PID:     os.Getpid(),
+		NATSURL: wantURL,
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Raw-JSON assertion: the on-disk file MUST carry the nats_url field
+	// so external readers (shell scripts, other-language tools) can pick
+	// it up by key.
+	raw, err := os.ReadFile(filepath.Join(dir, "f6-test.json"))
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if !strings.Contains(string(raw), `"nats_url":"`+wantURL+`"`) {
+		t.Fatalf("nats_url missing or wrong shape in JSON: %s", raw)
+	}
+
+	got, err := ReadSession(dir, "f6-test")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.NATSURL != wantURL {
+		t.Fatalf("nats_url: got %q want %q", got.NATSURL, wantURL)
+	}
+}
+
 // TestSession_PublishOverwritesFile claims a session, publishes URLs, and
 // verifies the on-disk file matches. Same coverage the prior
 // TestUpdateSessionState_OverwritesFile gave through the deleted helpers.
@@ -147,7 +194,10 @@ func TestSession_PublishRequiresClaim(t *testing.T) {
 
 // TestClaimSession_RefusesLiveOwner is the same-machine same-name guard:
 // a second claim for the same (stateDir, label) while the first owner is
-// alive must fail rather than overwrite.
+// alive must fail rather than overwrite. Guards against accidental
+// relaxation of the O_EXCL semantics — see docs/synadia-agents-on-sesh.md
+// "Session ownership" for the rationale (single-owner-per-label is what
+// makes the lifecycle deterministic for sesh down / status / watchers).
 func TestClaimSession_RefusesLiveOwner(t *testing.T) {
 	dir := t.TempDir()
 

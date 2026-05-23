@@ -60,6 +60,51 @@ The JSON file at `.sesh/sessions/<label>.json` also carries `leaf_url` and
 file. `$SESH_SESSION` (the label) is set by `sesh up` and names the JSON
 file.
 
+### 2.1 NATS URL discovery and lifecycle
+
+Sesh publishes the hub's NATS client URL in two places, each with a
+different lifecycle. Picking the wrong one — or assuming either outlives
+its owner — is the most common failure mode for harnesses that snapshot
+artifacts after `sesh up` exits.
+
+#### `~/.sesh/hub.nats.url` (hub-lifetime)
+
+Written atomically by `sesh hub serve` (`cli/hub_serve.go` via
+`WriteHubInfo`). Cleared on hub exit by `ClearHubInfo`
+(`cli/hubinfo.go`). The file exists iff a hub daemon is currently
+running. The hub auto-shuts-down when its last leaf disconnects, so this
+file can vanish on its own as soon as the last `sesh up` exits.
+
+Use when: you're a process that wants to attach to "the current sesh
+hub" without knowing which session brought it up.
+
+#### `<cwd-walk>/.sesh/sessions/<label>.json#nats_url` (session-lifetime)
+
+Written by `Session.Publish` (`cli/session.go`) at the start of `sesh
+up`. Removed by `Session.Release` when `sesh up` exits. The file exists
+iff a session is currently held under that label.
+
+Use when: you're a process that wants the NATS URL for a *specific*
+session, identified by label — this is the canonical per-session
+reference. Prefer this over `~/.sesh/hub.nats.url` when the session
+label is known.
+
+#### Caching across exit
+
+Both files are lifecycle-bound by design — a stale URL pointing at a
+dead port is a worse failure mode than ENOENT. If your tool needs the
+URL after the hub / session has exited (e.g., post-run analysis on an
+integration test rig), cache the URL to your tool's own artifact
+directory on first sighting:
+
+```bash
+# Inside an entrypoint, while sesh up is alive:
+cp -f ~/.sesh/hub.nats.url /var/artifacts/hub.nats.url
+```
+
+Do NOT rely on either file existing after the owning process has
+exited. Downstream tools that need post-exit access own the cache.
+
 ---
 
 ## 3. Subjects
@@ -496,6 +541,71 @@ Field sources:
 `agents[]` is absent from files written by older `sesh` versions; readers
 MUST treat a missing field as an empty array. Write is atomic (temp-file +
 rename) so readers never see a partial file.
+
+---
+
+## 12. Session ownership
+
+A sesh session label (e.g., `smoke-test`) is owned by **exactly one** `sesh up`
+process at a time. The state file at
+`<cwd-up-walk>/.sesh/sessions/<label>.json` is created with `O_CREATE|O_EXCL`
+by `ClaimSession` (cli/session.go) — a second `sesh up --session=<label>` in
+another shell will fail with `session %q already held by pid %d`.
+
+This is intentional. A session has one canonical owner (its `pid` field is
+read by `sesh down`, `sesh status`, the agent watcher, and downstream tools);
+a single owner is what makes the lifecycle deterministic.
+
+### 12.1 Running multiple adapters in one session
+
+Spawn them all under a single `sesh up --exec=<wrapper>`. The wrapper is a
+small shell script (or any executable) that fans out and waits — the
+integration rig at `test/integration/entrypoint.sh` is a working example:
+
+```bash
+sesh up --session=my-session --exec=/path/to/launch-agents.sh
+```
+
+Where `/path/to/launch-agents.sh` is:
+
+```bash
+#!/usr/bin/env bash
+set -o pipefail
+# Per-process role overrides (the outer `sesh up` sets a neutral role; each
+# child can override SESH_ROLE for its own metadata).
+(
+  export SESH_ROLE=implementer
+  exec claude --dangerously-skip-permissions --mcp-config /path/to/mcp.json
+) > /var/log/claude.log 2>&1 &
+CLAUDE=$!
+(
+  export SESH_ROLE=planner
+  exec omp
+) > /var/log/omp.log 2>&1 &
+OMP=$!
+wait -n $CLAUDE $OMP
+EC=$?
+kill $CLAUDE $OMP 2>/dev/null || true
+wait
+exit $EC
+```
+
+This pattern preserves the one-owner invariant: a single `sesh up` is the
+canonical owner; the wrapper's children inherit `SESH_SESSION`, `NATS_URL`,
+etc. and register on the bus under that one session's label.
+
+### 12.2 What about `sesh up --session=foo` from a second shell?
+
+It fails with the "already held" error. If you want a second, parallel
+session, pick a different label:
+
+```bash
+sesh up --session=foo &
+sesh up --session=bar &
+```
+
+Each gets its own `.sesh/sessions/<label>.json`, its own state, its own
+agent set on the bus.
 
 ---
 

@@ -1,0 +1,21 @@
+# Reduce the build context shipped to the daemon for test/integration/.
+# Without this, all of /Users/dmestas/projects/sesh gets transferred,
+# including .sesh/ runtime state, .firecrawl/, and large generated dirs.
+
+.git
+.sesh
+.firecrawl
+.claude
+.idea
+.vscode
+
+# Don't ship test artifacts back into the build.
+test/integration/artifacts
+test/integration/.env
+
+# Generated docs/specs that aren't part of the build.
+docs/proposals
+docs/specs
+
+# OS junk.
+.DS_Store
