@@ -12,7 +12,8 @@
       ],
       "env": {
         "CLAUDE_CWD": "/workspace",
-        "CLAUDE_PLUGIN_ROOT": "/opt/sesh-channels/claude-nats-channel"
+        "CLAUDE_PLUGIN_ROOT": "/opt/sesh-channels/claude-nats-channel",
+        "NATS_CHANNEL_STRICT": "1"
       }
     }
   }

@@ -151,6 +151,35 @@ For per-session URL discovery (which session owns which hub), prefer
 session JSON's `nats_url` field is written at `sesh up` boot and is the
 canonical per-session reference.
 
+## OMP + claude co-location MCP discovery hazard (F5)
+
+OMP's config has `mcp.discoveryMode: true` (intentional, upstream behavior —
+see `omp-config.yml` and Oh My Pi's docs). When OMP and claude run in the
+same workspace and a `.mcp.json` is present, OMP autoloads every entry —
+including ones intended for claude only — spawning duplicate channel
+instances. The `claude-nats-channel/server.ts`'s `resolveSessionName`
+auto-suffixes name collisions (`<name>-2`, etc.), so the phantom OMP-
+spawned claude-channel registers silently as `cc.<owner>.<name>-2` rather
+than crashing.
+
+The rig avoids this by:
+
+1. Not baking a `.mcp.json` into `/workspace`. claude is launched with
+   `--strict-mcp-config --mcp-config /opt/claude.mcp.json` (path outside
+   the workspace, invisible to OMP's discovery walk).
+2. Setting `NATS_CHANNEL_STRICT=1` in the claude MCP server's env block
+   (see `config/claude.mcp.json`). If a duplicate registration ever does
+   happen — operator misconfiguration, future regression — the second
+   instance fails loudly with exit code 2 rather than registering as a
+   phantom `cc-2`.
+
+When co-locating claude + OMP in a real workspace, apply the same two
+rules. The strict-mode flag is documented in
+`sesh-channels/claude-nats-channel/README.md#strict-mode`. For
+operator-facing notes on the underlying OMP feature gap (no exclusion
+mechanism for `mcp.discoveryMode`), see
+[`docs/upstream-notes-omp-mcp-discovery.md`](../../docs/upstream-notes-omp-mcp-discovery.md).
+
 ## Claude Code channel-enablement (F1 workaround)
 
 The rig launches `claude` with `--dangerously-load-development-channels nats`
