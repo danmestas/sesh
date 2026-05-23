@@ -499,6 +499,71 @@ rename) so readers never see a partial file.
 
 ---
 
+## 12. Session ownership
+
+A sesh session label (e.g., `smoke-test`) is owned by **exactly one** `sesh up`
+process at a time. The state file at
+`<cwd-up-walk>/.sesh/sessions/<label>.json` is created with `O_CREATE|O_EXCL`
+by `ClaimSession` (cli/session.go) — a second `sesh up --session=<label>` in
+another shell will fail with `session %q already held by pid %d`.
+
+This is intentional. A session has one canonical owner (its `pid` field is
+read by `sesh down`, `sesh status`, the agent watcher, and downstream tools);
+a single owner is what makes the lifecycle deterministic.
+
+### 12.1 Running multiple adapters in one session
+
+Spawn them all under a single `sesh up --exec=<wrapper>`. The wrapper is a
+small shell script (or any executable) that fans out and waits — the
+integration rig at `test/integration/entrypoint.sh` is a working example:
+
+```bash
+sesh up --session=my-session --exec=/path/to/launch-agents.sh
+```
+
+Where `/path/to/launch-agents.sh` is:
+
+```bash
+#!/usr/bin/env bash
+set -o pipefail
+# Per-process role overrides (the outer `sesh up` sets a neutral role; each
+# child can override SESH_ROLE for its own metadata).
+(
+  export SESH_ROLE=implementer
+  exec claude --dangerously-skip-permissions --mcp-config /path/to/mcp.json
+) > /var/log/claude.log 2>&1 &
+CLAUDE=$!
+(
+  export SESH_ROLE=planner
+  exec omp
+) > /var/log/omp.log 2>&1 &
+OMP=$!
+wait -n $CLAUDE $OMP
+EC=$?
+kill $CLAUDE $OMP 2>/dev/null || true
+wait
+exit $EC
+```
+
+This pattern preserves the one-owner invariant: a single `sesh up` is the
+canonical owner; the wrapper's children inherit `SESH_SESSION`, `NATS_URL`,
+etc. and register on the bus under that one session's label.
+
+### 12.2 What about `sesh up --session=foo` from a second shell?
+
+It fails with the "already held" error. If you want a second, parallel
+session, pick a different label:
+
+```bash
+sesh up --session=foo &
+sesh up --session=bar &
+```
+
+Each gets its own `.sesh/sessions/<label>.json`, its own state, its own
+agent set on the bus.
+
+---
+
 ## Further reading
 
 - [`docs/synadia-comparison.md`](./synadia-comparison.md) — layer map and rationale for adopting Synadia §3

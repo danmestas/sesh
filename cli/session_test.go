@@ -147,7 +147,10 @@ func TestSession_PublishRequiresClaim(t *testing.T) {
 
 // TestClaimSession_RefusesLiveOwner is the same-machine same-name guard:
 // a second claim for the same (stateDir, label) while the first owner is
-// alive must fail rather than overwrite.
+// alive must fail rather than overwrite. Guards against accidental
+// relaxation of the O_EXCL semantics — see docs/synadia-agents-on-sesh.md
+// "Session ownership" for the rationale (single-owner-per-label is what
+// makes the lifecycle deterministic for sesh down / status / watchers).
 func TestClaimSession_RefusesLiveOwner(t *testing.T) {
 	dir := t.TempDir()
 
