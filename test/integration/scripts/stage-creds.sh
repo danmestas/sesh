@@ -26,14 +26,21 @@ ENV_FILE="${RIG_DIR}/.env"
 TMP_ROOT="$(mktemp -d -t sesh-integ-creds.XXXXXX)"
 echo "stage-creds: tmpdir=${TMP_ROOT}"
 
-# ── 1. Claude OAuth from macOS Keychain ────────────────────────────────
+# ── 1. Claude OAuth (keychain first, fallback to ~/.claude/.credentials.json) ──
+# Claude Code 2.1.x migrated to file-backed creds on some installs; check
+# both paths. The container reads from the file at /root/.claude/.credentials.json
+# either way.
 CLAUDE_CREDS="${TMP_ROOT}/claude-credentials.json"
 if security find-generic-password -s "Claude Code-credentials" -w \
-     > "${CLAUDE_CREDS}" 2>/dev/null; then
+     > "${CLAUDE_CREDS}" 2>/dev/null && [[ -s "${CLAUDE_CREDS}" ]]; then
   chmod 600 "${CLAUDE_CREDS}"
-  echo "stage-creds: claude OAuth blob → ${CLAUDE_CREDS} ($(wc -c < "${CLAUDE_CREDS}" | tr -d ' ') bytes)"
+  echo "stage-creds: claude OAuth blob (keychain) → ${CLAUDE_CREDS} ($(wc -c < "${CLAUDE_CREDS}" | tr -d ' ') bytes)"
+elif [[ -f "${HOME}/.claude/.credentials.json" ]]; then
+  cp "${HOME}/.claude/.credentials.json" "${CLAUDE_CREDS}"
+  chmod 600 "${CLAUDE_CREDS}"
+  echo "stage-creds: claude OAuth blob (file) → ${CLAUDE_CREDS} ($(wc -c < "${CLAUDE_CREDS}" | tr -d ' ') bytes)"
 else
-  echo "stage-creds: WARNING — no 'Claude Code-credentials' keychain entry"
+  echo "stage-creds: WARNING — no Claude OAuth found (neither keychain nor ~/.claude/.credentials.json)"
   echo "stage-creds: did you sign in to Claude Code on this Mac?"
   exit 2
 fi
@@ -56,7 +63,8 @@ if [[ -f "${HOME}/.claude.json" ]]; then
     } |
     .hasCompletedOnboarding = true |
     .hasSeenWelcome = true |
-    .bypassPermissionsModeAccepted = true
+    .bypassPermissionsModeAccepted = true |
+    del(.mcpServers)
   ' "${HOME}/.claude.json" > "${CLAUDE_CFG}" 2>/dev/null \
     && chmod 600 "${CLAUDE_CFG}"
   echo "stage-creds: claude config → ${CLAUDE_CFG}"
@@ -103,6 +111,11 @@ rsync -a --exclude='node_modules' --exclude='.git' \
   "${CHANNELS_SRC}/claude-nats-channel/" "${CHANNELS_DST}/claude-nats-channel/"
 rsync -a --exclude='node_modules' --exclude='.git' \
   "${CHANNELS_SRC}/omp-nats-channel/"    "${CHANNELS_DST}/omp-nats-channel/"
+# Plugin-mode (PR #108): the Dockerfile COPYs .claude-plugin/marketplace.json
+# from the channels build context. Mirror it into the slim copy.
+if [[ -d "${CHANNELS_SRC}/.claude-plugin" ]]; then
+  rsync -a "${CHANNELS_SRC}/.claude-plugin/" "${CHANNELS_DST}/.claude-plugin/"
+fi
 echo "stage-creds: channels (slim) → ${CHANNELS_DST}"
 
 # ── 4. Stage a slim copy of EdgeSync ───────────────────────────────────

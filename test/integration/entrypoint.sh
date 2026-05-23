@@ -72,7 +72,16 @@ sqlite3 "${HOME_DIR}/.omp/agent/agent.db" \
 # the container) gets used and our nats-channel never loads. Rewrite the
 # config.yml in-place inside the container — the mount is RW.
 log "prelude: rewrite OMP config.yml so extensions point at the in-container channel"
+# mcp.discoveryMode is set to FALSE here because OMP otherwise scans
+# ~/.claude/plugins/ (shared with claude under plugin-mode, PR #108) and
+# autoloads claude-nats-channel inside OMP's process — producing a
+# duplicate `claude-code` registration with OMP's env (SESH_ROLE=planner).
+# With discoveryMode off, OMP only loads what's in the explicit
+# extensions: array below.
 cat > "${HOME_DIR}/.omp/agent/config.yml" <<EOF
+mcp:
+  discoveryMode: false
+  notifications: true
 extensions:
   - /opt/sesh-channels/omp-nats-channel/extensions/nats-channel.ts
 EOF
@@ -103,47 +112,30 @@ cat > /tmp/launch-agents.sh <<'WRAP'
 set -o pipefail
 echo "[exec-wrapper] starting; SESH_SESSION=${SESH_SESSION:-} SESH_ROLE=${SESH_ROLE:-} SESH_CLASS=${SESH_CLASS:-} USER=${USER:-} NATS_URL=${NATS_URL:-}" >&2
 
-# Two fifos — keep claude/omp stdin held open with `sleep infinity > fifo`
-# in the background, so neither sees EOF and exits.
-mkfifo /tmp/claude.fifo /tmp/omp.fifo
-# Hold both FIFOs open by writing zero bytes forever. The bypass-
-# permissions warning dialog is dismissed at the source via
-# `skipDangerousModePermissionPrompt: true` in ~/.claude/settings.json
-# (copied in by the Dockerfile — see F4.3). The only dialog that still
-# fires under --dangerously-load-development-channels is the dev-channels
-# warning (~10s after startup), which we auto-feed "2\n" to accept.
-(
-  # Dev-channels warning dialog (~10s into startup).
-  sleep 10
-  printf '2\n'
-  sleep infinity
-) > /tmp/claude.fifo &
-( sleep infinity > /tmp/omp.fifo )    &
+# OMP still uses FIFO+script (it doesn't have an Ink dialog blocking startup).
+mkfifo /tmp/omp.fifo
+( sleep infinity > /tmp/omp.fifo ) &
 
 (
   export SESH_ROLE=implementer
   export SESH_CLASS=active
   echo "[claude-side] SESH_SESSION=$SESH_SESSION SESH_ROLE=$SESH_ROLE SESH_CLASS=$SESH_CLASS HOME=$HOME PATH=$PATH NATS_URL=$NATS_URL" >&2
-  # `--dangerously-load-development-channels plugin:nats-channel@sesh-channels`
-  # opts the nats-channel plugin's MCP server into Claude Code's "channel"
-  # gate, which is what makes `notifications/claude/channel` from the server
-  # actually drive a model turn. Without the channel flag, the notifications
-  # are silently dropped by the gate ("tengu_mcp_channel_gate" in claude's
-  # telemetry) and the rig sees only the channel's §6.4 ack chunks until the
-  # caller times out. See docs/plans/2026-05-22-integration-fix-F1-channel-flag.md
-  # for the root cause writeup.
-  #
-  # Plugin-mode is the operator's production invocation shape — this rig
-  # mirrors it. The plugin itself is pre-registered into ~/.claude/plugins/
-  # at image-build time (Dockerfile baked-JSON path); no install at runtime.
-  #
-  # Set RIG_DEBUG_MCP=1 in the rig env to append --debug=mcp so the channel
-  # gate's decisions appear in /var/log/claude.log for fast post-mortems.
+  # Claude's Ink-based TUI requires raw keypress events to dismiss the
+  # dev-channels warning dialog. `script` + FIFO provides a pty for stdout
+  # but stdin remains pipe-buffered, so Ink never sees the `Enter` keypress.
+  # Use `expect` to drive a real pty for both directions; the wrapper sends
+  # "\r" once the dialog appears, then blocks until claude exits.
   CLAUDE_DEBUG_FLAGS=""
   if [ "${RIG_DEBUG_MCP:-}" = "1" ]; then
     CLAUDE_DEBUG_FLAGS="--debug=mcp"
   fi
-  exec script -qfc "claude --dangerously-skip-permissions --dangerously-load-development-channels plugin:nats-channel@sesh-channels ${CLAUDE_DEBUG_FLAGS}" /dev/null < /tmp/claude.fifo
+  # Channel-arg syntax (claude 2.1.148 enforces tags):
+  #   plugin:<name>@<marketplace>  — channel-enables plugin-provided MCP server
+  #   server:<name>                — channel-enables user-scope mcpServers entry
+  # Stage-creds.sh strips user-scope mcpServers from the mounted claude.json
+  # to avoid duplicate registration; the plugin-installed nats-channel is the
+  # only source of the MCP server, so we use the `plugin:...` form here.
+  exec /opt/claude-launch.exp --dangerously-skip-permissions --dangerously-load-development-channels plugin:nats-channel@sesh-channels ${CLAUDE_DEBUG_FLAGS}
 ) > /var/log/claude.log 2>&1 &
 CLAUDE=$!
 echo "[exec-wrapper] claude pid=$CLAUDE" >&2
@@ -151,16 +143,27 @@ echo "[exec-wrapper] claude pid=$CLAUDE" >&2
 (
   export SESH_ROLE=planner
   export SESH_CLASS=active
-  # Suppress ANSI color codes at the source (NO_COLOR is the no-color.org
-  # convention; TERM=dumb is the historical fallback) and pipe the
-  # remaining output through `col -b` to strip any escape sequences that
-  # slip through the PTY wrapper. Without both, /var/log/omp.log is
-  # unreadable without an ANSI-stripping post-processor. (F7)
   export NO_COLOR=1
   export TERM=dumb
+  # ── HOME isolation for OMP ─────────────────────────────────────────
+  # OMP's bun-side MCP discovery scans ~/.claude.json and ~/.claude/plugins/
+  # and auto-launches every MCP server it finds — including the one
+  # claude itself loads. Because the launched MCP server inherits OMP's
+  # subshell env (SESH_ROLE=planner), the duplicate `claude-code`
+  # registration overwrites claude's own (SESH_ROLE=implementer) on the
+  # bus by race. OMP's `mcp.discoveryMode: false` config option does not
+  # actually disable this discovery path (verified by omp.log:
+  # "Connecting to MCP servers: nats, nats-channel:nats").
+  #
+  # Workaround: give OMP a fresh HOME with only ~/.omp/agent populated
+  # (via symlink to the host-mounted dir). With no ~/.claude/ visible,
+  # OMP has nothing to autodiscover and only loads what's in
+  # config.yml's extensions: array.
+  mkdir -p /tmp/omp-home
+  ln -snf /home/integ/.omp /tmp/omp-home/.omp
+  export HOME=/tmp/omp-home
   # OMP adapter now honors SESH_SESSION natively via @agent-ops/sesh-channels
-  # ≥0.1.1's readSessionLabel helper (sesh-channels PR #4 / F2 step C). The
-  # previous NATS_SESSION_NAME=$SESH_SESSION export is no longer required.
+  # ≥0.1.1's readSessionLabel helper (sesh-channels PR #4 / F2 step C).
   echo "[omp-side] SESH_SESSION=$SESH_SESSION SESH_ROLE=$SESH_ROLE SESH_CLASS=$SESH_CLASS HOME=$HOME PATH=$PATH NATS_URL=$NATS_URL" >&2
   exec script -qfc "omp" /dev/null < /tmp/omp.fifo
 ) 2>&1 | col -b > /var/log/omp.log &
@@ -241,6 +244,13 @@ cp -f /workspace/.sesh/sessions/smoke-test.json "${ARTIFACTS}/session-smoke-test
   || log "snapshot: session JSON missing"
 cp -f "${LOG_DIR}/"*.log "${ARTIFACTS}/" 2>/dev/null || true
 cp -f "${HOME_DIR}/.sesh/hub.log" "${ARTIFACTS}/hub.log" 2>/dev/null || true
+# Snapshot Claude Code debug logs (RIG_DEBUG_MCP=1 captures MCP errors here)
+mkdir -p "${ARTIFACTS}/claude-debug"
+# Both glob expansion (root sees integ's files) + an explicit find pass
+# in case shell glob options exclude something.
+cp -f "${HOME_DIR}/.claude/debug/"*.txt "${ARTIFACTS}/claude-debug/" 2>/dev/null || true
+find "${HOME_DIR}/.claude/debug/" -type f -name '*.txt' -exec cp -f {} "${ARTIFACTS}/claude-debug/" \; 2>/dev/null || true
+ls -la "${HOME_DIR}/.claude/debug/" > "${ARTIFACTS}/claude-debug/_listing.txt" 2>&1 || true
 
 {
   echo "=== hub.nats.url ==="

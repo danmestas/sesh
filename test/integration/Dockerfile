@@ -43,7 +43,7 @@ FROM oven/bun:1.3.14-debian AS runtime
 # under a non-TTY parent), sqlite3 (debug-time inspection of OMP's db).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      curl ca-certificates gnupg jq git dbus openssl procps util-linux sqlite3 tini && \
+      curl ca-certificates gnupg jq git dbus openssl procps util-linux bsdextrautils sqlite3 tini expect && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -136,10 +136,21 @@ COPY --chown=integ:integ test/integration/config/omp-config.yml  /home/integ/.om
 #
 # If a future claude-code release adds a `--yes` flag to `plugin install`,
 # swap this block for the two CLI commands above and delete the JSONs.
-RUN mkdir -p /home/integ/.claude/plugins && chown -R integ:integ /home/integ/.claude
-COPY --chown=integ:integ test/integration/config/claude-plugins/known_marketplaces.json /home/integ/.claude/plugins/known_marketplaces.json
-COPY --chown=integ:integ test/integration/config/claude-plugins/installed_plugins.json  /home/integ/.claude/plugins/installed_plugins.json
-COPY --chown=integ:integ test/integration/config/claude-plugins/config.json             /home/integ/.claude/plugins/config.json
+RUN mkdir -p /home/integ/.claude && chown -R integ:integ /home/integ/.claude
+
+# Run claude's actual plugin CLI commands as the integ user. Both commands
+# are non-interactive (verified — no prompts) and produce the full set of
+# files claude's plugin loader needs (marketplaces/, repos/, cache/ with
+# a real install + bun install). The earlier approach of baking JSON files
+# was missing supporting directory state and caused "MCP server failed"
+# even when paths looked correct.
+USER integ
+ENV HOME=/home/integ
+RUN claude plugin marketplace add /opt/sesh-channels && \
+    claude plugin install nats-channel@sesh-channels -s user && \
+    claude plugin list
+USER root
+ENV HOME=/root
 
 # Skip the "Bypass Permissions mode" warning dialog at startup. Without this,
 # claude-code 2.1.126 renders a TTY-only dialog that requires "2\n" input,
@@ -154,6 +165,11 @@ RUN cd /opt/harness && bun install --no-summary && chown -R integ:integ /opt/har
 # Entrypoint orchestrates: prelude (OAuth) → `sesh up --exec` x2 → harness.
 COPY test/integration/entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
+
+# expect wrapper for claude — drives the dev-channels TUI dialog over a
+# real pty (Ink TUI library needs raw keypresses, not pipe-buffered input).
+COPY test/integration/config/claude-launch.exp /opt/claude-launch.exp
+RUN chmod +x /opt/claude-launch.exp
 
 # `USER` is what the adapters use for the `metadata.owner` subject token.
 # Without this, owner falls back to "unknown" — registration would still
