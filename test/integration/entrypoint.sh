@@ -124,19 +124,18 @@ mkfifo /tmp/claude.fifo /tmp/omp.fifo
   export SESH_ROLE=implementer
   export SESH_CLASS=active
   echo "[claude-side] SESH_SESSION=$SESH_SESSION SESH_ROLE=$SESH_ROLE SESH_CLASS=$SESH_CLASS HOME=$HOME PATH=$PATH NATS_URL=$NATS_URL" >&2
-  # `--strict-mcp-config` + `--mcp-config` skips the .mcp.json auto-discovery
-  # path entirely (which would otherwise present a 1/2/3 trust dialog the
-  # first time claude sees a new MCP server in the project). The explicit
-  # config we pass is treated as operator-supplied and pre-trusted.
+  # `--dangerously-load-development-channels plugin:nats-channel@sesh-channels`
+  # opts the nats-channel plugin's MCP server into Claude Code's "channel"
+  # gate, which is what makes `notifications/claude/channel` from the server
+  # actually drive a model turn. Without the channel flag, the notifications
+  # are silently dropped by the gate ("tengu_mcp_channel_gate" in claude's
+  # telemetry) and the rig sees only the channel's §6.4 ack chunks until the
+  # caller times out. See docs/plans/2026-05-22-integration-fix-F1-channel-flag.md
+  # for the root cause writeup.
   #
-  # `--dangerously-load-development-channels nats` opts the `nats` MCP server
-  # into Claude Code's "channel" gate, which is what makes
-  # `notifications/claude/channel` from the server actually drive a model
-  # turn. Without it, the notifications are silently dropped by the gate
-  # ("tengu_mcp_channel_gate" in claude's telemetry) and the rig sees only
-  # the channel's §6.4 ack chunks until the caller times out. See
-  # docs/plans/2026-05-22-integration-fix-F1-channel-flag.md for the root
-  # cause writeup.
+  # Plugin-mode is the operator's production invocation shape — this rig
+  # mirrors it. The plugin itself is pre-registered into ~/.claude/plugins/
+  # at image-build time (Dockerfile baked-JSON path); no install at runtime.
   #
   # Set RIG_DEBUG_MCP=1 in the rig env to append --debug=mcp so the channel
   # gate's decisions appear in /var/log/claude.log for fast post-mortems.
@@ -144,7 +143,7 @@ mkfifo /tmp/claude.fifo /tmp/omp.fifo
   if [ "${RIG_DEBUG_MCP:-}" = "1" ]; then
     CLAUDE_DEBUG_FLAGS="--debug=mcp"
   fi
-  exec script -qfc "claude --dangerously-skip-permissions --strict-mcp-config --mcp-config /opt/claude.mcp.json --dangerously-load-development-channels nats ${CLAUDE_DEBUG_FLAGS}" /dev/null < /tmp/claude.fifo
+  exec script -qfc "claude --dangerously-skip-permissions --dangerously-load-development-channels plugin:nats-channel@sesh-channels ${CLAUDE_DEBUG_FLAGS}" /dev/null < /tmp/claude.fifo
 ) > /var/log/claude.log 2>&1 &
 CLAUDE=$!
 echo "[exec-wrapper] claude pid=$CLAUDE" >&2

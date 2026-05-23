@@ -74,6 +74,12 @@ RUN sesh --help >/dev/null 2>&1 || true
 # Path inside the host is /Users/dmestas/projects/sesh-channels; the build
 # context (set in compose.yaml) makes that available as the secondary
 # build context `channels`.
+#
+# `.claude-plugin/marketplace.json` is required so `claude plugin marketplace
+# add /opt/sesh-channels` can resolve the marketplace manifest. Without it
+# the plugin-mode install path below (and the pre-baked plugin enablement
+# JSONs) have nothing to point at.
+COPY --from=channels .claude-plugin      /opt/sesh-channels/.claude-plugin
 COPY --from=channels claude-nats-channel /opt/sesh-channels/claude-nats-channel
 COPY --from=channels omp-nats-channel    /opt/sesh-channels/omp-nats-channel
 
@@ -102,12 +108,38 @@ RUN mkdir -p /home/integ/.claude /home/integ/.omp/agent /home/integ/.sesh \
              /var/log /var/artifacts && \
     chown -R integ:integ /home/integ /var/log /var/artifacts /workspace /opt/sesh-channels
 
-# Claude's .mcp.json is NOT baked into /workspace — auto-discovery of
-# .mcp.json triggers a "New MCP server found" 1/2/3 trust dialog claude
-# refuses to bypass even with --dangerously-skip-permissions. Instead we
-# pass the config explicitly via --mcp-config flag in the entrypoint.
-COPY --chown=integ:integ test/integration/config/claude.mcp.json /opt/claude.mcp.json
+# OMP extension config — drives nats-channel adapter load on OMP startup.
 COPY --chown=integ:integ test/integration/config/omp-config.yml  /home/integ/.omp/agent/config.yml
+
+# ── Plugin-mode install for claude-nats-channel ────────────────────────
+# Mirrors the operator's production invocation:
+#   claude --dangerously-load-development-channels plugin:nats-channel@sesh-channels
+# which expects the plugin to be registered in ~/.claude/plugins/ as a
+# user-scope install from a `directory`-source marketplace.
+#
+# Operator-equivalent commands:
+#   claude plugin marketplace add ~/projects/sesh-channels
+#   claude plugin install nats-channel@sesh-channels -s user
+#
+# Both prompt for confirmation today (no `-y` / `--yes` flag), so they can't
+# run unattended inside `docker build`. Instead we pre-bake the three JSON
+# files claude-code reads at startup — known_marketplaces.json,
+# installed_plugins.json, config.json — to the on-disk shape the operator's
+# `~/.claude/plugins/` has after running the CLI commands. Verified by
+# direct inspection of the operator's local install.
+#
+# This makes the rig install:
+#   * deterministic (every build produces identical plugin state)
+#   * idempotent (rebuilds overwrite the same files with identical content)
+#   * self-contained (no install at runtime; no network access required for
+#     plugin registration)
+#
+# If a future claude-code release adds a `--yes` flag to `plugin install`,
+# swap this block for the two CLI commands above and delete the JSONs.
+RUN mkdir -p /home/integ/.claude/plugins && chown -R integ:integ /home/integ/.claude
+COPY --chown=integ:integ test/integration/config/claude-plugins/known_marketplaces.json /home/integ/.claude/plugins/known_marketplaces.json
+COPY --chown=integ:integ test/integration/config/claude-plugins/installed_plugins.json  /home/integ/.claude/plugins/installed_plugins.json
+COPY --chown=integ:integ test/integration/config/claude-plugins/config.json             /home/integ/.claude/plugins/config.json
 
 # Skip the "Bypass Permissions mode" warning dialog at startup. Without this,
 # claude-code 2.1.126 renders a TTY-only dialog that requires "2\n" input,
