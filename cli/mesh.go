@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"text/tabwriter"
 	"time"
@@ -218,4 +221,88 @@ func renderTree(agents []MeshAgent) string {
 		fmt.Fprintf(&buf, "        %s/%s [%s] %s\n", a.Agent, a.Owner, a.Class, id)
 	}
 	return buf.String()
+}
+
+// MeshCmd is the kong-driven `sesh mesh` subcommand.
+//
+// All flags are optional. Defaults: connect via ReadHubInfo(stateDir),
+// format=table, no filters (show every agent the local hub knows about).
+type MeshCmd struct {
+	NATSURL string `help:"NATS URL to query (overrides hub discovery)" env:"NATS_URL"`
+	Format  string `short:"o" help:"Output format: table | json | tree" default:"table" enum:"table,json,tree"`
+
+	// Filter flags (all AND-combined; empty = no filter)
+	Agent   string `help:"Filter by agent kind (e.g. cc, op)"`
+	Owner   string `help:"Filter by owner"`
+	Session string `help:"Filter by session label"`
+	Role    string `help:"Filter by role (e.g. implementer, planner)"`
+	Class   string `help:"Filter by class (active | observer)"`
+	Machine string `help:"Filter by machine ID (first 8 hex of /etc/machine-id)"`
+
+	// Window controls how long QueryMesh waits for INFO replies.
+	Window time.Duration `help:"Reply collection window" default:"500ms"`
+
+	// Out is the writer for command output. Tests inject a bytes.Buffer;
+	// kong leaves it nil and we fall back to os.Stdout.
+	Out io.Writer `kong:"-"`
+}
+
+// Run is kong's entry point for `sesh mesh ...`.
+func (cmd *MeshCmd) Run(ctx context.Context) error {
+	if cmd.Out == nil {
+		cmd.Out = os.Stdout
+	}
+
+	url := cmd.NATSURL
+	if url == "" {
+		stateDir, err := seshHome()
+		if err != nil {
+			return fmt.Errorf("mesh: state dir: %w", err)
+		}
+		info, err := ReadHubInfo(stateDir)
+		if err != nil {
+			return fmt.Errorf("mesh: hub URL not found (run `sesh up` first or pass --nats-url): %w", err)
+		}
+		url = info.NATSURL
+	}
+
+	nc, err := nats.Connect(url,
+		nats.Name("sesh-mesh"),
+		nats.Timeout(2*time.Second),
+		nats.MaxReconnects(0),
+	)
+	if err != nil {
+		return fmt.Errorf("mesh: connect %s: %w", url, err)
+	}
+	defer nc.Close()
+
+	// When MeshCmd is constructed in code (e.g. tests) the kong-applied
+	// "default:" tags don't fire, so a zero Window would short-circuit
+	// QueryMesh to zero replies. Mirror the kong default here.
+	window := cmd.Window
+	if window <= 0 {
+		window = 500 * time.Millisecond
+	}
+	agents := QueryMesh(nc, window)
+	agents = ApplyFilter(agents, MeshFilter{
+		Agent: cmd.Agent, Owner: cmd.Owner, Session: cmd.Session,
+		Role: cmd.Role, Class: cmd.Class, Machine: cmd.Machine,
+	})
+
+	switch cmd.Format {
+	case "", "table":
+		fmt.Fprint(cmd.Out, renderTable(agents))
+	case "json":
+		fmt.Fprint(cmd.Out, renderJSON(agents))
+	case "tree":
+		out := renderTree(agents)
+		if out == "" {
+			fmt.Fprintln(cmd.Out, "(no agents on the mesh)")
+		} else {
+			fmt.Fprint(cmd.Out, out)
+		}
+	default:
+		return fmt.Errorf("mesh: unknown format %q (want table|json|tree)", cmd.Format)
+	}
+	return nil
 }

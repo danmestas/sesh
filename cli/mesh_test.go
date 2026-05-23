@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -243,5 +245,75 @@ func TestRenderTree_EmptyInputIsEmptyString(t *testing.T) {
 	out := renderTree(nil)
 	if out != "" {
 		t.Errorf("empty tree should be empty string, got %q", out)
+	}
+}
+
+func TestMeshCmd_Run_TableOutputByDefault(t *testing.T) {
+	_, url := startTestNATSServer(t)
+	nc, _ := nats.Connect(url)
+	defer nc.Close()
+	registerTestAgent(t, nc, "cc", "dmestas", "alpha")
+
+	var out bytes.Buffer
+	cmd := &MeshCmd{
+		NATSURL: url,
+		Out:     &out, // injectable writer for tests
+	}
+	if err := cmd.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "AGENT") || !strings.Contains(out.String(), "cc") {
+		t.Errorf("default output missing table headers or agent row:\n%s", out.String())
+	}
+}
+
+func TestMeshCmd_Run_JSONFormat(t *testing.T) {
+	_, url := startTestNATSServer(t)
+	nc, _ := nats.Connect(url)
+	defer nc.Close()
+	registerTestAgent(t, nc, "cc", "dmestas", "alpha")
+
+	var out bytes.Buffer
+	cmd := &MeshCmd{NATSURL: url, Format: "json", Out: &out}
+	if err := cmd.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var parsed []MeshAgent
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out.String())
+	}
+	if len(parsed) != 1 || parsed[0].Agent != "cc" {
+		t.Errorf("unexpected parsed output: %+v", parsed)
+	}
+}
+
+func TestMeshCmd_Run_FilterBySession(t *testing.T) {
+	_, url := startTestNATSServer(t)
+	nc, _ := nats.Connect(url)
+	defer nc.Close()
+	registerTestAgent(t, nc, "cc", "dmestas", "alpha")
+	registerTestAgent(t, nc, "cc", "dmestas", "beta")
+
+	var out bytes.Buffer
+	cmd := &MeshCmd{NATSURL: url, Session: "alpha", Format: "json", Out: &out}
+	_ = cmd.Run(context.Background())
+
+	var parsed []MeshAgent
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("json: %v\n%s", err, out.String())
+	}
+	if len(parsed) != 1 || parsed[0].Session != "alpha" {
+		t.Errorf("filter wrong: %+v", parsed)
+	}
+}
+
+func TestMeshCmd_Run_RejectsUnknownFormat(t *testing.T) {
+	_, url := startTestNATSServer(t)
+	// Use a live URL so the connect succeeds and we exercise the format
+	// dispatch path specifically (not the connect-error path).
+	cmd := &MeshCmd{NATSURL: url, Format: "bogus", Out: &bytes.Buffer{}}
+	err := cmd.Run(context.Background())
+	if err == nil {
+		t.Errorf("expected error for unknown format")
 	}
 }
