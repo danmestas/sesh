@@ -150,3 +150,21 @@ For per-session URL discovery (which session owns which hub), prefer
 `<cwd>/.sesh/sessions/<label>.json#nats_url` over `hub.nats.url` — the
 session JSON's `nats_url` field is written at `sesh up` boot and is the
 canonical per-session reference.
+
+## Claude Code channel-enablement (F1 workaround)
+
+The rig launches `claude` with `--dangerously-load-development-channels nats`
+in addition to `--strict-mcp-config --mcp-config /opt/claude.mcp.json`. The
+former is what makes Claude Code treat the `nats` MCP server as a *channel*
+(inbound-push enabled) instead of a plain tool provider. Without the flag,
+`notifications/claude/channel` from the channel server are silently dropped
+by claude-code, and case 03/05/06 hang.
+
+The rig also auto-feeds two `2\n` inputs over the claude FIFO:
+
+1. Bypass-Permissions warning dialog (~6 s after launch)
+2. Loading-Development-Channels warning dialog (~10 s after launch)
+
+To debug the channel gate, set `RIG_DEBUG_MCP=1` in the rig's environment;
+`--debug=mcp` is then appended to the claude invocation and the relevant
+gate decisions appear in `/var/log/claude.log`.

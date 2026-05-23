@@ -107,14 +107,21 @@ echo "[exec-wrapper] starting; SESH_SESSION=${SESH_SESSION:-} SESH_ROLE=${SESH_R
 # in the background, so neither sees EOF and exits.
 mkfifo /tmp/claude.fifo /tmp/omp.fifo
 # Hold both FIFOs open by writing zero bytes forever. For claude we also
-# auto-feed "2\n" (the "Yes, I accept" choice in claude's Bypass-Permissions
-# warning dialog) so the wizard advances without operator input. The
-# claude.json field `bypassPermissionsModeAccepted` is not authoritative
-# across all claude versions, so we belt-and-braces both paths.
+# auto-feed two "2\n" inputs:
+#   1. The "Yes, I accept" choice in the Bypass-Permissions warning dialog
+#      that --dangerously-skip-permissions raises on first run.
+#   2. The "I am using this for local development" choice in the
+#      Loading-Development-Channels warning dialog that
+#      --dangerously-load-development-channels raises every run.
+# Both dialogs' first option is "1" (the safe choice) and second is the
+# accept choice we want; we send "2\n" to pick the accept option, twice
+# with a delay between them so claude has time to render the next one.
 (
-  # Wait long enough for claude to render the dialog, then type "2" + Enter,
-  # then sit and hold the FIFO open so claude doesn't EOF.
+  # First dialog: bypass-permissions (~6s into startup).
   sleep 6
+  printf '2\n'
+  # Second dialog: dev-channels (~4s after the first is accepted).
+  sleep 4
   printf '2\n'
   sleep infinity
 ) > /tmp/claude.fifo &
@@ -128,7 +135,23 @@ mkfifo /tmp/claude.fifo /tmp/omp.fifo
   # path entirely (which would otherwise present a 1/2/3 trust dialog the
   # first time claude sees a new MCP server in the project). The explicit
   # config we pass is treated as operator-supplied and pre-trusted.
-  exec script -qfc "claude --dangerously-skip-permissions --strict-mcp-config --mcp-config /opt/claude.mcp.json" /dev/null < /tmp/claude.fifo
+  #
+  # `--dangerously-load-development-channels nats` opts the `nats` MCP server
+  # into Claude Code's "channel" gate, which is what makes
+  # `notifications/claude/channel` from the server actually drive a model
+  # turn. Without it, the notifications are silently dropped by the gate
+  # ("tengu_mcp_channel_gate" in claude's telemetry) and the rig sees only
+  # the channel's §6.4 ack chunks until the caller times out. See
+  # docs/plans/2026-05-22-integration-fix-F1-channel-flag.md for the root
+  # cause writeup.
+  #
+  # Set RIG_DEBUG_MCP=1 in the rig env to append --debug=mcp so the channel
+  # gate's decisions appear in /var/log/claude.log for fast post-mortems.
+  CLAUDE_DEBUG_FLAGS=""
+  if [ "${RIG_DEBUG_MCP:-}" = "1" ]; then
+    CLAUDE_DEBUG_FLAGS="--debug=mcp"
+  fi
+  exec script -qfc "claude --dangerously-skip-permissions --strict-mcp-config --mcp-config /opt/claude.mcp.json --dangerously-load-development-channels nats ${CLAUDE_DEBUG_FLAGS}" /dev/null < /tmp/claude.fifo
 ) > /var/log/claude.log 2>&1 &
 CLAUDE=$!
 echo "[exec-wrapper] claude pid=$CLAUDE" >&2
