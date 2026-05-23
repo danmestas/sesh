@@ -7,13 +7,14 @@
 //   - the set of agents returned by INFO is stable across snapshots
 //   - both adapters survive without disappearing once
 
+import { createInbox } from "@nats-io/transport-node";
 import type { CaseContext, CaseResult } from "../harness";
 
 const WINDOW_MS = 60_000;
 const SAMPLE_EVERY_MS = 15_000;
 
 async function snapshotAgents(ctx: CaseContext): Promise<Set<string>> {
-  const inbox = ctx.nc.newInbox();
+  const inbox = createInbox();
   const sub = ctx.nc.subscribe(inbox);
   ctx.nc.publish("$SRV.INFO.agents", new Uint8Array(0), { reply: inbox });
   const ids = new Set<string>();

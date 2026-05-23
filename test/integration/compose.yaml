@@ -24,7 +24,8 @@ services:
       context: ../..
       dockerfile: test/integration/Dockerfile
       additional_contexts:
-        channels: ${SESH_CHANNELS_DIR:-../../../sesh-channels}
+        channels:  ${SESH_CHANNELS_DIR:-../../../sesh-channels}
+        edgesync:  ${EDGESYNC_DIR:-../../../EdgeSync}
     # `tty: true` is what gives both claude and omp a PTY — they refuse to
     # boot cleanly without one (claude's trust dialog flow, OMP's terminal
     # detection). The entrypoint wraps each agent in `script -qfc` so even
@@ -33,13 +34,14 @@ services:
     stdin_open: true
     environment:
       USER: integ
-      HOME: /root
+      HOME: /home/integ
       # Claude reads .credentials.json directly, but exporting the token
       # belt-and-braces survives if the file format ever changes.
       # entrypoint.sh extracts it from the mounted credentials file.
     volumes:
-      - ${HOST_CLAUDE_CREDS:?run scripts/stage-creds.sh first}:/root/.claude/.credentials.json:ro
-      - ${HOST_OMP_DIR:?run scripts/stage-creds.sh first}:/root/.omp/agent:rw
+      - ${HOST_CLAUDE_CREDS:?run scripts/stage-creds.sh first}:/home/integ/.claude/.credentials.json:ro
+      - ${HOST_CLAUDE_CFG:?run scripts/stage-creds.sh first}:/home/integ/.claude.json:rw
+      - ${HOST_OMP_DIR:?run scripts/stage-creds.sh first}:/home/integ/.omp/agent:rw
       - ${HOST_ARTIFACTS_DIR:?run scripts/stage-creds.sh first}:/var/artifacts:rw
     # No exposed ports — everything is internal NATS over loopback inside
     # the container. The harness reaches the bus through the same hub URL
