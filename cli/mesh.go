@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"text/tabwriter"
 	"time"
@@ -131,4 +132,15 @@ func renderTable(agents []MeshAgent) string {
 	}
 	_ = w.Flush()
 	return buf.String()
+}
+
+// renderJSON marshals agents as a pretty-printed JSON array. Nil input
+// produces "[]" (not "null") so consumers can always parse the result
+// as a list.
+func renderJSON(agents []MeshAgent) string {
+	if agents == nil {
+		agents = []MeshAgent{}
+	}
+	b, _ := json.MarshalIndent(agents, "", "  ")
+	return string(b) + "\n"
 }

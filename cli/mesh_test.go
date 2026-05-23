@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +178,27 @@ func TestRenderTable_EmptyInputReturnsHeadersOnly(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 1 {
 		t.Errorf("empty render should be 1 line (headers), got %d: %q", len(lines), out)
+	}
+}
+
+func TestRenderJSON_ParsesBackToAgents(t *testing.T) {
+	in := []MeshAgent{
+		{Agent: "cc", Owner: "dmestas", Session: "s", InstanceID: "1", Role: "worker", Class: "active"},
+	}
+	out := renderJSON(in)
+
+	var parsed []MeshAgent
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nout: %s", err, out)
+	}
+	if len(parsed) != 1 || parsed[0].Agent != "cc" {
+		t.Errorf("round-trip mismatch: %+v", parsed)
+	}
+}
+
+func TestRenderJSON_EmptyInputIsEmptyArray(t *testing.T) {
+	out := strings.TrimSpace(renderJSON(nil))
+	if out != "[]" {
+		t.Errorf("empty render want \"[]\", got %q", out)
 	}
 }
