@@ -103,6 +103,12 @@ func ReadPrimaryURL(stateDir string) (url string, exists bool, err error) {
 //
 // hub.url is not in scope: it belongs to the daemon's lease and is
 // removed by Lease.Release when the daemon exits.
+//
+// Downstream tools that need the URL after the hub exits should read
+// <cwd>/.sesh/sessions/<label>.json#nats_url while the session is alive
+// and cache it locally. Both this file and the session JSON are
+// lifecycle-bound by design — see docs/synadia-agents-on-sesh.md
+// "NATS URL discovery and lifecycle".
 func ClearHubInfo(stateDir string) error {
 	paths := []string{
 		hubNATSURLPath(stateDir),
