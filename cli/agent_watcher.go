@@ -118,21 +118,21 @@ type microInfo struct {
 	} `json:"endpoints"`
 }
 
-// queryAgents sends $SRV.INFO.agents and collects responses for window,
-// returning AgentRefs for instances whose metadata.session matches label.
-// Returns a nil slice (not a zero-length non-nil slice) when no agents
-// respond — this lets reflect.DeepEqual cache hits work cleanly across ticks.
-func queryAgents(nc *nats.Conn, label string, window time.Duration) []AgentRef {
+// queryServiceInfo issues one $SRV.INFO.agents discovery request and
+// returns every distinct microInfo response within window. Deduplicates
+// by service ID (info.ID). Returns nil (not empty slice) when no
+// responder replies — preserves the watcher's reflect.DeepEqual cache
+// semantics. Filtering + struct mapping is the caller's job.
+func queryServiceInfo(nc *nats.Conn, window time.Duration) []microInfo {
 	inbox := nc.NewInbox()
 	replies := make(chan *nats.Msg, 64)
 	sub, err := nc.ChanSubscribe(inbox, replies)
 	if err != nil {
-		slog.Warn("agent watcher: subscribe inbox failed", "err", err)
+		slog.Warn("queryServiceInfo: subscribe inbox failed", "err", err)
 		return nil
 	}
 	defer func() {
 		_ = sub.Unsubscribe()
-		// Drain remaining messages so the channel doesn't block.
 		for {
 			select {
 			case <-replies:
@@ -143,13 +143,13 @@ func queryAgents(nc *nats.Conn, label string, window time.Duration) []AgentRef {
 	}()
 
 	if err := nc.PublishRequest("$SRV.INFO.agents", inbox, nil); err != nil {
-		slog.Warn("agent watcher: publish INFO request failed", "err", err)
+		slog.Warn("queryServiceInfo: publish INFO request failed", "err", err)
 		return nil
 	}
 
 	deadline := time.Now().Add(window)
-	var refs []AgentRef
-	seen := make(map[string]struct{}) // deduplicate by instance_id
+	var out []microInfo
+	seen := make(map[string]struct{})
 
 	for {
 		remaining := time.Until(deadline)
@@ -161,40 +161,52 @@ func queryAgents(nc *nats.Conn, label string, window time.Duration) []AgentRef {
 		case msg, ok := <-replies:
 			timer.Stop()
 			if !ok {
-				return refs
+				return out
 			}
 			var info microInfo
 			if err := json.Unmarshal(msg.Data, &info); err != nil {
-				continue
-			}
-			if info.Metadata["session"] != label {
 				continue
 			}
 			if _, dup := seen[info.ID]; dup {
 				continue
 			}
 			seen[info.ID] = struct{}{}
-			ref := AgentRef{
-				Agent:      info.Metadata["agent"],
-				Owner:      info.Metadata["owner"],
-				InstanceID: info.ID,
-				Role:       agentmeta.DefaultedRole(info.Metadata["role"]),
-				Class:      string(agentmeta.DefaultedClass(info.Metadata["class"])),
-			}
-			// Use the "prompt" endpoint subject if available; fall back to first endpoint.
-			for _, ep := range info.Endpoints {
-				if ep.Name == "prompt" {
-					ref.Subject = ep.Subject
-					break
-				}
-			}
-			if ref.Subject == "" && len(info.Endpoints) > 0 {
-				ref.Subject = info.Endpoints[0].Subject
-			}
-			refs = append(refs, ref)
+			out = append(out, info)
 		case <-timer.C:
-			return refs
+			return out
 		}
+	}
+	return out
+}
+
+// queryAgents sends $SRV.INFO.agents and collects responses for window,
+// returning AgentRefs for instances whose metadata.session matches label.
+// Returns a nil slice (not a zero-length non-nil slice) when no agents
+// respond — this lets reflect.DeepEqual cache hits work cleanly across ticks.
+func queryAgents(nc *nats.Conn, label string, window time.Duration) []AgentRef {
+	infos := queryServiceInfo(nc, window)
+	var refs []AgentRef
+	for _, info := range infos {
+		if info.Metadata["session"] != label {
+			continue
+		}
+		ref := AgentRef{
+			Agent:      info.Metadata["agent"],
+			Owner:      info.Metadata["owner"],
+			InstanceID: info.ID,
+			Role:       agentmeta.DefaultedRole(info.Metadata["role"]),
+			Class:      string(agentmeta.DefaultedClass(info.Metadata["class"])),
+		}
+		for _, ep := range info.Endpoints {
+			if ep.Name == "prompt" {
+				ref.Subject = ep.Subject
+				break
+			}
+		}
+		if ref.Subject == "" && len(info.Endpoints) > 0 {
+			ref.Subject = info.Endpoints[0].Subject
+		}
+		refs = append(refs, ref)
 	}
 	return refs
 }
