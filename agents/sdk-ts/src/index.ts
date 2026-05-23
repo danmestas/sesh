@@ -6,6 +6,8 @@
 // lockstep with the Go side — drift between adapters and the hub corrupts
 // the agents[] view in the session manifest.
 
+export { readSessionLabel, type SessionLabelOptions } from "./session";
+
 export type AgentClass = "active" | "observer";
 
 export interface AdapterRoleClass {
