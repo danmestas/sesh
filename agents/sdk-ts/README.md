@@ -53,10 +53,12 @@ const svc = new AgentService({
 |---|---|
 | `readRoleClass()` | Read `SESH_ROLE` / `SESH_CLASS` from env, apply defaults, validate. Returns `{ role, class }`. Throws `ConfigError` on invalid input. |
 | `readAdapterConfig(defaultAgent)` | Compose `readRoleClass` with NATS_URL / SESH_AGENT / SESH_OWNER / SESH_SESSION env reads. Returns a full `AdapterConfig`. Throws on bad role/class. |
+| `readSessionLabel(opts?)` | Resolve a sesh session label without an explicit operator value. Prefers `$SESH_SESSION`, then walks cwd → root for the nearest `.sesh/sessions/<label>.json`. Returns `null` if no unique label is reachable (warns to stderr on ambiguity). Adapters compose with their own `NATS_SESSION_NAME` / `basename(cwd)` fallbacks. |
 | `ConfigError` | Thrown on invalid input. Distinct class so callers can `instanceof` check. |
 | `AgentClass` (type) | Literal union `"active" \| "observer"`. |
 | `AdapterRoleClass` (type) | `{ role: string; class: AgentClass }`. |
 | `AdapterConfig` (type) | `AdapterRoleClass` + NATS_URL / agent / owner / session. |
+| `SessionLabelOptions` (type) | `{ startDir?: string; env?: ProcessEnv; warn?: (msg) => void }`. Test-time injection points for `readSessionLabel`. |
 
 Internal helpers (`validateRole`, `validateClass`, defaults) are intentionally not exported — callers shouldn't bypass validation, and the boundary is `readRoleClass` / `readAdapterConfig`.
 

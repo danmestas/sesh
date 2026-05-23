@@ -1,6 +1,6 @@
 {
   "name": "@agent-ops/sesh-channels",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Canonical role/class types, validators, and defaults for the sesh agent registration protocol. TS port of github.com/danmestas/sesh/internal/agentmeta.",
   "license": "Apache-2.0",
   "author": "Dan Mestas",
