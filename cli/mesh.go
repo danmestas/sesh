@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"text/tabwriter"
 	"time"
 
@@ -143,4 +144,78 @@ func renderJSON(agents []MeshAgent) string {
 	}
 	b, _ := json.MarshalIndent(agents, "", "  ")
 	return string(b) + "\n"
+}
+
+// renderTree groups agents by machine → project → session → role and
+// prints an indented tree. Missing machine/project IDs coalesce under
+// "(local)" / "(no-project)".
+//
+// Implementation is the classic sort-then-emit group-by: sort the flat
+// list by (machine, project, session, role, agent), then walk it emitting
+// a header whenever the cluster key changes. ~25 lines, single pass, no
+// nested maps. Empty input produces an empty string (caller prints a
+// "no agents" hint).
+func renderTree(agents []MeshAgent) string {
+	if len(agents) == 0 {
+		return ""
+	}
+	mOf := func(s string) string {
+		if s == "" {
+			return "(local)"
+		}
+		return s
+	}
+	pOf := func(s string) string {
+		if s == "" {
+			return "(no-project)"
+		}
+		return s
+	}
+
+	sorted := make([]MeshAgent, len(agents))
+	copy(sorted, agents)
+	sort.Slice(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
+		if a.Machine != b.Machine {
+			return a.Machine < b.Machine
+		}
+		if a.ProjectID != b.ProjectID {
+			return a.ProjectID < b.ProjectID
+		}
+		if a.Session != b.Session {
+			return a.Session < b.Session
+		}
+		if a.Role != b.Role {
+			return a.Role < b.Role
+		}
+		return a.Agent < b.Agent
+	})
+
+	var buf bytes.Buffer
+	var lastM, lastP, lastS, lastR string
+	for i, a := range sorted {
+		m, p := mOf(a.Machine), pOf(a.ProjectID)
+		if i == 0 || m != lastM {
+			fmt.Fprintf(&buf, "machine %s\n", m)
+			lastM, lastP, lastS, lastR = m, "", "", ""
+		}
+		if p != lastP {
+			fmt.Fprintf(&buf, "  project %s\n", p)
+			lastP, lastS, lastR = p, "", ""
+		}
+		if a.Session != lastS {
+			fmt.Fprintf(&buf, "    session %s\n", a.Session)
+			lastS, lastR = a.Session, ""
+		}
+		if a.Role != lastR {
+			fmt.Fprintf(&buf, "      role %s\n", a.Role)
+			lastR = a.Role
+		}
+		id := a.InstanceID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		fmt.Fprintf(&buf, "        %s/%s [%s] %s\n", a.Agent, a.Owner, a.Class, id)
+	}
+	return buf.String()
 }

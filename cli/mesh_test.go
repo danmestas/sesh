@@ -202,3 +202,46 @@ func TestRenderJSON_EmptyInputIsEmptyArray(t *testing.T) {
 		t.Errorf("empty render want \"[]\", got %q", out)
 	}
 }
+
+func TestRenderTree_GroupsByHierarchy(t *testing.T) {
+	agents := []MeshAgent{
+		{Agent: "cc", Owner: "dmestas", Session: "smoke-test", Role: "implementer", Class: "active",
+			Machine: "f9a1b2c3", ProjectID: "abcdef0123", InstanceID: "ID1"},
+		{Agent: "op", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active",
+			Machine: "f9a1b2c3", ProjectID: "abcdef0123", InstanceID: "ID2"},
+		{Agent: "cc", Owner: "dmestas", Session: "other", Role: "worker", Class: "active",
+			Machine: "f9a1b2c3", ProjectID: "abcdef0123", InstanceID: "ID3"},
+	}
+	out := renderTree(agents)
+
+	// Must contain each grouping key.
+	for _, want := range []string{
+		"machine f9a1b2c3",
+		"project abcdef0123",
+		"session smoke-test",
+		"session other",
+		"role implementer",
+		"role planner",
+		"role worker",
+		"cc/dmestas",
+		"op/dmestas",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tree output missing %q\nfull:\n%s", want, out)
+		}
+	}
+
+	// Sessions of the same machine must appear nested under the same machine
+	// header (i.e. machine appears exactly once even though it's shared).
+	if strings.Count(out, "machine f9a1b2c3") != 1 {
+		t.Errorf("expected machine f9a1b2c3 to appear once (grouped); got %d:\n%s",
+			strings.Count(out, "machine f9a1b2c3"), out)
+	}
+}
+
+func TestRenderTree_EmptyInputIsEmptyString(t *testing.T) {
+	out := renderTree(nil)
+	if out != "" {
+		t.Errorf("empty tree should be empty string, got %q", out)
+	}
+}
