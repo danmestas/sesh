@@ -159,14 +159,10 @@ echo "[exec-wrapper] claude pid=$CLAUDE" >&2
   # unreadable without an ANSI-stripping post-processor. (F7)
   export NO_COLOR=1
   export TERM=dumb
-  # omp-nats-channel/extensions/nats-channel.ts only reads NATS_SESSION_NAME
-  # for the session token — it does NOT consult SESH_SESSION like
-  # claude-nats-channel/server.ts does (claude calls discoverSessionLabel
-  # which checks SESH_SESSION; OMP falls straight through to basename(cwd)).
-  # Work around by setting NATS_SESSION_NAME explicitly. This is an
-  # adapter-inconsistency finding for sesh-channels (see FINDINGS).
-  export NATS_SESSION_NAME="${SESH_SESSION:-}"
-  echo "[omp-side] SESH_SESSION=$SESH_SESSION NATS_SESSION_NAME=$NATS_SESSION_NAME SESH_ROLE=$SESH_ROLE SESH_CLASS=$SESH_CLASS HOME=$HOME PATH=$PATH NATS_URL=$NATS_URL" >&2
+  # OMP adapter now honors SESH_SESSION natively via @agent-ops/sesh-channels
+  # ≥0.1.1's readSessionLabel helper (sesh-channels PR #4 / F2 step C). The
+  # previous NATS_SESSION_NAME=$SESH_SESSION export is no longer required.
+  echo "[omp-side] SESH_SESSION=$SESH_SESSION SESH_ROLE=$SESH_ROLE SESH_CLASS=$SESH_CLASS HOME=$HOME PATH=$PATH NATS_URL=$NATS_URL" >&2
   exec script -qfc "omp" /dev/null < /tmp/omp.fifo
 ) 2>&1 | col -b > /var/log/omp.log &
 OMP=$!

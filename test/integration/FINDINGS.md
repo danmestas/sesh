@@ -46,22 +46,21 @@ Both `claude-nats-channel/server.ts:587-589` and the channel README mention expe
 ### F2 — `omp-nats-channel` doesn't read `SESH_SESSION`; `claude-nats-channel` does
 
 **Severity:** P1 — adapter inconsistency, surfaced during rig debugging.
-**Owner:** sesh-channels (omp-nats-channel).
+**Owner:** sesh-channels (omp-nats-channel, plus pi / grok / gemini — same bug shape across 4 adapters).
+**Status:** FIXED. SDK landed `readSessionLabel` in sesh `agents/sdk-ts/` (PR #105, published as `@agent-ops/sesh-channels@0.1.1`). sesh-channels PR #4 migrated OMP / pi / grok / gemini adapters to honor `$SESH_SESSION` natively via the new helper. Rig workaround dropped in this commit.
 
 **Symptom:** When the rig sets `SESH_SESSION=smoke-test` in the spawn env, claude-nats-channel registers with `metadata.session=smoke-test` (correct). omp-nats-channel registers with `metadata.session=workspace` — it ignored `SESH_SESSION` and fell back to `basename(cwd)`. The agent_watcher then excluded OMP from the session manifest entirely until the rig started exporting `NATS_SESSION_NAME=$SESH_SESSION` as a workaround.
 
 **Diagnosis:** Two different env-var resolution paths.
 - claude: `~/projects/sesh-channels/claude-nats-channel/server.ts:235` calls `discoverSessionLabel()` which prefers `process.env.SESH_SESSION` first.
-- omp: `~/projects/sesh-channels/omp-nats-channel/extensions/nats-channel.ts:965-968` checks `NATS_SESSION_NAME` → `config.sessionName` → `basename(ctx.cwd)`. No `SESH_SESSION`.
+- omp: `~/projects/sesh-channels/omp-nats-channel/extensions/nats-channel.ts:965-968` (pre-fix) checked `NATS_SESSION_NAME` → `config.sessionName` → `basename(ctx.cwd)`. No `SESH_SESSION`.
 
-**Reproduction:** Spawn omp-nats-channel with `SESH_SESSION=foo` but no `NATS_SESSION_NAME`. Verify `$SRV.INFO.agents` shows `metadata.session=<cwd-basename>` instead of `foo`.
+**Reproduction (pre-fix):** Spawn omp-nats-channel with `SESH_SESSION=foo` but no `NATS_SESSION_NAME`. Verify `$SRV.INFO.agents` shows `metadata.session=<cwd-basename>` instead of `foo`.
 
-**Suggested fix shape:** Import or reimplement `discoverSessionLabel` in omp-nats-channel so the env-var resolution order is identical across all 5 adapters. Pattern probably belongs in `@agent-ops/sesh-channels` as `readSessionLabel()` so all adapters share one implementation (matches the role/class consolidation already shipped).
-
-**Cross-references:**
-- `claude-nats-channel/server.ts:235` (correct)
-- `omp-nats-channel/extensions/nats-channel.ts:965-968` (incomplete)
-- Workaround in `test/integration/entrypoint.sh` (the OMP wrapper exports `NATS_SESSION_NAME`)
+**Fix shipped:**
+- SDK: `agents/sdk-ts/src/session.ts` exports `readSessionLabel({ env, startDir, warn })` — composes `$SESH_SESSION` then `.sesh/sessions/<label>.json` state-walk. Published as `@agent-ops/sesh-channels@0.1.1`.
+- Adapters: each (non-claude) adapter grew a `session.ts` shim that wraps `readSessionLabel` and falls through to the legacy env-var override, per-context config, and `basename(cwd)` defaults. Identical ladder ordering across all 5 adapters now.
+- Rig: this commit drops `export NATS_SESSION_NAME="${SESH_SESSION:-}"` from the OMP wrapper in `test/integration/entrypoint.sh` — no longer required.
 
 ---
 
