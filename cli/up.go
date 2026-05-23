@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/danmestas/EdgeSync/hub"
+	"golang.org/x/term"
 )
 
 // harnessEnv is the supporting struct for spawnHarness / Harness (Hybrid C).
@@ -545,6 +546,34 @@ func spawnHub(projectCode string) error {
 // Returns a buffered 1-slot <-chan error that receives the Wait result
 // (or start error) then closes. Callers select on it (wired in serve via
 // maybeSpawnHarness).
+// harnessSysProcAttr builds the SysProcAttr the wrapper-mode harness child
+// must be started with. Always: Setpgid (so we can SIGINT the whole tree as
+// a group). Additionally — and critically — when stdin is a real TTY, we set
+// Foreground + Ctty so the child becomes the *foreground* pgrp on that
+// terminal and isn't kernel-stopped by SIGTTIN on its first stdin read.
+//
+// We use term.IsTerminal rather than os.ModeCharDevice because /dev/null,
+// pipes and other character devices that aren't terminals would otherwise
+// pass a ModeCharDevice check and then make forkExec fail in tcsetpgrp with
+// "operation not supported by device" (which is exactly what go test sees
+// when stdin is wired to a non-terminal char dev).
+//
+// Extracted to keep the TTY-detection branch unit-testable without spawning
+// a real subprocess.
+func harnessSysProcAttr(stdin *os.File) *syscall.SysProcAttr {
+	spa := &syscall.SysProcAttr{Setpgid: true}
+	if stdin == nil {
+		return spa
+	}
+	fd := int(stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return spa
+	}
+	spa.Foreground = true
+	spa.Ctty = fd
+	return spa
+}
+
 func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan error {
 	ch := make(chan error, 1)
 
@@ -583,7 +612,15 @@ func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan err
 	// the whole tree. Opposite of spawnHub's Setsid+daemon. The actual
 	// forwarding logic (below) lives inside this spawn site so it is owned
 	// by the harness path, not scattered across serve().
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	//
+	// When stdin is a controlling TTY we ALSO promote the child's new pgrp
+	// to be the foreground pgrp on that terminal (Foreground + Ctty). Without
+	// this, the child is born into a *background* pgrp and the kernel sends
+	// SIGTTIN the moment it tries to read stdin — interactive TUIs (claude,
+	// pi, grok, ...) end up T-state (stopped) before they ever render, which
+	// looks to the operator like sesh up is hung. Go's forkExec performs the
+	// tcsetpgrp(Ctty, childPgid) under the hood when Foreground is set.
+	cmd.SysProcAttr = harnessSysProcAttr(os.Stdin)
 
 	if err := cmd.Start(); err != nil {
 		ch <- fmt.Errorf("spawn harness: %w", err)

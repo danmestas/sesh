@@ -223,3 +223,46 @@ func TestSpawnHarness_HappyPathEnvAndWait(t *testing.T) {
 		t.Fatalf("spawnHarness happy path: child exited non-zero (env injection or sh -c failed): %v", err)
 	}
 }
+
+// TestHarnessSysProcAttr_NonTTYStdinSkipsForeground pins the regression for
+// the SIGTTIN hang: when the parent's stdin is not a TTY (the test process
+// case, and also any piped/redirected sesh up), we must set Setpgid but
+// must NOT set Foreground/Ctty — setting Foreground on a non-TTY descriptor
+// would cause forkExec to fail in tcsetpgrp.
+func TestHarnessSysProcAttr_NonTTYStdinSkipsForeground(t *testing.T) {
+	r, _, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	spa := harnessSysProcAttr(r)
+	if spa == nil {
+		t.Fatal("harnessSysProcAttr returned nil")
+	}
+	if !spa.Setpgid {
+		t.Error("Setpgid = false; want true (group-signal forwarding requires it)")
+	}
+	if spa.Foreground {
+		t.Error("Foreground = true on non-TTY stdin; want false (would crash forkExec)")
+	}
+	if spa.Ctty != 0 {
+		t.Errorf("Ctty = %d on non-TTY stdin; want 0 (unset)", spa.Ctty)
+	}
+}
+
+// TestHarnessSysProcAttr_NilStdinFallsBack guards against a future refactor
+// passing nil for the stdin file — must still return a valid Setpgid-only
+// SysProcAttr without panicking.
+func TestHarnessSysProcAttr_NilStdinFallsBack(t *testing.T) {
+	spa := harnessSysProcAttr(nil)
+	if spa == nil {
+		t.Fatal("harnessSysProcAttr(nil) returned nil")
+	}
+	if !spa.Setpgid {
+		t.Error("Setpgid = false for nil stdin; want true")
+	}
+	if spa.Foreground || spa.Ctty != 0 {
+		t.Error("Foreground/Ctty must remain unset for nil stdin")
+	}
+}
