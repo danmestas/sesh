@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +148,34 @@ func TestApplyFilter_EmptyFilterReturnsAll(t *testing.T) {
 	got := ApplyFilter(all, MeshFilter{})
 	if len(got) != 2 {
 		t.Errorf("empty filter dropped agents: got %d want 2", len(got))
+	}
+}
+
+func TestRenderTable_ContainsHeadersAndAgentRows(t *testing.T) {
+	agents := []MeshAgent{
+		{Agent: "cc", Owner: "dmestas", Session: "smoke-test", Role: "implementer", Class: "active", InstanceID: "ABC123456789", Machine: "f9a1b2c3"},
+		{Agent: "op", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active", InstanceID: "XYZ987654321", Machine: "f9a1b2c3"},
+	}
+	out := renderTable(agents)
+
+	for _, want := range []string{
+		"AGENT", "OWNER", "SESSION", "ROLE", "CLASS", "MACHINE", "INSTANCE",
+		"cc", "op", "implementer", "planner", "active", "smoke-test",
+		"ABC12345", // ID is truncated to first 8 chars for readability
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderTable output missing %q\nfull:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderTable_EmptyInputReturnsHeadersOnly(t *testing.T) {
+	out := renderTable(nil)
+	if !strings.Contains(out, "AGENT") {
+		t.Errorf("empty render should still show headers: %q", out)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 {
+		t.Errorf("empty render should be 1 line (headers), got %d: %q", len(lines), out)
 	}
 }

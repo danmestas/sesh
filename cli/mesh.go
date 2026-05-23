@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"fmt"
+	"text/tabwriter"
 	"time"
 
 	"github.com/danmestas/sesh/internal/agentmeta"
@@ -105,4 +108,27 @@ func ApplyFilter(agents []MeshAgent, f MeshFilter) []MeshAgent {
 		out = append(out, a)
 	}
 	return out
+}
+
+// renderTable formats agents as a tab-aligned table. Instance IDs are
+// truncated to 8 chars to keep rows readable; full ID is available via
+// `sesh mesh --id <id>` or the JSON output.
+func renderTable(agents []MeshAgent) string {
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "AGENT\tOWNER\tSESSION\tROLE\tCLASS\tMACHINE\tINSTANCE")
+	for _, a := range agents {
+		id := a.InstanceID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		machine := a.Machine
+		if machine == "" {
+			machine = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			a.Agent, a.Owner, a.Session, a.Role, a.Class, machine, id)
+	}
+	_ = w.Flush()
+	return buf.String()
 }
