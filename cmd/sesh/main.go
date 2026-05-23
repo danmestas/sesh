@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/alecthomas/kong"
 
 	seshcli "github.com/danmestas/sesh/cli"
@@ -21,6 +23,7 @@ type CLI struct {
 	WorkerCwd   seshcli.WorkerCwdCmd   `cmd:"" name:"worker-cwd" help:"Print the absolute fossil checkout path for <label>. Read-only — does not provision; pair with 'sesh worktree' once up front."`
 	Materialize seshcli.MaterializeCmd `cmd:"" help:"Overlay the fossil trunk HEAD for <label> into a git worktree (default: cwd). The fossil→git bridge for mission-complete materialization."`
 	Hub         seshcli.HubCmd         `cmd:"" help:"sesh hub serve runs the user-level hub daemon at ~/.sesh/"`
+	Mesh        seshcli.MeshCmd        `cmd:"" help:"Inspect agents on the mesh — snapshot table by default"`
 }
 
 func main() {
@@ -28,6 +31,9 @@ func main() {
 	ctx := kong.Parse(&c,
 		kong.Name("sesh"),
 		kong.Description("Session manager wrapping EdgeSync. One hub per user (auto-lifecycle), one sesh up per session (foreground)."),
+		// Provide context.Context to commands whose Run signature expects it
+		// (e.g. MeshCmd uses Run(ctx) for cancellation testability).
+		kong.BindTo(context.Background(), (*context.Context)(nil)),
 	)
 	ctx.FatalIfErrorf(ctx.Run())
 }
