@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# claude-launch.exp — drive Claude Code's dev-channels warning dialog via a
+# pseudo-TTY. Claude's Ink-based TUI requires raw-mode keypress events, which
+# `script` + FIFO does not provide (FIFO stdin is pipe-buffered, not a TTY).
+#
+# Usage: claude-launch.exp <claude-args...>
+#
+# What this does:
+#   1. spawn claude with the supplied args in a pty
+#   2. wait up to 30s for the "I am using this for local development" line
+#   3. send "\r" — the cursor defaults to option 1 (that line), so just Enter
+#   4. tee claude's stdout/stderr to our stdout (visible in container logs)
+#   5. block until claude exits, propagate exit code
+
+log_user 1
+set timeout 30
+
+# Pass through SESH_* and other env to the spawn via inherited environment.
+# expect inherits env from its parent shell.
+eval spawn -noecho claude $argv
+
+# The dialog text has ANSI cursor-positioning codes (\e[12G etc.)
+# interleaved between every word, so multi-word patterns like
+# "I am using this for local development" never match in the byte
+# stream. Match on `cancel` — single contiguous ASCII token from
+# "Enter to confirm · Esc to cancel", which is the LAST line of the
+# dialog (so we know the menu is fully rendered when we see it).
+# Cursor defaults to option 1 ("I am using this for local development"),
+# so pressing Enter confirms.
+expect {
+  "cancel" {
+    # Brief settle for any final rendering, then confirm.
+    after 500
+    send "\r"
+    puts stderr "claude-launch.exp: dev-channels dialog dismissed (Enter on option 1)"
+  }
+  timeout {
+    puts stderr "claude-launch.exp: dialog timeout (30s) — proceeding anyway"
+  }
+}
+
+# Disable timeout for the rest — claude runs indefinitely until killed.
+set timeout -1
+
+# Block until claude exits (the spawned process EOFs its pty).
+expect eof
+
+# Reap the child and propagate its exit code.
+catch wait result
+exit [lindex $result 3]

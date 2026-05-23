@@ -35,6 +35,10 @@ services:
     environment:
       USER: integ
       HOME: /home/integ
+      # Capture detailed MCP debug logs into /var/log/claude.log so the
+      # "MCP server failed" status visible in the TUI is accompanied by
+      # the underlying error message. Set to "" to disable.
+      RIG_DEBUG_MCP: "1"
       # Claude reads .credentials.json directly, but exporting the token
       # belt-and-braces survives if the file format ever changes.
       # entrypoint.sh extracts it from the mounted credentials file.

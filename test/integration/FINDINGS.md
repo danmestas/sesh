@@ -211,3 +211,155 @@ Worth recording — not all news is bad:
 - **4 ergonomic / polish findings** (F4-F8).
 
 Next step (operator-directed): systematic-debugging + brainstorm pass per finding, only surface 4-axes decisions to operator, produce AFK-ready specs/plans.
+
+---
+
+# Follow-up Findings — Rig Validation Attempt (2026-05-23)
+
+**Context:** After F1-F8 + PR #108 (plugin-mode + multi-round case 06) landed, the rig was re-run to confirm 8/8 PASS. **It regressed to 2/8.** ~18 iterations of hot-patches did not converge. The operator decided to ship the diagnostic findings as F9-F15 and tackle proper rig validation in a follow-on.
+
+The patches in this PR (`feat/integration-rig-debugging-findings`) fix the most clear-cut issues (Dockerfile build errors, hardcoded keychain assumption, expect-driven TUI dismissal). The deeper plugin-mode + OMP-autodiscovery interactions remain unresolved and are surfaced below for the follow-on.
+
+## Test summary (post-PR #108 → this branch)
+
+| # | Case | Pre-PR #108 | Post-PR #108 (baseline) | Current branch tip |
+|---|------|-------------|-------------------------|--------------------|
+| 01 | registration | PASS | FAIL (role=planner) | varies by run |
+| 02 | heartbeats | PASS | PASS | PASS |
+| 03 | prompt claude | FAIL (gated F1) | FAIL (channel-skip) | FAIL |
+| 04 | prompt OMP | FAIL | FAIL | FAIL |
+| 05 | attachment | FAIL | FAIL | FAIL |
+| 06 | cross-adapter | FAIL | FAIL (round 1) | FAIL |
+| 07 | session JSON | PASS | FAIL (role mismatch) | varies |
+| 08 | steady-state | PASS | PASS | PASS |
+
+Best result during debugging: **3/8** (run #12 — case 01 added). PR #107 baseline of 4/8 remains the operator's reference point.
+
+## Findings F9-F15
+
+### F9 — `Claude Code-credentials` keychain entry absent on this host
+
+**Severity:** P1 — rig won't start without Claude OAuth.
+**Owner:** rig (claude-code's storage location may have changed).
+
+**Symptom:** `scripts/stage-creds.sh` ran `security find-generic-password -s "Claude Code-credentials" -w` and got "specified item could not be found in the keychain."
+
+**Root cause:** On this operator's host, Claude Code 2.1.126 stores the OAuth token at `~/.claude/.credentials.json` directly (not in macOS keychain). The darken pattern that the rig copied assumes keychain storage.
+
+**Fix shipped in this PR:** `stage-creds.sh` now tries keychain first, falls back to the `~/.claude/.credentials.json` file.
+
+### F10 — Top-level `mcpServers.nats` in operator's `~/.claude.json` has stale absolute path
+
+**Severity:** P0 — blocks claude's MCP server load entirely.
+**Owner:** rig (operator's local state pollutes the container).
+
+**Symptom:** Claude inside the container failed to start the nats MCP server with `ENOENT: Could not change directory to "/Users/dmestas/projects/agent-channels/claude-nats-channel"`. That path is the operator's pre-rename host path; doesn't exist in the container.
+
+**Root cause:** When the operator installed claude-nats-channel as an MCP server (pre-plugin-mode), claude wrote a `mcpServers.nats` entry to `~/.claude.json` with the absolute host path. The operator later renamed `~/projects/agent-channels` to `~/projects/sesh-channels` but the JSON entry kept the old path. When stage-creds.sh mounts the host's `~/.claude.json` into the container, the stale path comes along.
+
+**Fix shipped:** `stage-creds.sh`'s jq pipeline now does `del(.mcpServers)` so the user-scope mcpServers entry is stripped before the file is mounted. Plugin-mode is supposed to provide the MCP server independently — but see F12 for why this didn't fully work.
+
+### F11 — `--dangerously-load-development-channels` requires tagged syntax in claude 2.1.148
+
+**Severity:** P2 — flag-syntax documentation.
+**Owner:** claude-code (upstream — docs gap).
+
+**Symptom:** Passing `--dangerously-load-development-channels nats` (bare server name) made claude exit with:
+```
+--dangerously-load-development-channels entries must be tagged: nats
+  plugin:<name>@<marketplace>  — plugin-provided channel (allowlist enforced)
+  server:<name>                — manually configured MCP server
+```
+
+**Root cause:** Newer claude requires either `plugin:X@Y` or `server:X` prefix. The flag is hidden from `--help`; this requirement is only visible when you pass a bad arg.
+
+**Fix shipped:** `entrypoint.sh` now uses `--dangerously-load-development-channels plugin:nats-channel@sesh-channels` (matches operator's production invocation).
+
+**Worth filing upstream** as a docs gap (CLAUDE.md no-third-party-filing rule defers this).
+
+### F12 — Channel-mode gate matches MCP server **name** literally against the channels list
+
+**Severity:** P0 — root cause for cases 03/05/06.
+**Owner:** claude-code (likely upstream bug or design quirk) + possibly sesh-channels plugin manifest.
+
+**Symptom:** With `--dangerously-load-development-channels plugin:nats-channel@sesh-channels`, the plugin's MCP server `nats` loads and connects successfully. But claude's debug log says:
+```
+MCP server "nats": Channel notifications skipped: server nats not in --channels list for this session
+```
+
+**Root cause:** Claude's channel-mode gate compares the runtime MCP server name (`nats`) against the literal entries in the channels list (`["plugin:nats-channel@sesh-channels"]`). They don't string-match, so channel notifications are dropped. The `plugin:...@...` form should logically expand to the set of MCP servers the plugin provides, but apparently doesn't in 2.1.148.
+
+**Workaround attempts that didn't fully resolve:**
+- Using `server:nats` syntax — works for user-scope mcpServers but then OMP autodiscovers it too (F13)
+- Passing both `plugin:nats-channel@sesh-channels` and `server:nats` — not tested; likely produces double-registration
+
+**Likely upstream issue:** claude-code's plugin-mode channel gate needs to resolve plugin entries to their underlying MCP server names. This may be a bug or a design that requires the operator to use `server:` form even for plugin-provided servers.
+
+### F13 — OMP MCP autodiscovery ignores `mcp.discoveryMode: false`
+
+**Severity:** P1 — causes duplicate `claude-code` registration with OMP's env.
+**Owner:** can1357/oh-my-pi (upstream OMP bug or documentation gap).
+
+**Symptom:** Even with `mcp.discoveryMode: false` in `~/.omp/agent/config.yml`, OMP logged:
+```
+Connecting to MCP servers: nats, nats-channel:nats
+```
+
+OMP loads BOTH the user-scope `mcpServers.nats` (`nats`) and the plugin-provided MCP server (`nats-channel:nats`). The plugin-scoped one inherits OMP's env (SESH_ROLE=planner), so the `claude-code` registration on the bus ends up with role=planner instead of implementer.
+
+**Workaround attempted:** Run OMP with a fresh HOME (`/tmp/omp-home`) symlinked only to `~/.omp/agent`, so OMP can't see claude's `~/.claude.json` or `~/.claude/plugins/`. Partial success — eliminates user-scope discovery but not plugin discovery.
+
+**Likely upstream issue:** OMP's `mcp.discoveryMode` option doesn't actually disable discovery. Either documentation lies or implementation is buggy. Worth investigating OMP source.
+
+### F14 — Real `claude plugin install` is required (JSON-baking is insufficient)
+
+**Severity:** P1 — rig was faking plugin install state and missing supporting directories.
+**Owner:** rig.
+
+**Symptom:** PR #108's plugin-mode setup baked `~/.claude/plugins/{known_marketplaces,installed_plugins,config}.json` files into the image, but did NOT recreate the `marketplaces/`, `repos/`, and `data/` subdirectories that `claude plugin install` produces. Claude's plugin loader silently failed when those structures were missing.
+
+**Fix shipped:** Dockerfile now actually runs `claude plugin marketplace add /opt/sesh-channels && claude plugin install nats-channel@sesh-channels -s user` as the `integ` user during build. Both commands are non-interactive in claude 2.1.148. The baked JSON files have been deleted.
+
+### F15 — Pre-existing wrapper script bugs uncovered during rig debugging
+
+**Severity:** P3 — small cumulative issues.
+**Owner:** rig.
+
+Three small bugs in `entrypoint.sh`'s launch wrapper:
+
+a) **`col` command missing** — Dockerfile installed `util-linux` but `col` lives in `bsdextrautils` on Debian. OMP wrapper's `... | col -b` failed silently. Added `bsdextrautils` to apt-install.
+
+b) **Dev-channels dialog FIFO sent wrong key** — option `2` was previously documented as "use locally" but in claude 2.1.148 it means "Exit". Switched to `expect` + match-on-`cancel` + Enter on default-highlighted option 1.
+
+c) **`expect` pattern can't match multi-word strings interleaved with ANSI cursor codes** — Ink TUI emits `\e[12G` between every word. Matching `"I am using this for local development"` literally never succeeds. Switched to matching `cancel` (single contiguous ASCII token).
+
+**Fixes shipped:** Dockerfile + entrypoint.sh + new `config/claude-launch.exp` script.
+
+## Patches NOT shipped (deferred to follow-on)
+
+1. **Channel-mode for plugin syntax** (F12) — needs upstream investigation. Possible fix shapes:
+   - claude-code patches the gate to resolve `plugin:X@Y` → list of MCP server names
+   - sesh-channels' plugin manifest is restructured so the channel name matches the plugin id
+   - The rig falls back to `server:nats` + isolates OMP from claude.json (see F13)
+2. **OMP MCP autodiscovery** (F13) — needs OMP source investigation or upstream issue at `can1357/oh-my-pi`.
+3. **Full HOME isolation for OMP** — Partial workaround works but doesn't stop OMP from discovering plugin-installed MCP servers. May need a fully separate user.
+4. **Stale `mcpServers.nats` in operator's host `~/.claude.json`** — Operator could remove this manually; the rig works around it via `del(.mcpServers)` in stage-creds.
+
+## Diagnostic value of this PR
+
+Even though the rig still has only 2/8 passing, the patches in this PR are *real progress* — they unblock paths that were silently failing:
+
+- Real plugin install (not faked JSON) → claude can load plugin-mode MCP servers
+- Expect-driven TUI dismissal → claude makes it past the dev-channels dialog
+- Credentials file fallback → rig works on hosts where keychain isn't used
+- mcpServers scrub → stale operator paths don't crash claude
+
+The remaining failures (F12 channel-mode gate, F13 OMP discovery) need deeper investigation that doesn't belong in a hot-patch loop.
+
+## Operator follow-on
+
+Per operator direction (2026-05-23): land these findings as a documentation PR, then prove out the rig properly in a follow-on with cleaner restructuring. Options under discussion:
+
+- (A) **Multi-container rig** — claude and OMP in separate containers sharing a NATS server. Eliminates autodiscovery interference.
+- (B) **Investigate F12 upstream** — root-cause the plugin:X@Y channel-gate behavior in claude-code source. May be a real bug worth a careful filing.
+- (C) **OMP source dive for F13** — understand `mcp.discoveryMode` actual semantics. May be a config-key rename or implementation gap.
