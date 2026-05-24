@@ -20,7 +20,10 @@ Dependency arrow goes one way: sesh depends on EdgeSync, never the reverse.
 
 ## Synadia Agent Protocol
 
-Sesh speaks the [Synadia Agent Protocol v0.3](https://github.com/synadia-io/agent-sdk-docs).
+Sesh speaks the [Synadia Agent Protocol v0.3](https://github.com/synadia-io/agent-sdk-docs)
+on the wire today; v0.4 / A2A parity is in active rollout — see
+[v0.4 / A2A protocol parity](#v04--a2a-protocol-parity) below.
+
 Agents inside a session register as NATS micro services under `name = "agents"`,
 listen on `agents.prompt.<agent>.<owner>.<session>`, and answer `$SRV.INFO.agents`
 for discovery — no per-consumer protocol negotiation. The hub is substrate, not
@@ -32,6 +35,44 @@ presence contract (identity, subjects, endpoints, streaming, liveness),
 (`cmd/sesh-ref-agent/`), and [`docs/synadia-comparison.md`](docs/synadia-comparison.md)
 for how sesh's substrate, scoped memory, tasks, goals, and trace envelope sit
 around the wire.
+
+## v0.4 / A2A protocol parity
+
+Synadia Agent Protocol **v0.4** layers Google/Linux-Foundation
+[A2A v1.0](https://github.com/a2aproject/A2A) feature parity onto the v0.3
+NATS substrate. External A2A clients (LangChain, CrewAI, stock
+[`a2a-python`](https://github.com/a2aproject/a2a-python), `a2a-go`) reach
+sesh agents through a stateless gateway binary, `sesh-shim`
+(`cmd/sesh-shim/`), which translates A2A's HTTPS+JSON-RPC surface onto
+sesh's `agents.prompt.v2.*` subjects and JetStream KV buckets for Messages,
+Artifacts, and AgentCards.
+
+```text
+A2A client  ──HTTPS+JSON-RPC──▶  sesh-shim  ──NATS─▶  agents.prompt.v2.*
+   │                                 │                          │
+   │  GET /.well-known/agent-card    │                          │
+   │  POST /a2a (message/send,…)     │                          │
+   │  SSE message/stream             │  JetStream KV: A2A_MESSAGES, A2A_ARTIFACTS, A2A_CARDS
+```
+
+Wire-protocol details, capability advertisement (`sesh.protocol_version`,
+`sesh.v04_capabilities`), and the migration story for v0.3 agents live in
+the design doc:
+
+- [Design](docs/proposals/2026-05-24-synadia-v0.4-a2a-parity-design.md) —
+  full v0.4 surface, slice plan, A2A subject conventions, AgentCard
+  signing.
+- [Audit](docs/proposals/2026-05-24-synadia-v0.4-a2a-parity-audit.md) —
+  gap analysis against A2A v1.0 + Synadia v0.3.
+- [Shim binary plan](docs/plans/2026-05-24-v0.4-shim-binary.md) —
+  `sesh-shim` architecture and rollout phases (Slices 1–3 landed; 4–9 in
+  progress).
+
+The reference agent (`cmd/sesh-ref-agent/`) stays at v0.3 wire format as
+the canonical baseline producer — the shim's v0.3-fallback path routes
+v0.4 A2A traffic through it transparently, exercising the migration
+contract. A v0.4-native reference agent will land separately once v0.4
+introduces wire-level features that the v0.3 surface cannot express.
 
 ## Commands
 

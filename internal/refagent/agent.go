@@ -13,6 +13,10 @@
 // prompt handler in place of TS's empty default. There is intentionally
 // no conversation memory, no attachments support, and no mid-stream
 // queries — those belong in a real harness, not in the spec proof.
+//
+// The ref-agent is the v0.3-baseline producer under v0.4's metadata
+// convention; see the metadata map in register() and README's
+// "v0.4 / A2A protocol parity" section for the rationale.
 package refagent
 
 import (
@@ -215,6 +219,14 @@ func (a *agent) register() error {
 		"protocol_version": protocolVersion,
 		"role":             a.cfg.Role,
 		"class":            string(a.cfg.Class),
+
+		// v0.4 metadata convention (design doc §8): namespaced
+		// `sesh.protocol_version` lets v0.4-aware consumers discover
+		// this agent under the v0.4 key naming. Value stays "0.3"
+		// because ref-agent serves the v0.3 wire format; the absent
+		// `sesh.v04_capabilities` key signals "no v0.4 capabilities"
+		// per the design doc convention.
+		"sesh.protocol_version": protocolVersion,
 	}
 	if a.cfg.Session != "" {
 		metadata["session"] = a.cfg.Session
