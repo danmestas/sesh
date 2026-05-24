@@ -15,6 +15,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/danmestas/sesh-ops/scope"
+
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
@@ -172,6 +174,9 @@ func validate(cfg Config) error {
 	noCert := cfg.TLSCert == "" && cfg.TLSKey == ""
 	if !hasCert && !(noCert && cfg.Dev) {
 		return errors.New("server.Config: must provide both TLSCert and TLSKey, or set Dev=true with neither")
+	}
+	if _, err := scope.Bucket(cfg.ScopeKind, cfg.ScopeID, "tasks"); err != nil {
+		return fmt.Errorf("server.Config: invalid scope (kind=%q id=%q): %w", cfg.ScopeKind, cfg.ScopeID, err)
 	}
 	return nil
 }
