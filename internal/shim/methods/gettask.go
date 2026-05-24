@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/danmestas/sesh-ops/scope"
+	seshtask "github.com/danmestas/sesh-ops/task"
 
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
 )
@@ -19,13 +20,15 @@ type getTaskParams struct {
 
 // getTask reads the raw Task JSON from JetStream KV bucket
 // sesh_tasks_<scope-kind>_<scope-id> (derived via scope.Bucket) and
-// returns it verbatim. Routing through sesh-ops/task.Get is deferred
-// (see Slice 2 plan §D-task) because *task.Task is the sesh-internal
-// record shape and lacks A2A wire fields; using it would strip
-// contextId, history, artifacts, etc. on the round trip.
+// returns it verbatim. Routes through `task.GetRaw` after sesh-ops#25 —
+// byte-passthrough so A2A wire fields (kind, contextId, status.state,
+// history, artifacts) survive unmolested. The typed `task.Get` is still
+// deferred (Slice 2 D-task) because *task.Task is the sesh-internal
+// record shape and lacks A2A fields; using it would strip them on the
+// round trip.
 func (d *Dispatcher) getTask(ctx context.Context, params json.RawMessage) (any, *jsonrpc.Error) {
-	if d.deps.JetStream == nil {
-		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream not configured"})
+	if d.deps.JS == nil {
+		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream v2 not configured"})
 	}
 	var p getTaskParams
 	if len(params) > 0 {
@@ -41,21 +44,21 @@ func (d *Dispatcher) getTask(ctx context.Context, params json.RawMessage) (any, 
 		d.deps.Log.Error("getTask: bucket derive", "scope_kind", d.deps.ScopeKind, "scope_id", d.deps.ScopeID, "err", err)
 		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "invalid scope"})
 	}
-	kv, err := d.deps.JetStream.KeyValue(bucket)
+	kv, err := d.deps.JS.KeyValue(ctx, bucket)
 	if err != nil {
-		if errors.Is(err, nats.ErrBucketNotFound) {
+		if errors.Is(err, jetstream.ErrBucketNotFound) {
 			return nil, jsonrpc.ErrTaskNotFound
 		}
 		d.deps.Log.Error("getTask: open kv", "bucket", bucket, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
-	entry, err := kv.Get(p.ID)
+	value, _, err := seshtask.GetRaw(ctx, kv, p.ID)
 	if err != nil {
-		if errors.Is(err, nats.ErrKeyNotFound) {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, jsonrpc.ErrTaskNotFound
 		}
 		d.deps.Log.Error("getTask: kv get", "bucket", bucket, "id", p.ID, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
-	return json.RawMessage(entry.Value()), nil
+	return json.RawMessage(value), nil
 }

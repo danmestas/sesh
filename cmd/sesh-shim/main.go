@@ -8,17 +8,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/nats-io/nats.go"
+
+	seshconn "github.com/danmestas/sesh-ops/conn"
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
@@ -27,7 +27,7 @@ import (
 
 type CLI struct {
 	Listen        string        `name:"listen" default:"0.0.0.0:8443" env:"SESH_SHIM_LISTEN" help:"HTTPS bind address"`
-	NATSURL       string        `name:"nats" env:"NATS_URL" help:"NATS URL; falls back to ~/.sesh/hub.url"`
+	NATSURL       string        `name:"nats" env:"NATS_URL" help:"NATS URL; falls back to ~/.sesh/hub.nats.url via sesh-ops/conn"`
 	TLSCert       string        `name:"tls-cert" env:"SESH_SHIM_TLS_CERT" help:"PEM TLS certificate; in --dev mode self-signed if empty"`
 	TLSKey        string        `name:"tls-key" env:"SESH_SHIM_TLS_KEY" help:"PEM TLS key; in --dev mode self-signed if empty"`
 	SigningKey    string        `name:"signing-key" env:"SESH_SHIM_SIGNING_KEY" help:"PEM ES256 private key for AgentCard JWS; in --dev mode auto-generated if empty"`
@@ -39,7 +39,7 @@ type CLI struct {
 	ScopeKind     string        `name:"scope-kind" default:"project" env:"SESH_SHIM_SCOPE_KIND" help:"Task scope kind for KV bucket naming"`
 	ScopeID       string        `name:"scope-id" env:"SESH_SHIM_SCOPE_ID" help:"Task scope id for KV bucket naming"`
 	GatewayURL    string        `name:"gateway-url" env:"SESH_SHIM_GATEWAY_URL" help:"Public-facing URL advertised in the AgentCard"`
-	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the first segment of agents.prompt.v2.*; falls back to os.Hostname() if empty"`
+	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the first segment of agents.prompt.cc.*; falls back to os.Hostname() if empty"`
 	Dev           bool          `name:"dev" env:"SESH_SHIM_DEV" help:"Enable dev mode: self-signed TLS + ephemeral signing key permitted"`
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"5s" env:"SESH_SHIM_SHUTDOWN_GRACE" help:"Max drain/shutdown wait"`
 }
@@ -70,23 +70,18 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		return errors.New("--scope-id is required")
 	}
 
-	url, err := resolveNATSURL(cli.NATSURL)
-	if err != nil {
-		return fmt.Errorf("nats url: %w", err)
-	}
-	nc, err := nats.Connect(url,
+	// sesh-ops/conn.Connect resolves the NATS URL (explicit → ~/.sesh/hub.nats.url
+	// for hub scope) and returns both the connection and a jetstream.JetStream
+	// v2 client in one call. Wave D #24 + #25 retired the in-tree resolveNATSURL
+	// helper.
+	nc, js, err := seshconn.Connect(ctx, "hub", cli.NATSURL, "",
 		nats.Name("sesh-shim"),
 		nats.MaxReconnects(-1),
 	)
 	if err != nil {
-		return fmt.Errorf("nats connect %s: %w", url, err)
+		return fmt.Errorf("nats connect: %w", err)
 	}
 	defer func() { _ = nc.Drain() }()
-
-	js, err := nc.JetStream()
-	if err != nil {
-		return fmt.Errorf("jetstream: %w", err)
-	}
 
 	signer, err := buildSigner(cli, log)
 	if err != nil {
@@ -130,7 +125,7 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		Card:          cache,
 		Signer:        signer,
 		NC:            nc,
-		JetStream:     js,
+		JS:            js,
 		AgentKey:      card.AgentKey{Agent: cli.Agent, Owner: cli.Owner},
 		ScopeKind:     cli.ScopeKind,
 		ScopeID:       cli.ScopeID,
@@ -144,7 +139,7 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		"dev", cli.Dev,
 		"auth", cli.Auth,
 		"scope", cli.ScopeKind+"/"+cli.ScopeID,
-		"nats", url,
+		"nats", nc.ConnectedUrl(),
 	)
 	return server.Run(ctx, cfg)
 }
@@ -180,33 +175,6 @@ func buildValidator(cli CLI, log *slog.Logger) (auth.Validator, error) {
 	default:
 		return nil, fmt.Errorf("unknown --auth mode %q", cli.Auth)
 	}
-}
-
-// resolveNATSURL implements: explicit flag → env NATS_URL → ~/.sesh/hub.url.
-// The kong tag for NATSURL already wires NATS_URL env, so by the time we
-// see cli.NATSURL=="" both the flag and env are empty and we fall back
-// to the hub.url file.
-func resolveNATSURL(explicit string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(home, ".sesh", "hub.url")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("no NATS URL: set --nats, NATS_URL, or run `sesh up` so %s exists", path)
-		}
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	url := strings.TrimSpace(string(data))
-	if url == "" {
-		return "", fmt.Errorf("%s is empty", path)
-	}
-	return url, nil
 }
 
 // sanitizeMachineToken replaces any rune that subject.validateToken

@@ -20,13 +20,12 @@ import (
 )
 
 // Deps wires the dispatcher's collaborators. All fields are required
-// unless otherwise noted. JetStream is the legacy nats.JetStreamContext
-// kept for backward compatibility with Slice 2's getTask path;
-// JS is the new jetstream.JetStream used by sesh-ops packages
-// (messages, artifacts). Both are derived from the same *nats.Conn.
+// unless otherwise noted. JS is the jetstream.JetStream v2 client used
+// by sesh-ops packages (task, messages, artifacts); the legacy
+// nats.JetStreamContext was dropped in Slice 4 after gettask migrated
+// to task.GetRaw.
 type Deps struct {
 	NC        *nats.Conn
-	JetStream nats.JetStreamContext
 	JS        jetstream.JetStream
 	ScopeKind string
 	ScopeID   string
@@ -50,6 +49,8 @@ const (
 	MethodSendMessage          = "SendMessage"
 	MethodSendStreamingMessage = "SendStreamingMessage"
 	MethodSubscribeToTask      = "SubscribeToTask"
+	MethodCancelTask           = "CancelTask"
+	MethodListTasks            = "ListTasks"
 )
 
 // Dispatcher is the JSON-RPC method router. Construct via NewDispatcher.
@@ -77,6 +78,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, method string, params json.Ra
 		return d.getExtendedAgentCard(ctx, params)
 	case MethodSendMessage:
 		return d.sendMessage(ctx, params)
+	case MethodCancelTask:
+		return d.cancelTask(ctx, params)
+	case MethodListTasks:
+		return d.listTasks(ctx, params)
 	default:
 		return nil, jsonrpc.ErrMethodNotFound
 	}
