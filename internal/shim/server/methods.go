@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/danmestas/sesh-ops/scope"
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
 )
 
@@ -30,8 +30,11 @@ type getTaskParams struct {
 }
 
 // getTask reads the raw Task JSON from JetStream KV bucket
-// sesh_tasks_<scope-kind>_<scope-id> and returns it verbatim. Slice 2
-// will move this through sesh-ops/task.Get(...).
+// sesh_tasks_<scope-kind>_<scope-id> (derived via scope.Bucket) and
+// returns it verbatim. Routing through sesh-ops/task.Get is deferred
+// (see Slice 2 plan §D-task) because *task.Task is the sesh-internal
+// record shape and lacks A2A wire fields; using it would strip
+// contextId, history, artifacts, etc. on the round trip.
 func (s *server) getTask(ctx context.Context, params json.RawMessage) (any, *jsonrpc.Error) {
 	if s.cfg.JetStream == nil {
 		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream not configured"})
@@ -45,7 +48,11 @@ func (s *server) getTask(ctx context.Context, params json.RawMessage) (any, *jso
 	if p.ID == "" {
 		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "id is required"})
 	}
-	bucket := fmt.Sprintf("sesh_tasks_%s_%s", s.cfg.ScopeKind, s.cfg.ScopeID)
+	bucket, err := scope.Bucket(s.cfg.ScopeKind, s.cfg.ScopeID, "tasks")
+	if err != nil {
+		s.log.Error("getTask: bucket derive", "scope_kind", s.cfg.ScopeKind, "scope_id", s.cfg.ScopeID, "err", err)
+		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "invalid scope"})
+	}
 	kv, err := s.cfg.JetStream.KeyValue(bucket)
 	if err != nil {
 		if errors.Is(err, nats.ErrBucketNotFound) {
