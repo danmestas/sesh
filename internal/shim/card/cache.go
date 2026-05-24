@@ -96,6 +96,17 @@ func (c *Cache) HasFresh(key AgentKey) bool {
 	return time.Now().Before(el.Value.(*cacheEntry).expiresAt)
 }
 
+// Composer returns the Composer wrapped by this cache. Used by the
+// extended-card handler (Slice 5+), which composes per-request via
+// Composer.ComposeBase + ApplyPartial rather than going through the
+// cached signed bytes (which capture only the public-card overlay).
+func (c *Cache) Composer() *Composer {
+	if c == nil {
+		return nil
+	}
+	return c.composer
+}
+
 // Invalidate drops the cached entry for key. Used in Slice 5+ when the
 // source adapter goes away.
 func (c *Cache) Invalidate(key AgentKey) {

@@ -53,7 +53,7 @@ func testDeps(t *testing.T) (Deps, *nats.Conn, jetstream.JetStream) {
 		JS:        js2,
 		ScopeKind: "project",
 		ScopeID:   "abc123",
-		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner"},
+		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner", Name: "test-agent"},
 		Machine:   "test-machine",
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
