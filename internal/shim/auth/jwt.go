@@ -104,7 +104,14 @@ func (n NoopValidator) Validate(r *http.Request) (Principal, error) {
 		log = slog.Default()
 	}
 	log.Warn("auth: none-dev-only bypass", "path", r.URL.Path, "remote", r.RemoteAddr)
-	return Principal{Sub: "dev", Scopes: []string{"agent.read", "agent.write"}}, nil
+	// `agent.read.extended` was added in Slice 5 so --auth=none-dev-only
+	// can exercise GetExtendedAgentCard end-to-end. Production JWT
+	// tokens must still carry the scope explicitly.
+	return Principal{Sub: "dev", Scopes: []string{
+		"agent.read",
+		"agent.write",
+		"agent.read.extended",
+	}}, nil
 }
 
 // JWTValidator validates Authorization: Bearer <jwt> against a JWKS URL.

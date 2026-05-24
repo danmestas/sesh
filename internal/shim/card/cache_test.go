@@ -34,7 +34,7 @@ func TestCache_HitMarksFreshAndReturnsEqualBytes(t *testing.T) {
 	cache, nc := newTestCache(t, time.Minute, 8)
 	registerStubAgent(t, nc, "echo", "alice", "r", "c")
 
-	key := AgentKey{Agent: "echo", Owner: "alice"}
+	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	if cache.HasFresh(key) {
 		t.Fatal("HasFresh should be false before first GetOrCompose")
 	}
@@ -58,7 +58,7 @@ func TestCache_Expiry(t *testing.T) {
 	cache, nc := newTestCache(t, 50*time.Millisecond, 8)
 	registerStubAgent(t, nc, "echo", "alice", "r", "c")
 
-	key := AgentKey{Agent: "echo", Owner: "alice"}
+	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	if _, err := cache.GetOrCompose(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestCache_Invalidate(t *testing.T) {
 	cache, nc := newTestCache(t, time.Minute, 8)
 	registerStubAgent(t, nc, "echo", "alice", "r", "c")
 
-	key := AgentKey{Agent: "echo", Owner: "alice"}
+	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	if _, err := cache.GetOrCompose(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
@@ -95,19 +95,19 @@ func TestCache_LRUEviction(t *testing.T) {
 	registerStubAgent(t, nc, "a3", "alice", "r", "c")
 
 	ctx := context.Background()
-	if _, err := cache.GetOrCompose(ctx, AgentKey{Agent: "a1", Owner: "alice"}); err != nil {
+	if _, err := cache.GetOrCompose(ctx, AgentKey{Agent: "a1", Owner: "alice", Name: "a1"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.GetOrCompose(ctx, AgentKey{Agent: "a2", Owner: "alice"}); err != nil {
+	if _, err := cache.GetOrCompose(ctx, AgentKey{Agent: "a2", Owner: "alice", Name: "a2"}); err != nil {
 		t.Fatal(err)
 	}
 	// Insert third — a1 should be evicted (LRU at cap=2).
-	if _, err := cache.GetOrCompose(ctx, AgentKey{Agent: "a3", Owner: "alice"}); err != nil {
+	if _, err := cache.GetOrCompose(ctx, AgentKey{Agent: "a3", Owner: "alice", Name: "a3"}); err != nil {
 		t.Fatal(err)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if _, ok := cache.entries[AgentKey{Agent: "a1", Owner: "alice"}]; ok {
+	if _, ok := cache.entries[AgentKey{Agent: "a1", Owner: "alice", Name: "a1"}]; ok {
 		t.Errorf("a1 should have been evicted")
 	}
 	if cache.lru.Len() != 2 {
@@ -115,11 +115,22 @@ func TestCache_LRUEviction(t *testing.T) {
 	}
 }
 
+func TestCache_ComposerAccessor(t *testing.T) {
+	cache, _ := newTestCache(t, time.Minute, 8)
+	if cache.Composer() == nil {
+		t.Fatal("Composer() returned nil for live cache")
+	}
+	var nilCache *Cache
+	if nilCache.Composer() != nil {
+		t.Fatal("nil-cache Composer() should be nil")
+	}
+}
+
 func TestCache_Concurrent(t *testing.T) {
 	cache, nc := newTestCache(t, time.Minute, 8)
 	registerStubAgent(t, nc, "echo", "alice", "r", "c")
 
-	key := AgentKey{Agent: "echo", Owner: "alice"}
+	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	var wg sync.WaitGroup
 	var ok int32
 	for i := 0; i < 20; i++ {

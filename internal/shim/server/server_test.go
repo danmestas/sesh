@@ -20,6 +20,7 @@ import (
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
+	"github.com/danmestas/sesh/internal/subject"
 )
 
 // startBroker spins up an in-memory nats-server with JetStream enabled on
@@ -90,7 +91,7 @@ func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, jetstream.J
 		Signer:    signer,
 		NC:        nc,
 		JS:        js2,
-		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner"},
+		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner", Name: "test-agent"},
 		ScopeKind: "project",
 		ScopeID:   "abc123",
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -312,12 +313,127 @@ func TestA2A_GetTask_BucketMissing(t *testing.T) {
 }
 
 func TestA2A_GetExtendedAgentCard(t *testing.T) {
+	// Slice 1 behavior: no adapter responder on agents.card.extended.*,
+	// so the handler's FetchExtended times out within the composer's
+	// 200ms queryWindow and -32007 surfaces. Slice 5 preserves this
+	// path for the "no adapter" steady state.
 	url, _, _, _, _ := newTestServer(t)
 	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"GetExtendedAgentCard"}`)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d", status)
 	}
 	assertRPCError(t, body, -32007, "AuthenticatedExtendedCardNotConfiguredError")
+}
+
+// TestA2A_GetExtendedAgentCard_HappyPath wires an adapter stub that
+// responds on agents.card.extended.* and asserts the shim returns a
+// signed card whose description was overlaid from the L3 partial.
+func TestA2A_GetExtendedAgentCard_HappyPath(t *testing.T) {
+	url, _, _, _, nc := newTestServer(t)
+	// AgentKey matches the one wired in newTestServer.
+	subj, err := subject.CardExtended("test-agent", "test-owner", "test-agent")
+	if err != nil {
+		t.Fatalf("subject: %v", err)
+	}
+	sub, err := nc.Subscribe(subj, func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{
+			"description": "extended-only desc",
+			"skills": [{"id":"adv","name":"Adv","description":"d","tags":["t"]}]
+		}`))
+	})
+	if err != nil {
+		t.Fatalf("subscribe %s: %v", subj, err)
+	}
+	defer sub.Unsubscribe()
+
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":2,"method":"GetExtendedAgentCard"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d body=%s", status, body)
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int    `json:"code"`
+			Name string `json:"name"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode envelope: %v body=%s", err, body)
+	}
+	if env.Error != nil {
+		t.Fatalf("expected result, got error: %+v body=%s", env.Error, body)
+	}
+	// `result` is a json.RawMessage encoded as a JSON-quoted string of
+	// the signed card bytes (since the marshaler stringifies
+	// RawMessage). The shim returns the RawMessage directly, which
+	// the JSON-RPC envelope serializes as the inner JSON object.
+	var card map[string]any
+	if err := json.Unmarshal(env.Result, &card); err != nil {
+		t.Fatalf("decode card: %v result=%s", err, env.Result)
+	}
+	if card["description"] != "extended-only desc" {
+		t.Errorf("description = %v, want extended-only desc", card["description"])
+	}
+	if _, ok := card["signatures"]; !ok {
+		t.Errorf("signed card missing signatures field")
+	}
+}
+
+// TestA2A_GetExtendedAgentCard_NoAdapter_Returns32007 explicitly
+// covers the "principal authorized but adapter silent" branch and
+// asserts the response is the same -32007 the unauthorized case
+// produces — clients should not be able to probe "this exists but
+// I can't see it" vs "this doesn't exist".
+func TestA2A_GetExtendedAgentCard_NoAdapter_Returns32007(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":3,"method":"GetExtendedAgentCard"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32007, "AuthenticatedExtendedCardNotConfiguredError")
+}
+
+// TestA2A_AgentCard_IncludesL3_OnFreshFetch confirms the public
+// /.well-known/agent-card.json endpoint pulls L3 contributions from
+// the adapter via agents.card.get.*. Uses a unique scope-id to avoid
+// cross-test cache contamination through the embedded broker
+// (newTestServer creates a fresh broker per test, so a fresh cache).
+func TestA2A_AgentCard_IncludesL3_OnFreshFetch(t *testing.T) {
+	url, _, _, _, nc := newTestServer(t)
+	subj, err := subject.CardGet("test-agent", "test-owner", "test-agent")
+	if err != nil {
+		t.Fatalf("subject: %v", err)
+	}
+	sub, err := nc.Subscribe(subj, func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{
+			"description": "public L3 description",
+			"iconUrl": "https://x/icon.png"
+		}`))
+	})
+	if err != nil {
+		t.Fatalf("subscribe %s: %v", subj, err)
+	}
+	defer sub.Unsubscribe()
+
+	resp, err := newTLSClient().Get(url + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode card: %v body=%s", err, body)
+	}
+	if raw["description"] != "public L3 description" {
+		t.Errorf("description = %v, want L3 value", raw["description"])
+	}
+	if raw["iconUrl"] != "https://x/icon.png" {
+		t.Errorf("iconUrl = %v, want L3 value", raw["iconUrl"])
+	}
 }
 
 func TestA2A_UnknownMethod(t *testing.T) {
@@ -546,7 +662,7 @@ func newTestServerWithAuth(t *testing.T, v auth.Validator) string {
 		Signer:    signer,
 		NC:        nc,
 		JS:        js2,
-		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner"},
+		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner", Name: "test-agent"},
 		ScopeKind: "project",
 		ScopeID:   "abc123",
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -615,7 +731,7 @@ func baseRunCfg(t *testing.T) Config {
 		Signer:        signer,
 		NC:            nc,
 		JS:            js2,
-		AgentKey:      card.AgentKey{Agent: "test", Owner: "test"},
+		AgentKey:      card.AgentKey{Agent: "test", Owner: "test", Name: "test"},
 		ScopeKind:     "project",
 		ScopeID:       "abc",
 		ShutdownGrace: 500 * time.Millisecond,

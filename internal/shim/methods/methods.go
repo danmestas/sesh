@@ -33,6 +33,13 @@ type Deps struct {
 	Machine   string
 	Log       *slog.Logger
 
+	// Composer + Signer are required by GetExtendedAgentCard (Slice 5),
+	// which composes per-request rather than going through the
+	// public-card cache. Other handlers may leave them nil — Dispatch
+	// itself doesn't consult them.
+	Composer *card.Composer
+	Signer   *card.Signer
+
 	// KeepaliveInterval is the SSE keepalive comment cadence for
 	// SendStreamingMessage + SubscribeToTask. Zero means default (25s).
 	// Tests inject a short interval to make keepalive observable

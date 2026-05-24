@@ -23,7 +23,7 @@ type CLI struct {
 	WorkerCwd   seshcli.WorkerCwdCmd   `cmd:"" name:"worker-cwd" help:"Print the absolute fossil checkout path for <label>. Read-only — does not provision; pair with 'sesh worktree' once up front."`
 	Materialize seshcli.MaterializeCmd `cmd:"" help:"Overlay the fossil trunk HEAD for <label> into a git worktree (default: cwd). The fossil→git bridge for mission-complete materialization."`
 	Hub         seshcli.HubCmd         `cmd:"" help:"sesh hub serve runs the user-level hub daemon at ~/.sesh/"`
-	Mesh        seshcli.MeshCmd        `cmd:"" help:"Inspect agents on the mesh — snapshot table by default"`
+	Mesh        seshcli.MeshGroup      `cmd:"" help:"Inspect the mesh — list agents (default) or fetch one adapter's AgentCard"`
 }
 
 func main() {

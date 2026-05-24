@@ -36,6 +36,7 @@ type CLI struct {
 	JWKSURL       string        `name:"jwks-url" env:"SESH_SHIM_JWKS_URL" help:"Upstream JWKS URL for JWT validation; required when --auth=jwt"`
 	Agent         string        `name:"agent" env:"SESH_SHIM_AGENT" help:"Adapter agent token to advertise (single-agent per shim, see Decision D1)"`
 	Owner         string        `name:"owner" env:"SESH_SHIM_OWNER" help:"Owner token to advertise"`
+	Name          string        `name:"name" env:"SESH_SHIM_NAME" help:"Adapter instance name (third subject token); defaults to --agent"`
 	ScopeKind     string        `name:"scope-kind" default:"project" env:"SESH_SHIM_SCOPE_KIND" help:"Task scope kind for KV bucket naming"`
 	ScopeID       string        `name:"scope-id" env:"SESH_SHIM_SCOPE_ID" help:"Task scope id for KV bucket naming"`
 	GatewayURL    string        `name:"gateway-url" env:"SESH_SHIM_GATEWAY_URL" help:"Public-facing URL advertised in the AgentCard"`
@@ -116,6 +117,15 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		return errors.New("--machine resolved empty after sanitization; set SESH_SHIM_MACHINE explicitly")
 	}
 
+	// --name is the third subject token in agents.card.get.<agent>.<owner>.<name>.
+	// Defaults to --agent so existing single-agent shim invocations keep
+	// working (the SDK's registerAgentCard typically uses name == agent
+	// when there's one instance per agent kind).
+	name := cli.Name
+	if name == "" {
+		name = cli.Agent
+	}
+
 	cfg := server.Config{
 		Listen:        cli.Listen,
 		TLSCert:       cli.TLSCert,
@@ -126,7 +136,7 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		Signer:        signer,
 		NC:            nc,
 		JS:            js,
-		AgentKey:      card.AgentKey{Agent: cli.Agent, Owner: cli.Owner},
+		AgentKey:      card.AgentKey{Agent: cli.Agent, Owner: cli.Owner, Name: name},
 		ScopeKind:     cli.ScopeKind,
 		ScopeID:       cli.ScopeID,
 		Machine:       machine,

@@ -88,6 +88,8 @@ func newServer(cfg Config) *server {
 		AgentKey:  cfg.AgentKey,
 		Machine:   cfg.Machine,
 		Log:       cfg.Logger,
+		Composer:  cfg.Card.Composer(),
+		Signer:    cfg.Signer,
 	})
 	return s
 }
