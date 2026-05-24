@@ -5,6 +5,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -171,14 +172,23 @@ func (d *Dispatcher) publishPromptV2(raw json.RawMessage) {
 	if role == "" {
 		return
 	}
-	// TODO Slice 4+: distinguish project from session once scope plumbing
-	// has both. v0.4 ships session-scoped only, so Project=Session=ScopeID
-	// is intentional — the subject reads as `agents.prompt.v2.<m>.<s>.<s>.<r>`
-	// and adapters subscribe with the matching coord. Don't copy-paste-flag.
+	// Session scope-ids of the form "<project>.<session>" contain '.',
+	// which subject.PromptV2's validateToken rejects. Sanitize by
+	// replacing '.' with '_' — mirrors sesh-ops/scope.Bucket and the
+	// sesh-channels SDK's matching sanitization. Adapters apply the
+	// same rule on subscribe, so both sides converge on the same
+	// subject string.
+	//
+	// v0.4 ships session-scoped only, so Project=Session=ScopeID is
+	// intentional — the subject reads as
+	// `agents.prompt.v2.<m>.<s>.<s>.<r>` and adapters subscribe with
+	// the matching coord. Project/session split lands when scope
+	// plumbing carries both independently.
+	token := sanitizeScopeToken(d.deps.ScopeID)
 	subj, err := subject.PromptV2(subject.Coord{
 		Machine: d.deps.Machine,
-		Project: d.deps.ScopeID,
-		Session: d.deps.ScopeID,
+		Project: token,
+		Session: token,
 		Role:    role,
 	})
 	if err != nil {
@@ -188,6 +198,15 @@ func (d *Dispatcher) publishPromptV2(raw json.RawMessage) {
 	if err := d.deps.NC.Publish(subj, raw); err != nil {
 		d.deps.Log.Warn("sendMessage: publish prompt", "subj", subj, "err", err)
 	}
+}
+
+// sanitizeScopeToken makes a scope-id safe to use as a single NATS
+// subject token. Mirrors sesh-ops/scope's sanitize rule narrowed to
+// the only character that's both valid in a scope-id and invalid in
+// a subject token: '.'. Single-segment scope-ids are returned
+// unchanged; dotted scope-ids like "acme.demo" become "acme_demo".
+func sanitizeScopeToken(s string) string {
+	return strings.ReplaceAll(s, ".", "_")
 }
 
 // newULID returns a new ULID string using crypto/rand for entropy

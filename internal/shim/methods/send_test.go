@@ -293,6 +293,53 @@ func TestSendMessage_InvalidParams(t *testing.T) {
 	}
 }
 
+// TestSendMessage_DottedScopeID_PublishesPromptV2 covers sesh#121:
+// a session-scoped shim has ScopeID = "<project>.<session>" which
+// contains '.', and subject.PromptV2 rejects tokens with '.'.
+// publishPromptV2 must sanitize ('.' -> '_') so the publish succeeds
+// and an adapter subscribed to the canonical sanitized subject wakes
+// up. Regression guard: prior to the fix this published nothing and
+// the adapter starved.
+func TestSendMessage_DottedScopeID_PublishesPromptV2(t *testing.T) {
+	deps, nc, _ := testDeps(t)
+	deps.ScopeKind = "session"
+	deps.ScopeID = "acme.demo"
+	disp := NewDispatcher(deps)
+	ctx, cancel := mustCtx(t)
+	defer cancel()
+
+	// Subscribe to the exact sanitized subject we expect.
+	wantSubj := "agents.prompt.v2.test-machine.acme_demo.acme_demo.test-agent"
+	got := make(chan *nats.Msg, 1)
+	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
+		select {
+		case got <- m:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Unsubscribe()
+
+	params := json.RawMessage(`{"message":{"messageId":"M-DOT","role":"ROLE_USER","parts":[{"text":"x"}]}}`)
+	if _, jerr := disp.sendMessage(ctx, params); jerr != nil {
+		t.Fatalf("sendMessage with dotted scope-id: %+v", jerr)
+	}
+
+	select {
+	case m := <-got:
+		if m.Subject != wantSubj {
+			t.Errorf("publish subject = %q, want %q", m.Subject, wantSubj)
+		}
+		if !bytes.Contains(m.Data, []byte(`"messageId":"M-DOT"`)) {
+			t.Errorf("publish payload missing messageId: %s", m.Data)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("no publish on sanitized subject %q (sesh#121 regression — dotted scope-id should be sanitized)", wantSubj)
+	}
+}
+
 // TestSendMessage_PublishNoOp_WhenAgentEmpty verifies that when no
 // agent token is configured (so publishPromptV2 early-returns), the
 // SendMessage path still completes successfully — i.e., the publish

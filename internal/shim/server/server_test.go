@@ -17,6 +17,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nats.go/micro"
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
@@ -398,8 +399,30 @@ func TestA2A_GetExtendedAgentCard_NoAdapter_Returns32007(t *testing.T) {
 // the adapter via agents.card.get.*. Uses a unique scope-id to avoid
 // cross-test cache contamination through the embedded broker
 // (newTestServer creates a fresh broker per test, so a fresh cache).
+//
+// Post-sesh#122: Compose only fetches L3 when discover() matched an
+// adapter via $SRV.INFO, so this test registers a stub $SRV.INFO
+// responder that matches the shim's AgentKey before stubbing the L3
+// reply.
 func TestA2A_AgentCard_IncludesL3_OnFreshFetch(t *testing.T) {
 	url, _, _, _, nc := newTestServer(t)
+
+	// Register a $SRV.INFO responder so Compose's discover() finds a
+	// match; otherwise the L3 fetch is (correctly) skipped.
+	svc, err := micro.AddService(nc, micro.Config{
+		Name:        "agents",
+		Version:     "9.9.9",
+		Description: "stub for server L3 test",
+		Metadata: map[string]string{
+			"agent": "test-agent",
+			"owner": "test-owner",
+		},
+	})
+	if err != nil {
+		t.Fatalf("add service: %v", err)
+	}
+	defer svc.Stop()
+
 	subj, err := subject.CardGet("test-agent", "test-owner", "test-agent")
 	if err != nil {
 		t.Fatalf("subject: %v", err)

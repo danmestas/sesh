@@ -493,6 +493,117 @@ func TestComposer_FetchExtended_Timeout(t *testing.T) {
 	}
 }
 
+// registerStubAgentWithName extends registerStubAgent with a metadata
+// "name" key, so tests can exercise the Name-token side of
+// resolveSubjectTokens (sesh#122).
+func registerStubAgentWithName(t *testing.T, nc *nats.Conn, agent, owner, name, role, class string) {
+	t.Helper()
+	svc, err := micro.AddService(nc, micro.Config{
+		Name:        "agents",
+		Version:     "0.0.0",
+		Description: "stub for composer test",
+		Metadata: map[string]string{
+			"agent":       agent,
+			"owner":       owner,
+			"name":        name,
+			"role":        role,
+			"class":       class,
+			"harness_ver": "9.9.9",
+		},
+	})
+	if err != nil {
+		t.Fatalf("add service: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop() })
+}
+
+// TestComposer_L3_UsesAdapterAdvertisedAgentToken covers sesh#122:
+// the operator's AgentKey may differ from what the adapter
+// advertises in $SRV.INFO metadata. Compose's L3 fetch must build
+// the subject from the discovered metadata, not the operator-side
+// key.
+//
+// The shim's discover() filters $SRV.INFO replies by (agent, owner)
+// equality, so any divergence has to be on a non-filtered field —
+// the `name` token. Operators that pass --name=claude-code may
+// connect to an adapter whose registerAgentCard call advertised
+// name=cc-instance-1. Pre-fix the L3 subject was
+// agents.card.get.<agent>.<owner>.claude-code (no responder).
+// Post-fix it's agents.card.get.<agent>.<owner>.cc-instance-1.
+func TestComposer_L3_UsesAdapterAdvertisedAgentToken(t *testing.T) {
+	url := startTestNATS(t)
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+
+	const operatorName = "claude-code"
+	const advertisedName = "cc-instance-1"
+	registerStubAgentWithName(t, nc, "cc", "alice", advertisedName, "implementer", "cc")
+
+	key := AgentKey{Agent: "cc", Owner: "alice", Name: operatorName}
+
+	// Stub L3 reply ONLY on the adapter-advertised subject; if the
+	// shim still keys off the operator's Name, this responder never
+	// fires and Skills stays empty.
+	stubL3Reply(t, nc, mustCardGet(t, AgentKey{Agent: "cc", Owner: "alice", Name: advertisedName}), []byte(`{
+		"skills": [{"id":"cc.echo","name":"CC Echo","description":"d","tags":["t"]}]
+	}`))
+
+	c := NewComposer(nc, defaultL1(), 500*time.Millisecond, silentLogger())
+	card, err := c.Compose(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Skills) != 1 || card.Skills[0].ID != "cc.echo" {
+		t.Errorf("Skills = %+v, want one skill cc.echo (proves shim used adapter's advertised name token, not operator's --name flag)", card.Skills)
+	}
+}
+
+// TestResolveSubjectTokens unit-tests the helper used by Compose +
+// FetchExtended to merge $SRV.INFO metadata with the fallback key.
+// Metadata wins per-field when present; falls back to key when a
+// field is absent.
+func TestResolveSubjectTokens(t *testing.T) {
+	fallback := AgentKey{Agent: "op-agent", Owner: "op-owner", Name: "op-name"}
+
+	cases := []struct {
+		name string
+		md   map[string]string
+		want AgentKey
+	}{
+		{
+			name: "all metadata present overrides fallback",
+			md:   map[string]string{"agent": "md-agent", "owner": "md-owner", "name": "md-name"},
+			want: AgentKey{Agent: "md-agent", Owner: "md-owner", Name: "md-name"},
+		},
+		{
+			name: "empty metadata falls back to key",
+			md:   map[string]string{},
+			want: fallback,
+		},
+		{
+			name: "partial metadata (name absent) falls back to key.Name",
+			md:   map[string]string{"agent": "md-agent", "owner": "md-owner"},
+			want: AgentKey{Agent: "md-agent", Owner: "md-owner", Name: "op-name"},
+		},
+		{
+			name: "empty-string metadata values fall back to key",
+			md:   map[string]string{"agent": "", "owner": "", "name": ""},
+			want: fallback,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveSubjectTokens(microInfo{Metadata: tc.md}, fallback)
+			if got != tc.want {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestComposer_FetchExtended_PubliccardGetUnused(t *testing.T) {
 	// Confirm FetchExtended hits agents.card.extended.* not agents.card.get.*.
 	url := startTestNATS(t)
