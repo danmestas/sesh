@@ -507,6 +507,17 @@ func TestServiceRegistration(t *testing.T) {
 		got.Metadata["session"] != "demo" || got.Metadata["protocol_version"] != "0.3" {
 		t.Errorf("metadata wrong: %+v", got.Metadata)
 	}
+	// v0.4 metadata-key convention (design doc §8): namespaced
+	// sesh.protocol_version must mirror the legacy unnamespaced
+	// protocol_version, and sesh.v04_capabilities must be ABSENT to
+	// signal "no v0.4 capabilities" — ref-agent serves v0.3 wire format.
+	if got.Metadata["sesh.protocol_version"] != "0.3" {
+		t.Errorf("sesh.protocol_version=%q want 0.3", got.Metadata["sesh.protocol_version"])
+	}
+	if _, ok := got.Metadata["sesh.v04_capabilities"]; ok {
+		t.Errorf("sesh.v04_capabilities must be absent for v0.3 ref-agent; got %q",
+			got.Metadata["sesh.v04_capabilities"])
+	}
 
 	wantEndpoints := map[string]string{
 		"prompt": "agents.prompt.echo.alice.demo",
