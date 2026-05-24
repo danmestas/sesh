@@ -88,12 +88,23 @@ func NewComposer(nc *nats.Conn, l1 L1Defaults, queryWindow time.Duration, log *s
 // skeleton; L2 comes from $SRV.INFO; L3 comes from a window-bounded
 // request to agents.card.get.<agent>.<owner>.<name>. Returns a card
 // even on full L2 and L3 absence — a card is always producible.
+//
+// L3 subject tokens come from the discovered adapter's $SRV.INFO
+// metadata, not from `key` directly. The operator's `--agent` flag
+// (e.g. "claude-code") may differ from the token the adapter
+// advertises (e.g. "cc"). Using `key.Agent` here would aim L3 at a
+// subject no responder owns. See sesh#122.
 func (c *Composer) Compose(ctx context.Context, key AgentKey) (*a2a.AgentCard, error) {
-	card, err := c.ComposeBase(ctx, key)
-	if err != nil {
-		return nil, err
+	card := c.l1Card()
+	info, found := c.discover(ctx, key)
+	if !found {
+		c.log.Warn("composer: no $SRV.INFO match", "agent", key.Agent, "owner", key.Owner, "name", key.Name)
+		card.Name = key.Agent
+		return card, nil
 	}
-	if partial, found := c.fetchL3(ctx, key, false); found {
+	c.applyL2(card, info)
+	resolved := resolveSubjectTokens(info, key)
+	if partial, ok := c.fetchL3(ctx, resolved, false); ok {
 		c.applyL3(card, partial)
 	}
 	return card, nil
@@ -118,8 +129,37 @@ func (c *Composer) ComposeBase(ctx context.Context, key AgentKey) (*a2a.AgentCar
 // returns the parsed cardPartial on a successful reply. Caller passes
 // the result through ApplyPartial to overlay onto a previously composed
 // base card.
+//
+// Per sesh#122 the L3 subject must be built from the adapter's
+// advertised tokens, not the operator's `key`. Discover first; if a
+// match is found, use its metadata for the subject. If no $SRV.INFO
+// match, fall back to the caller's key tokens — preserves the legacy
+// path for adapters that haven't been observed via $SRV.INFO yet.
 func (c *Composer) FetchExtended(ctx context.Context, key AgentKey) (cardPartial, bool) {
-	return c.fetchL3(ctx, key, true)
+	resolved := key
+	if info, found := c.discover(ctx, key); found {
+		resolved = resolveSubjectTokens(info, key)
+	}
+	return c.fetchL3(ctx, resolved, true)
+}
+
+// resolveSubjectTokens returns the (Agent, Owner, Name) triple that
+// the L3 subject should be built from. Prefers the adapter's
+// $SRV.INFO metadata so the resulting subject matches whatever the
+// adapter registered its card endpoint under. Falls back to the
+// caller's key when a particular metadata field is absent.
+func resolveSubjectTokens(info microInfo, fallback AgentKey) AgentKey {
+	out := fallback
+	if v := info.Metadata["agent"]; v != "" {
+		out.Agent = v
+	}
+	if v := info.Metadata["owner"]; v != "" {
+		out.Owner = v
+	}
+	if v := info.Metadata["name"]; v != "" {
+		out.Name = v
+	}
+	return out
 }
 
 // ApplyPartial overlays partial onto card per the L3 merge rules
