@@ -11,6 +11,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/nats-io/nats-server/v2 v2.14.1
 	github.com/nats-io/nats.go v1.51.0
+	github.com/oklog/ulid/v2 v2.1.0
 	golang.org/x/term v0.43.0
 )
 

@@ -14,12 +14,14 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/danmestas/sesh-ops/scope"
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
+	"github.com/danmestas/sesh/internal/shim/methods"
 )
 
 // Config wires the shim's HTTP server to its collaborators. All fields
@@ -37,14 +39,16 @@ type Config struct {
 	AgentKey      card.AgentKey
 	ScopeKind     string
 	ScopeID       string
+	Machine       string
 	Logger        *slog.Logger
 	ShutdownGrace time.Duration
 }
 
 // server holds the mutable runtime state (counters) behind the http.Handler.
 type server struct {
-	cfg Config
-	log *slog.Logger
+	cfg        Config
+	log        *slog.Logger
+	dispatcher *methods.Dispatcher
 
 	mu            sync.Mutex
 	httpReqs      map[httpKey]uint64
@@ -68,12 +72,34 @@ func newServer(cfg Config) *server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &server{
+	s := &server{
 		cfg:         cfg,
 		log:         cfg.Logger,
 		httpReqs:    map[httpKey]uint64{},
 		jsonrpcErrs: map[jsonrpcErrKey]uint64{},
 	}
+	// Derive the jetstream v2 client from the same nats.Conn used for
+	// the legacy JetStreamContext. methods packages (and sesh-ops
+	// messages/artifacts) speak the v2 API.
+	var js2 jetstream.JetStream
+	if cfg.NC != nil {
+		if v, err := jetstream.New(cfg.NC); err == nil {
+			js2 = v
+		} else {
+			s.log.Warn("server: jetstream.New failed; v2 ops disabled", "err", err)
+		}
+	}
+	s.dispatcher = methods.NewDispatcher(methods.Deps{
+		NC:        cfg.NC,
+		JetStream: cfg.JetStream,
+		JS:        js2,
+		ScopeKind: cfg.ScopeKind,
+		ScopeID:   cfg.ScopeID,
+		AgentKey:  cfg.AgentKey,
+		Machine:   cfg.Machine,
+		Log:       cfg.Logger,
+	})
+	return s
 }
 
 // New constructs the *http.Server with all routes mounted. Caller owns
@@ -379,7 +405,17 @@ func (s *server) handleA2A(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, jerr := s.dispatch(r.Context(), req.Method, req.Params)
+	if s.dispatcher.IsStreaming(req.Method) {
+		switch req.Method {
+		case methods.MethodSendStreamingMessage:
+			s.dispatcher.SendStreamingMessage(w, r, req.Params)
+		case methods.MethodSubscribeToTask:
+			s.dispatcher.SubscribeToTask(w, r, req.Params)
+		}
+		return
+	}
+
+	result, jerr := s.dispatcher.Dispatch(r.Context(), req.Method, req.Params)
 	if jerr != nil {
 		s.incJSONRPCErr(jerr.Code, jerr.Name)
 		jsonrpc.WriteError(w, req.ID, jerr)
