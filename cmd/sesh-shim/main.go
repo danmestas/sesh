@@ -39,6 +39,7 @@ type CLI struct {
 	ScopeKind     string        `name:"scope-kind" default:"project" env:"SESH_SHIM_SCOPE_KIND" help:"Task scope kind for KV bucket naming"`
 	ScopeID       string        `name:"scope-id" env:"SESH_SHIM_SCOPE_ID" help:"Task scope id for KV bucket naming"`
 	GatewayURL    string        `name:"gateway-url" env:"SESH_SHIM_GATEWAY_URL" help:"Public-facing URL advertised in the AgentCard"`
+	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the first segment of agents.prompt.v2.*; falls back to os.Hostname() if empty"`
 	Dev           bool          `name:"dev" env:"SESH_SHIM_DEV" help:"Enable dev mode: self-signed TLS + ephemeral signing key permitted"`
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"5s" env:"SESH_SHIM_SHUTDOWN_GRACE" help:"Max drain/shutdown wait"`
 }
@@ -105,6 +106,21 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 	}, 500*time.Millisecond, log)
 	cache := card.NewCache(composer, signer, 5*time.Minute, 64)
 
+	machine := cli.Machine
+	if machine == "" {
+		if h, err := os.Hostname(); err == nil {
+			machine = h
+		}
+	}
+	// Sanitize for the subject-token contract (no `.`, no whitespace,
+	// no `*`/`>`). macOS hostnames like "Dans-MacBook-Pro.local" would
+	// otherwise silently break SendMessage's prompt publish path. Replace
+	// reserved chars; if the result is still empty, fail fast.
+	machine = sanitizeMachineToken(machine)
+	if machine == "" {
+		return errors.New("--machine resolved empty after sanitization; set SESH_SHIM_MACHINE explicitly")
+	}
+
 	cfg := server.Config{
 		Listen:        cli.Listen,
 		TLSCert:       cli.TLSCert,
@@ -118,6 +134,7 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		AgentKey:      card.AgentKey{Agent: cli.Agent, Owner: cli.Owner},
 		ScopeKind:     cli.ScopeKind,
 		ScopeID:       cli.ScopeID,
+		Machine:       machine,
 		Logger:        log,
 		ShutdownGrace: cli.ShutdownGrace,
 	}
@@ -190,4 +207,23 @@ func resolveNATSURL(explicit string) (string, error) {
 		return "", fmt.Errorf("%s is empty", path)
 	}
 	return url, nil
+}
+
+// sanitizeMachineToken replaces any rune that subject.validateToken
+// rejects (., whitespace, *, >) with `-`. macOS `os.Hostname()` like
+// "Dans-MacBook-Pro.local" otherwise yields a token that silently
+// breaks SendMessage's NATS publish path.
+func sanitizeMachineToken(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '.', r == '*', r == '>':
+			b.WriteByte('-')
+		case r == ' ', r == '\t', r == '\n', r == '\r':
+			b.WriteByte('-')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
