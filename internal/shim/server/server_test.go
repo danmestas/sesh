@@ -16,6 +16,7 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
@@ -58,15 +59,15 @@ func testConn(t *testing.T, url string) *nats.Conn {
 // and exposes it via httptest.NewTLSServer (which provides its own TLS).
 // Caller gets back the URL, the *card.Cache (for asserting on signed
 // bytes), the *card.Signer (for verifying signatures), and the
-// JetStreamContext (for seeding KV).
-func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, nats.JetStreamContext, *nats.Conn) {
+// jetstream.JetStream v2 client (for seeding KV).
+func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, jetstream.JetStream, *nats.Conn) {
 	t.Helper()
 
 	url := startBroker(t)
 	nc := testConn(t, url)
-	js, err := nc.JetStream()
+	js2, err := jetstream.New(nc)
 	if err != nil {
-		t.Fatalf("jetstream: %v", err)
+		t.Fatalf("jetstream v2: %v", err)
 	}
 
 	signer, err := card.NewDevSigner()
@@ -88,7 +89,7 @@ func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, nats.JetStr
 		Card:      cache,
 		Signer:    signer,
 		NC:        nc,
-		JetStream: js,
+		JS:        js2,
 		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner"},
 		ScopeKind: "project",
 		ScopeID:   "abc123",
@@ -105,7 +106,7 @@ func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, nats.JetStr
 
 	ts := httptest.NewTLSServer(mux)
 	t.Cleanup(ts.Close)
-	return ts.URL, cache, signer, js, nc
+	return ts.URL, cache, signer, js2, nc
 }
 
 func newTLSClient() *http.Client {
@@ -257,12 +258,13 @@ func postJSONRPC(t *testing.T, url string, body string) (int, []byte) {
 
 func TestA2A_GetTask_Happy(t *testing.T) {
 	url, _, _, js, _ := newTestServer(t)
-	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	taskJSON := []byte(`{"id":"t-1","kind":"task","status":{"state":"submitted"}}`)
-	if _, err := kv.Put("t-1", taskJSON); err != nil {
+	if _, err := kv.Put(ctx, "t-1", taskJSON); err != nil {
 		t.Fatal(err)
 	}
 	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":7,"method":"GetTask","params":{"id":"t-1"}}`)
@@ -290,7 +292,7 @@ func TestA2A_GetTask_Happy(t *testing.T) {
 func TestA2A_GetTask_NotFound(t *testing.T) {
 	url, _, _, js, _ := newTestServer(t)
 	// Create bucket but no key so we hit ErrKeyNotFound.
-	if _, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"}); err != nil {
+	if _, err := js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"}); err != nil {
 		t.Fatal(err)
 	}
 	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"missing"}}`)
@@ -336,6 +338,227 @@ func TestA2A_MalformedJSON(t *testing.T) {
 	assertRPCError(t, body, -32700, "Parse error")
 }
 
+func TestA2A_CancelTask_Happy(t *testing.T) {
+	url, _, _, js, _ := newTestServer(t)
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.Put(ctx, "t-c", []byte(`{"id":"t-c","kind":"task","status":{"state":"TASK_STATE_SUBMITTED"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"CancelTask","params":{"id":"t-c"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int    `json:"code"`
+			Name string `json:"name"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if env.Error != nil {
+		t.Fatalf("got error: %+v", env.Error)
+	}
+	var probe struct {
+		Status struct {
+			State string `json:"state"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(env.Result, &probe); err != nil {
+		t.Fatalf("decode result: %v body=%s", err, env.Result)
+	}
+	if probe.Status.State != "TASK_STATE_CANCELED" {
+		t.Errorf("state = %q, want TASK_STATE_CANCELED", probe.Status.State)
+	}
+}
+
+func TestA2A_CancelTask_Terminal(t *testing.T) {
+	url, _, _, js, _ := newTestServer(t)
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.Put(ctx, "t-done", []byte(`{"id":"t-done","kind":"task","status":{"state":"TASK_STATE_COMPLETED"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"CancelTask","params":{"id":"t-done"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	assertRPCError(t, body, -32002, "TaskNotCancelableError")
+}
+
+func TestA2A_CancelTask_NotFound(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"CancelTask","params":{"id":"ghost"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32001, "TaskNotFoundError")
+}
+
+func TestA2A_ListTasks_Empty(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"ListTasks","params":{}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	var env struct {
+		Result struct {
+			Tasks         []json.RawMessage `json:"tasks"`
+			TotalSize     int               `json:"totalSize"`
+			NextPageToken string            `json:"nextPageToken"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if env.Error != nil {
+		t.Fatalf("got error: %v", env.Error)
+	}
+	if len(env.Result.Tasks) != 0 {
+		t.Errorf("Tasks len = %d, want 0", len(env.Result.Tasks))
+	}
+}
+
+func TestA2A_ListTasks_Populated(t *testing.T) {
+	url, _, _, js, _ := newTestServer(t)
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		payload := []byte(`{"id":"` + id + `","kind":"task","status":{"state":"TASK_STATE_SUBMITTED"}}`)
+		if _, err := kv.Put(ctx, id, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"ListTasks","params":{}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	var env struct {
+		Result struct {
+			Tasks     []json.RawMessage `json:"tasks"`
+			TotalSize int               `json:"totalSize"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if env.Error != nil {
+		t.Fatalf("got error: %v", env.Error)
+	}
+	if len(env.Result.Tasks) != 3 {
+		t.Errorf("Tasks len = %d, want 3", len(env.Result.Tasks))
+	}
+	if env.Result.TotalSize != 3 {
+		t.Errorf("TotalSize = %d, want 3", env.Result.TotalSize)
+	}
+}
+
+// TestA2A_ListTasks_NoReadScope exercises the binary scope-gate using
+// a Validator that hands out a Principal with NO scopes. The auth
+// middleware still attaches it, listTasks then returns an empty list
+// (HTTP 200, no JSON-RPC error).
+func TestA2A_ListTasks_NoReadScope(t *testing.T) {
+	url := newTestServerWithAuth(t, noScopeValidator{})
+	ctx := context.Background()
+	_ = ctx
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"ListTasks","params":{}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	var env struct {
+		Result struct {
+			Tasks []json.RawMessage `json:"tasks"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if env.Error != nil {
+		t.Fatalf("got error: %v", env.Error)
+	}
+	if len(env.Result.Tasks) != 0 {
+		t.Errorf("Tasks len = %d, want 0 (no agent.read scope)", len(env.Result.Tasks))
+	}
+}
+
+// noScopeValidator returns a Principal with no scopes, so the scope-gate
+// in listTasks must trip even though the HTTP request is "authenticated".
+type noScopeValidator struct{}
+
+func (noScopeValidator) Validate(r *http.Request) (auth.Principal, error) {
+	return auth.Principal{Sub: "no-scope"}, nil
+}
+
+// newTestServerWithAuth duplicates newTestServer's wiring but lets the
+// caller install a non-default Validator (used by the no-scope ListTasks
+// case where NoopValidator's hard-coded scopes would defeat the check).
+func newTestServerWithAuth(t *testing.T, v auth.Validator) string {
+	t.Helper()
+
+	url := startBroker(t)
+	nc := testConn(t, url)
+	js2, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("jetstream v2: %v", err)
+	}
+	// Seed a task so the scope-gate, not "empty bucket", is what trips.
+	bucket := "sesh_tasks_project_abc123"
+	kv, err := js2.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{Bucket: bucket})
+	if err != nil {
+		t.Fatalf("create kv: %v", err)
+	}
+	if _, err := kv.Put(context.Background(), "t-1", []byte(`{"id":"t-1","status":{"state":"TASK_STATE_SUBMITTED"}}`)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	signer, err := card.NewDevSigner()
+	if err != nil {
+		t.Fatalf("dev signer: %v", err)
+	}
+	composer := card.NewComposer(nc, card.L1Defaults{
+		GatewayURL:         "https://shim.test",
+		ProtocolVersion:    "1.0",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+	}, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache := card.NewCache(composer, signer, time.Minute, 16)
+
+	srv := newServer(Config{
+		Listen:    "127.0.0.1:0",
+		Dev:       true,
+		Auth:      v,
+		Card:      cache,
+		Signer:    signer,
+		NC:        nc,
+		JS:        js2,
+		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner"},
+		ScopeKind: "project",
+		ScopeID:   "abc123",
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /a2a", auth.Middleware(srv.cfg.Auth)(srv.wrapHandler("/a2a", http.HandlerFunc(srv.handleA2A))))
+	ts := httptest.NewTLSServer(mux)
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
 func TestA2A_BodyTooLarge_Returns413(t *testing.T) {
 	url, _, _, _, _ := newTestServer(t)
 	// 1 MiB cap + a bit; the cap is enforced inside handleA2A via
@@ -369,7 +592,7 @@ func baseRunCfg(t *testing.T) Config {
 	t.Helper()
 	url := startBroker(t)
 	nc := testConn(t, url)
-	js, err := nc.JetStream()
+	js2, err := jetstream.New(nc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +614,7 @@ func baseRunCfg(t *testing.T) Config {
 		Card:          cache,
 		Signer:        signer,
 		NC:            nc,
-		JetStream:     js,
+		JS:            js2,
 		AgentKey:      card.AgentKey{Agent: "test", Owner: "test"},
 		ScopeKind:     "project",
 		ScopeID:       "abc",

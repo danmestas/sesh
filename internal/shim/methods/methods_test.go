@@ -44,17 +44,12 @@ func testDeps(t *testing.T) (Deps, *nats.Conn, jetstream.JetStream) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(nc.Close)
-	js, err := nc.JetStream()
-	if err != nil {
-		t.Fatalf("legacy js: %v", err)
-	}
 	js2, err := jetstream.New(nc)
 	if err != nil {
 		t.Fatalf("v2 js: %v", err)
 	}
 	d := Deps{
 		NC:        nc,
-		JetStream: js,
 		JS:        js2,
 		ScopeKind: "project",
 		ScopeID:   "abc123",

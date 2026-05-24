@@ -25,7 +25,9 @@ import (
 )
 
 // Config wires the shim's HTTP server to its collaborators. All fields
-// except ShutdownGrace are required; ShutdownGrace defaults to 5s.
+// except ShutdownGrace are required; ShutdownGrace defaults to 5s. JS
+// is the jetstream.JetStream v2 client; main.go obtains it from
+// sesh-ops/conn.Connect.
 type Config struct {
 	Listen        string
 	TLSCert       string
@@ -35,7 +37,7 @@ type Config struct {
 	Card          *card.Cache
 	Signer        *card.Signer
 	NC            *nats.Conn
-	JetStream     nats.JetStreamContext
+	JS            jetstream.JetStream
 	AgentKey      card.AgentKey
 	ScopeKind     string
 	ScopeID       string
@@ -78,21 +80,9 @@ func newServer(cfg Config) *server {
 		httpReqs:    map[httpKey]uint64{},
 		jsonrpcErrs: map[jsonrpcErrKey]uint64{},
 	}
-	// Derive the jetstream v2 client from the same nats.Conn used for
-	// the legacy JetStreamContext. methods packages (and sesh-ops
-	// messages/artifacts) speak the v2 API.
-	var js2 jetstream.JetStream
-	if cfg.NC != nil {
-		if v, err := jetstream.New(cfg.NC); err == nil {
-			js2 = v
-		} else {
-			s.log.Warn("server: jetstream.New failed; v2 ops disabled", "err", err)
-		}
-	}
 	s.dispatcher = methods.NewDispatcher(methods.Deps{
 		NC:        cfg.NC,
-		JetStream: cfg.JetStream,
-		JS:        js2,
+		JS:        cfg.JS,
 		ScopeKind: cfg.ScopeKind,
 		ScopeID:   cfg.ScopeID,
 		AgentKey:  cfg.AgentKey,
@@ -195,6 +185,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.NC == nil {
 		return errors.New("server.Config: NC is required")
+	}
+	if cfg.JS == nil {
+		return errors.New("server.Config: JS is required")
 	}
 	hasCert := cfg.TLSCert != "" && cfg.TLSKey != ""
 	noCert := cfg.TLSCert == "" && cfg.TLSKey == ""

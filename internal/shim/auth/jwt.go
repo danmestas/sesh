@@ -44,6 +44,20 @@ func FromContext(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
+// installPrincipal is the low-level context-write used by Middleware
+// (and re-exported via ExportForTest_InstallPrincipal for the authtest
+// sibling subpackage).
+func installPrincipal(ctx context.Context, p Principal) context.Context {
+	return context.WithValue(ctx, ctxKey{}, p)
+}
+
+// ExportForTest_InstallPrincipal is a deliberately ugly name so any
+// production caller stands out in code review. Only authtest should
+// call it.
+func ExportForTest_InstallPrincipal(ctx context.Context, p Principal) context.Context {
+	return installPrincipal(ctx, p)
+}
+
 // AuthError carries the HTTP status that a Validator wants the middleware
 // to surface. Defaults to 401 if not provided.
 type AuthError struct {
@@ -72,8 +86,7 @@ func Middleware(v Validator) func(http.Handler) http.Handler {
 				http.Error(w, err.Error(), status)
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxKey{}, p)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(installPrincipal(r.Context(), p)))
 		})
 	}
 }

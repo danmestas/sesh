@@ -58,6 +58,7 @@ var (
 	ErrInvalidParams             = &Error{Code: -32602, Message: "Invalid params", Name: "Invalid params"}
 	ErrInternal                  = &Error{Code: -32603, Message: "Internal error", Name: "Internal error"}
 	ErrTaskNotFound              = &Error{Code: -32001, Message: "task not found", Name: "TaskNotFoundError"}
+	ErrTaskNotCancelable         = &Error{Code: -32002, Message: "task cannot be canceled", Name: "TaskNotCancelableError"}
 	ErrExtendedCardNotConfigured = &Error{Code: -32007, Message: "extended agent card not configured", Name: "AuthenticatedExtendedCardNotConfiguredError"}
 )
 
