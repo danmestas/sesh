@@ -1,0 +1,512 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+
+	"github.com/danmestas/sesh/internal/shim/auth"
+	"github.com/danmestas/sesh/internal/shim/card"
+)
+
+// startBroker spins up an in-memory nats-server with JetStream enabled on
+// a random port and returns its client URL. Mirrors the helper in
+// internal/refagent/agent_test.go.
+func startBroker(t *testing.T) string {
+	t.Helper()
+	opts := &natsserver.Options{
+		Host:      "127.0.0.1",
+		Port:      -1,
+		JetStream: true,
+		StoreDir:  t.TempDir(),
+	}
+	srv, err := natsserver.NewServer(opts)
+	if err != nil {
+		t.Fatalf("nats server new: %v", err)
+	}
+	go srv.Start()
+	if !srv.ReadyForConnections(5 * time.Second) {
+		t.Fatalf("nats server not ready")
+	}
+	t.Cleanup(srv.Shutdown)
+	return srv.ClientURL()
+}
+
+func testConn(t *testing.T, url string) *nats.Conn {
+	t.Helper()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("nats.Connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	return nc
+}
+
+// newTestServer wires the full shim stack against an embedded NATS broker
+// and exposes it via httptest.NewTLSServer (which provides its own TLS).
+// Caller gets back the URL, the *card.Cache (for asserting on signed
+// bytes), the *card.Signer (for verifying signatures), and the
+// JetStreamContext (for seeding KV).
+func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, nats.JetStreamContext, *nats.Conn) {
+	t.Helper()
+
+	url := startBroker(t)
+	nc := testConn(t, url)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+
+	signer, err := card.NewDevSigner()
+	if err != nil {
+		t.Fatalf("dev signer: %v", err)
+	}
+	composer := card.NewComposer(nc, card.L1Defaults{
+		GatewayURL:         "https://shim.test",
+		ProtocolVersion:    "1.0",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+	}, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache := card.NewCache(composer, signer, time.Minute, 16)
+
+	srv := newServer(Config{
+		Listen:    "127.0.0.1:0",
+		Dev:       true,
+		Auth:      auth.NoopValidator{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Card:      cache,
+		Signer:    signer,
+		NC:        nc,
+		JetStream: js,
+		AgentKey:  card.AgentKey{Agent: "test-agent", Owner: "test-owner"},
+		ScopeKind: "project",
+		ScopeID:   "abc123",
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/agent-card.json", srv.wrap("/.well-known/agent-card.json", srv.handleAgentCard))
+	mux.HandleFunc("GET /.well-known/jwks.json", srv.wrap("/.well-known/jwks.json", srv.handleJWKS))
+	mux.HandleFunc("GET /healthz", srv.wrap("/healthz", srv.handleHealthz))
+	mux.HandleFunc("GET /readyz", srv.wrap("/readyz", srv.handleReadyz))
+	mux.HandleFunc("GET /metrics", srv.wrap("/metrics", srv.handleMetrics))
+	mux.Handle("POST /a2a", auth.Middleware(srv.cfg.Auth)(srv.wrapHandler("/a2a", http.HandlerFunc(srv.handleA2A))))
+
+	ts := httptest.NewTLSServer(mux)
+	t.Cleanup(ts.Close)
+	return ts.URL, cache, signer, js, nc
+}
+
+func newTLSClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		Timeout: 5 * time.Second,
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	resp, err := newTLSClient().Get(url + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("status field = %v", body["status"])
+	}
+	if _, ok := body["nats"]; !ok {
+		t.Errorf("missing nats field")
+	}
+	if body["signing_key"] != true {
+		t.Errorf("signing_key = %v", body["signing_key"])
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	resp, err := newTLSClient().Get(url + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestAgentCard_Signed(t *testing.T) {
+	url, _, signer, _, _ := newTestServer(t)
+	resp, err := newTLSClient().Get(url + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	sigsAny, ok := raw["signatures"].([]any)
+	if !ok || len(sigsAny) != 1 {
+		t.Fatalf("expected 1 signature, got %+v", raw["signatures"])
+	}
+	sig := sigsAny[0].(map[string]any)
+	prot := sig["protected"].(string)
+	sigStr := sig["signature"].(string)
+
+	delete(raw, "signatures")
+	rebuilt, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := jcsForTest(rebuilt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := signer.VerifyDetached(canonical, prot, sigStr); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+}
+
+func TestJWKS(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	resp, err := newTLSClient().Get(url + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Keys) == 0 {
+		t.Fatal("no keys")
+	}
+}
+
+func TestMetrics_ContainsCounters(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	// Drive at least one HTTP request so the counter map is non-empty.
+	_, _ = newTLSClient().Get(url + "/healthz")
+	resp, err := newTLSClient().Get(url + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	text := string(body)
+	for _, want := range []string{
+		"sesh_shim_http_requests_total",
+		"sesh_shim_jsonrpc_errors_total",
+		"sesh_shim_card_cache_hits_total",
+		"sesh_shim_card_cache_misses_total",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics missing %q\n%s", want, text)
+		}
+	}
+}
+
+func postJSONRPC(t *testing.T, url string, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url+"/a2a", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := newTLSClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+func TestA2A_GetTask_Happy(t *testing.T) {
+	url, _, _, js, _ := newTestServer(t)
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskJSON := []byte(`{"id":"t-1","kind":"task","status":{"state":"submitted"}}`)
+	if _, err := kv.Put("t-1", taskJSON); err != nil {
+		t.Fatal(err)
+	}
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":7,"method":"GetTask","params":{"id":"t-1"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int    `json:"code"`
+			Name string `json:"name"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if env.Error != nil {
+		t.Fatalf("got error: %+v", env.Error)
+	}
+	if !bytes.Equal(bytes.TrimSpace([]byte(env.Result)), taskJSON) {
+		t.Fatalf("result mismatch:\n got=%s\nwant=%s", env.Result, taskJSON)
+	}
+}
+
+func TestA2A_GetTask_NotFound(t *testing.T) {
+	url, _, _, js, _ := newTestServer(t)
+	// Create bucket but no key so we hit ErrKeyNotFound.
+	if _, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"}); err != nil {
+		t.Fatal(err)
+	}
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"missing"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32001, "TaskNotFoundError")
+}
+
+func TestA2A_GetTask_BucketMissing(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"missing"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32001, "TaskNotFoundError")
+}
+
+func TestA2A_GetExtendedAgentCard(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"GetExtendedAgentCard"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32007, "AuthenticatedExtendedCardNotConfiguredError")
+}
+
+func TestA2A_UnknownMethod(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{"jsonrpc":"2.0","id":1,"method":"FooBar"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32601, "Method not found")
+}
+
+func TestA2A_MalformedJSON(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	status, body := postJSONRPC(t, url, `{not json`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertRPCError(t, body, -32700, "Parse error")
+}
+
+func TestA2A_BodyTooLarge_Returns413(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	// 1 MiB cap + a bit; the cap is enforced inside handleA2A via
+	// http.MaxBytesReader and produces HTTP 413 (not a JSON-RPC envelope).
+	body := strings.Repeat("a", (1<<20)+100)
+	status, _ := postJSONRPC(t, url, body)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", status)
+	}
+}
+
+func TestRun_ShutdownOnContext(t *testing.T) {
+	cfg := baseRunCfg(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, cfg) }()
+	// Give the listener a moment to bind.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func baseRunCfg(t *testing.T) Config {
+	t.Helper()
+	url := startBroker(t)
+	nc := testConn(t, url)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := card.NewDevSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := card.NewComposer(nc, card.L1Defaults{
+		GatewayURL:         "https://shim.test",
+		ProtocolVersion:    "1.0",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+	}, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache := card.NewCache(composer, signer, time.Minute, 16)
+	return Config{
+		Listen:        "127.0.0.1:0",
+		Dev:           true,
+		Auth:          auth.NoopValidator{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Card:          cache,
+		Signer:        signer,
+		NC:            nc,
+		JetStream:     js,
+		AgentKey:      card.AgentKey{Agent: "test", Owner: "test"},
+		ScopeKind:     "project",
+		ScopeID:       "abc",
+		ShutdownGrace: 500 * time.Millisecond,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func assertRPCError(t *testing.T, body []byte, wantCode int, wantName string) {
+	t.Helper()
+	var env struct {
+		Error *struct {
+			Code int    `json:"code"`
+			Name string `json:"name"`
+		} `json:"error"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if env.Error == nil {
+		t.Fatalf("expected error object, got body=%s", body)
+	}
+	if env.Error.Code != wantCode || env.Error.Name != wantName {
+		t.Fatalf("got code=%d name=%q, want code=%d name=%q",
+			env.Error.Code, env.Error.Name, wantCode, wantName)
+	}
+}
+
+// jcsForTest is a stand-in canonicalizer for the server_test's signature
+// verification. We need an RFC 8785 JCS pass equivalent to the one in
+// card/canonicalize.go, but that function is unexported. Rather than
+// punching a hole in the card API for tests, do a tight re-implementation
+// here that handles the subset of JSON the AgentCard emits (objects with
+// string keys, ASCII strings, no NaN/Infinity).
+func jcsForTest(b []byte) ([]byte, error) {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := jcsWrite(&buf, v); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func jcsWrite(buf *bytes.Buffer, v any) error {
+	switch x := v.(type) {
+	case nil:
+		buf.WriteString("null")
+	case bool:
+		if x {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case string:
+		return jcsString(buf, x)
+	case json.Number:
+		buf.WriteString(x.String())
+	case []any:
+		buf.WriteByte('[')
+		for i, e := range x {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			if err := jcsWrite(buf, e); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(']')
+	case map[string]any:
+		buf.WriteByte('{')
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		// JCS sorts by UTF-16 code unit; for ASCII keys (our case) plain
+		// lexicographic byte sort is identical.
+		sortStrings(keys)
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			if err := jcsString(buf, k); err != nil {
+				return err
+			}
+			buf.WriteByte(':')
+			if err := jcsWrite(buf, x[k]); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte('}')
+	default:
+		return fmt.Errorf("jcsForTest: unsupported %T", v)
+	}
+	return nil
+}
+
+func jcsString(buf *bytes.Buffer, s string) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	buf.Write(b)
+	return nil
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
