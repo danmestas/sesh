@@ -47,6 +47,36 @@ func newFlushRecorder() *flushRecorder {
 	return &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 }
 
+// envelope mirrors the JSON-RPC 2.0 ClientResponse shape the bridge
+// emits inside each SSE `data:` line. Result is a single-field map
+// matching a2a.StreamResponse (the inner key is "message" or
+// "artifactUpdate").
+type envelope struct {
+	JSONRPC string                     `json:"jsonrpc"`
+	ID      json.RawMessage            `json:"id"`
+	Result  map[string]json.RawMessage `json:"result"`
+}
+
+// decodeFirstSSEEnvelope scans body for the first `data: ` line and
+// unmarshals its payload as a JSON-RPC envelope. Fails the test if
+// no data line is found or the payload isn't valid JSON.
+func decodeFirstSSEEnvelope(t *testing.T, body string) envelope {
+	t.Helper()
+	for _, ln := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(ln, "data: ") {
+			continue
+		}
+		raw := strings.TrimPrefix(ln, "data: ")
+		var env envelope
+		if err := json.Unmarshal([]byte(raw), &env); err != nil {
+			t.Fatalf("data line not valid JSON: %v raw=%q", err, raw)
+		}
+		return env
+	}
+	t.Fatalf("no `data: ` line in body: %q", body)
+	return envelope{}
+}
+
 func TestBridge_EmitsMessageEvent(t *testing.T) {
 	w := newFlushRecorder()
 	msgCh := make(chan messages.WatchEvent, 1)
@@ -58,7 +88,10 @@ func TestBridge_EmitsMessageEvent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		_ = Bridge(ctx, w, msgCh, stop, artCh, Options{KeepaliveInterval: time.Second})
+		_ = Bridge(ctx, w, msgCh, stop, artCh, Options{
+			KeepaliveInterval: time.Second,
+			ReqID:             json.RawMessage(`42`),
+		})
 		close(done)
 	}()
 
@@ -69,15 +102,16 @@ func TestBridge_EmitsMessageEvent(t *testing.T) {
 		Parts:  []messages.Part{{Text: "hi"}},
 	}}
 
-	// Allow Bridge to write.
+	// Wait for the JSON-RPC envelope to land. Post-#131 each chunk is
+	// `data: {"jsonrpc":"2.0","id":...,"result":{"message":{...}}}`.
 	deadline := time.After(2 * time.Second)
 	for {
-		if strings.Contains(w.snapshot(), "event: message") {
+		if strings.Contains(w.snapshot(), `"jsonrpc":"2.0"`) && strings.Contains(w.snapshot(), `"message":`) {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("never observed message event; got=%q", w.snapshot())
+			t.Fatalf("never observed JSON-RPC message envelope; got=%q", w.snapshot())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -89,11 +123,19 @@ func TestBridge_EmitsMessageEvent(t *testing.T) {
 		t.Errorf("msgStop was not called")
 	}
 	body := w.snapshot()
-	if !strings.Contains(body, `"role":"ROLE_USER"`) {
-		t.Errorf("role not translated to wire form: %s", body)
+	env := decodeFirstSSEEnvelope(t, body)
+	if string(env.ID) != "42" {
+		t.Errorf("envelope id = %s, want 42", env.ID)
 	}
-	if !strings.Contains(body, `data: {`) {
-		t.Errorf("missing data: line: %s", body)
+	if env.JSONRPC != "2.0" {
+		t.Errorf("envelope jsonrpc = %q, want 2.0", env.JSONRPC)
+	}
+	msgRaw, ok := env.Result["message"]
+	if !ok {
+		t.Fatalf("result missing \"message\" key: %s", body)
+	}
+	if !strings.Contains(string(msgRaw), `"role":"ROLE_USER"`) {
+		t.Errorf("role not translated to wire form: %s", msgRaw)
 	}
 }
 
@@ -105,7 +147,10 @@ func TestBridge_EmitsArtifactEvent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		_ = Bridge(ctx, w, msgCh, nil, artCh, Options{KeepaliveInterval: time.Second})
+		_ = Bridge(ctx, w, msgCh, nil, artCh, Options{
+			KeepaliveInterval: time.Second,
+			ReqID:             json.RawMessage(`"req-art"`),
+		})
 		close(done)
 	}()
 
@@ -113,12 +158,12 @@ func TestBridge_EmitsArtifactEvent(t *testing.T) {
 
 	deadline := time.After(2 * time.Second)
 	for {
-		if strings.Contains(w.snapshot(), "event: artifact-update") {
+		if strings.Contains(w.snapshot(), `"artifactUpdate":`) {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("never observed artifact event; got=%q", w.snapshot())
+			t.Fatalf("never observed artifactUpdate envelope; got=%q", w.snapshot())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -126,6 +171,15 @@ func TestBridge_EmitsArtifactEvent(t *testing.T) {
 
 	cancel()
 	<-done
+
+	body := w.snapshot()
+	env := decodeFirstSSEEnvelope(t, body)
+	if string(env.ID) != `"req-art"` {
+		t.Errorf("envelope id = %s, want \"req-art\"", env.ID)
+	}
+	if _, ok := env.Result["artifactUpdate"]; !ok {
+		t.Errorf("result missing \"artifactUpdate\" key: %s", body)
+	}
 }
 
 func TestBridge_KeepaliveAtInterval(t *testing.T) {
@@ -215,8 +269,14 @@ func TestBridge_NilMessageSkipped(t *testing.T) {
 	cancel()
 	<-done
 	body := w.snapshot()
-	if strings.Contains(body, "event: message") {
-		t.Errorf("nil message should not produce event; body=%q", body)
+	// Post-#131: no chunk means no `data:` line at all for this event
+	// (only keepalive comments and the streaming headers should be
+	// present).
+	for _, ln := range strings.Split(body, "\n") {
+		if strings.HasPrefix(ln, "data: ") {
+			t.Errorf("nil message should not produce data line; body=%q", body)
+			break
+		}
 	}
 }
 
@@ -242,13 +302,17 @@ func TestBridge_HeadersSetAndContentTypeStream(t *testing.T) {
 }
 
 // TestBridge_OverHTTPTestServer drives Bridge through a real httptest
-// server to confirm Flush actually moves bytes to the wire and the
-// SSE framing parses with a real bufio.Scanner.
+// server to confirm Flush actually moves bytes to the wire and each
+// `data:` line parses as a JSON-RPC 2.0 ClientResponse wrapping an
+// a2a.StreamResponse — the shape stock a2a-go expects.
 func TestBridge_OverHTTPTestServer(t *testing.T) {
 	msgCh := make(chan messages.WatchEvent, 4)
 	artCh := make(chan artifacts.Update)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = Bridge(r.Context(), w, msgCh, nil, artCh, Options{KeepaliveInterval: time.Second})
+		_ = Bridge(r.Context(), w, msgCh, nil, artCh, Options{
+			KeepaliveInterval: time.Second,
+			ReqID:             json.RawMessage(`7`),
+		})
 	}))
 	defer srv.Close()
 
@@ -269,8 +333,6 @@ func TestBridge_OverHTTPTestServer(t *testing.T) {
 	}
 
 	sc := bufio.NewScanner(resp.Body)
-	gotEvent := false
-	var gotData string
 	deadline := time.After(2 * time.Second)
 	type line struct{ s string }
 	out := make(chan line, 32)
@@ -280,40 +342,44 @@ func TestBridge_OverHTTPTestServer(t *testing.T) {
 		}
 		close(out)
 	}()
-	for !gotEvent {
+	var gotData string
+	for gotData == "" {
 		select {
 		case <-deadline:
-			t.Fatalf("did not observe event in time")
+			t.Fatalf("did not observe data line in time")
 		case l, ok := <-out:
 			if !ok {
-				t.Fatalf("scanner closed without event")
-			}
-			if l.s == "event: message" {
-				gotEvent = true
+				t.Fatalf("scanner closed without data line")
 			}
 			if strings.HasPrefix(l.s, "data: ") {
 				gotData = strings.TrimPrefix(l.s, "data: ")
 			}
 		}
 	}
-	// drain one more data line if not captured yet
-	if gotData == "" {
-		select {
-		case l := <-out:
-			if strings.HasPrefix(l.s, "data: ") {
-				gotData = strings.TrimPrefix(l.s, "data: ")
-			}
-		case <-time.After(500 * time.Millisecond):
-		}
+	var env struct {
+		JSONRPC string                     `json:"jsonrpc"`
+		ID      json.RawMessage            `json:"id"`
+		Result  map[string]json.RawMessage `json:"result"`
 	}
-	if gotData != "" {
-		var probe map[string]any
-		if err := json.Unmarshal([]byte(gotData), &probe); err != nil {
-			t.Errorf("data payload not valid JSON: %v %q", err, gotData)
-		}
-		if probe["role"] != "ROLE_AGENT" {
-			t.Errorf("role payload = %v, want ROLE_AGENT", probe["role"])
-		}
+	if err := json.Unmarshal([]byte(gotData), &env); err != nil {
+		t.Fatalf("data payload not valid JSON-RPC envelope: %v %q", err, gotData)
+	}
+	if env.JSONRPC != "2.0" {
+		t.Errorf("jsonrpc = %q, want 2.0", env.JSONRPC)
+	}
+	if string(env.ID) != "7" {
+		t.Errorf("id = %s, want 7", env.ID)
+	}
+	msgRaw, ok := env.Result["message"]
+	if !ok {
+		t.Fatalf("result missing \"message\" key: %s", gotData)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(msgRaw, &msg); err != nil {
+		t.Fatalf("inner message not valid JSON: %v %s", err, msgRaw)
+	}
+	if msg["role"] != "ROLE_AGENT" {
+		t.Errorf("role payload = %v, want ROLE_AGENT", msg["role"])
 	}
 }
 

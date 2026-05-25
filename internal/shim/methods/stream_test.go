@@ -29,52 +29,64 @@ func streamingServer(t *testing.T, deps Deps) (string, *httptest.Server, *Dispat
 	mux.HandleFunc("POST /stream", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var env struct {
+			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
 		}
 		_ = json.Unmarshal(body, &env)
-		disp.SendStreamingMessage(w, r, env.Params)
+		disp.SendStreamingMessage(w, r, env.ID, env.Params)
 	})
 	mux.HandleFunc("POST /subscribe", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var env struct {
+			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
 		}
 		_ = json.Unmarshal(body, &env)
-		disp.SubscribeToTask(w, r, env.Params)
+		disp.SubscribeToTask(w, r, env.ID, env.Params)
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts.URL, ts, disp
 }
 
-// sseFrame represents one parsed SSE event (event + data lines).
+// sseFrame represents one parsed SSE event. Post-#131 the wire format
+// is a single `data:` line carrying a JSON-RPC 2.0 ClientResponse whose
+// result wraps an a2a.StreamResponse — e.g.
+// `{"jsonrpc":"2.0","id":1,"result":{"message":{...}}}`. We decode the
+// envelope here so subtests can assert on the inner event payload
+// (Event = "message" | "artifactUpdate", Data = the inner event JSON).
 type sseFrame struct {
-	Event string
-	Data  string
+	Event string // inner event key ("message" or "artifactUpdate")
+	Data  string // inner event JSON (the value under the event key)
+	Raw   string // the entire `data:` line payload (full JSON-RPC envelope)
 }
 
 // scanFrames streams parsed SSE frames from r until r closes or the
-// channel reader stops draining. Comment lines (":..." ) are skipped.
+// channel reader stops draining. Comment lines (":...") and any
+// `event:` decoration (vestigial — a2a-go ignores it) are skipped;
+// every emitted frame corresponds to one `data:` JSON-RPC envelope.
 func scanFrames(r io.Reader) <-chan sseFrame {
 	out := make(chan sseFrame, 32)
 	go func() {
 		defer close(out)
 		sc := bufio.NewScanner(r)
-		var ev, data string
+		var data string
 		for sc.Scan() {
 			line := sc.Text()
 			switch {
 			case line == "":
-				if ev != "" || data != "" {
-					out <- sseFrame{Event: ev, Data: data}
-					ev, data = "", ""
+				if data == "" {
+					continue
 				}
+				ev, inner := decodeStreamEnvelope(data)
+				out <- sseFrame{Event: ev, Data: inner, Raw: data}
+				data = ""
 			case strings.HasPrefix(line, ":"):
 				// keepalive comment
 			case strings.HasPrefix(line, "event: "):
-				ev = strings.TrimPrefix(line, "event: ")
+				// vestigial decoration; ignore
 			case strings.HasPrefix(line, "data: "):
 				if data == "" {
 					data = strings.TrimPrefix(line, "data: ")
@@ -85,6 +97,25 @@ func scanFrames(r io.Reader) <-chan sseFrame {
 		}
 	}()
 	return out
+}
+
+// decodeStreamEnvelope unwraps a JSON-RPC 2.0 ClientResponse + the
+// inner a2a.StreamResponse single-field event wrapper. Returns the
+// event key ("message" | "artifactUpdate" | ...) and the inner event
+// JSON. Returns ("", raw) if the payload doesn't fit the shape, which
+// lets tests fail loudly on a wire-format regression instead of
+// silently swallowing.
+func decodeStreamEnvelope(raw string) (string, string) {
+	var env struct {
+		Result map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil || env.Result == nil {
+		return "", raw
+	}
+	for k, v := range env.Result {
+		return k, string(v)
+	}
+	return "", raw
 }
 
 func TestSendStreamingMessage_HappyPath(t *testing.T) {

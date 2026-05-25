@@ -351,6 +351,16 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Flush forwards to the underlying ResponseWriter if it implements
+// http.Flusher. SSE bridges type-assert for Flusher, so statusWriter
+// must transparently expose flushing — otherwise streaming responses
+// abort before any bytes hit the wire.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (s *server) incHTTP(method, route string, status int) {
 	s.mu.Lock()
 	s.httpReqs[httpKey{method, route, status}]++
@@ -513,9 +523,9 @@ func (s *server) handleA2A(w http.ResponseWriter, r *http.Request) {
 	if s.dispatcher.IsStreaming(req.Method) {
 		switch req.Method {
 		case methods.MethodSendStreamingMessage:
-			s.dispatcher.SendStreamingMessage(w, r, req.Params)
+			s.dispatcher.SendStreamingMessage(w, r, req.ID, req.Params)
 		case methods.MethodSubscribeToTask:
-			s.dispatcher.SubscribeToTask(w, r, req.Params)
+			s.dispatcher.SubscribeToTask(w, r, req.ID, req.Params)
 		}
 		return
 	}

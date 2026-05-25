@@ -25,38 +25,39 @@ import (
 //
 // Watcher tail-only (WatchOpts.IncludeHistory: false) — we just
 // appended the inbound message; including history would echo it back.
-func (d *Dispatcher) SendStreamingMessage(w http.ResponseWriter, r *http.Request, params json.RawMessage) {
+func (d *Dispatcher) SendStreamingMessage(w http.ResponseWriter, r *http.Request, reqID json.RawMessage, params json.RawMessage) {
 	acc, jerr := d.acceptInboundMessage(r.Context(), params)
 	if jerr != nil {
-		jsonrpc.WriteError(w, nil, jerr)
+		jsonrpc.WriteError(w, reqID, jerr)
 		return
 	}
 
 	artsBucket, err := scope.Bucket(d.deps.ScopeKind, d.deps.ScopeID, "artifacts")
 	if err != nil {
-		jsonrpc.WriteError(w, nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "invalid scope"}))
+		jsonrpc.WriteError(w, reqID, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "invalid scope"}))
 		return
 	}
 	artsKV, kerr := d.openOrCreateKV(r.Context(), artsBucket)
 	if kerr != nil {
-		jsonrpc.WriteError(w, nil, kerr)
+		jsonrpc.WriteError(w, reqID, kerr)
 		return
 	}
 
 	msgCh, msgStop, err := messages.Watch(r.Context(), acc.msgsKV, acc.message.TaskID, messages.WatchOpts{IncludeHistory: false})
 	if err != nil {
-		jsonrpc.WriteError(w, nil, jsonrpc.ErrInternal.WithData(map[string]string{"err": err.Error()}))
+		jsonrpc.WriteError(w, reqID, jsonrpc.ErrInternal.WithData(map[string]string{"err": err.Error()}))
 		return
 	}
 	artCh, err := artifacts.Watch(r.Context(), artsKV, acc.message.TaskID, artifacts.WatchOpts{IncludeHistory: false})
 	if err != nil {
 		msgStop()
-		jsonrpc.WriteError(w, nil, jsonrpc.ErrInternal.WithData(map[string]string{"err": err.Error()}))
+		jsonrpc.WriteError(w, reqID, jsonrpc.ErrInternal.WithData(map[string]string{"err": err.Error()}))
 		return
 	}
 
 	_ = sse.Bridge(r.Context(), w, msgCh, msgStop, artCh, sse.Options{
 		KeepaliveInterval: d.deps.KeepaliveInterval,
 		Translator:        d.deps.Translator,
+		ReqID:             reqID,
 	})
 }
