@@ -55,5 +55,8 @@ func (d *Dispatcher) SendStreamingMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_ = sse.Bridge(r.Context(), w, msgCh, msgStop, artCh, sse.Options{KeepaliveInterval: d.deps.KeepaliveInterval})
+	_ = sse.Bridge(r.Context(), w, msgCh, msgStop, artCh, sse.Options{
+		KeepaliveInterval: d.deps.KeepaliveInterval,
+		Translator:        d.deps.Translator,
+	})
 }

@@ -14,6 +14,9 @@ import (
 
 	"github.com/danmestas/sesh-ops/artifacts"
 	"github.com/danmestas/sesh-ops/messages"
+	"github.com/danmestas/sesh-ops/objects"
+
+	"github.com/danmestas/sesh/internal/shim/a2a"
 )
 
 // flushRecorder wraps httptest.ResponseRecorder with an http.Flusher
@@ -311,5 +314,55 @@ func TestBridge_OverHTTPTestServer(t *testing.T) {
 		if probe["role"] != "ROLE_AGENT" {
 			t.Errorf("role payload = %v, want ROLE_AGENT", probe["role"])
 		}
+	}
+}
+
+// TestBridge_TranslatesObjURL — when Options.Translator is supplied,
+// obj:// Part URLs in WatchEvents are rewritten to gateway-rooted
+// HTTPS in the SSE `data:` line. This is the Slice-7 end-to-end
+// guarantee at the SSE boundary.
+func TestBridge_TranslatesObjURL(t *testing.T) {
+	w := newFlushRecorder()
+	msgCh := make(chan messages.WatchEvent, 1)
+	artCh := make(chan artifacts.Update)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = Bridge(ctx, w, msgCh, nil, artCh, Options{
+			KeepaliveInterval: time.Second,
+			Translator:        a2a.NewTranslator("https://shim.test", nil),
+		})
+		close(done)
+	}()
+
+	origURI := objects.URI("project", "abc123", "T1", "A1")
+	msgCh <- messages.WatchEvent{Op: "put", Key: "T1.M", Message: &messages.Message{
+		ID:     "M",
+		TaskID: "T1",
+		Role:   messages.MessageRoleAgent,
+		Parts:  []messages.Part{{URL: origURI, MediaType: "application/pdf"}},
+	}}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		body := w.snapshot()
+		if strings.Contains(body, "https://shim.test/obj/project/abc123/T1/A1") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("obj:// not rewritten in SSE data\ngot=%q", w.snapshot())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	cancel()
+	<-done
+
+	body := w.snapshot()
+	if strings.Contains(body, "obj://") {
+		t.Errorf("obj:// leaked through to SSE wire:\n%s", body)
 	}
 }

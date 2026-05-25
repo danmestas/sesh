@@ -50,27 +50,13 @@ type wireMessage struct {
 	Metadata         map[string]any  `json:"metadata,omitempty"`
 }
 
-// ToWireMessage inverts FromWireMessage for outbound responses + SSE.
-// Returns the JSON-encoded wire-shaped Message ready to embed in a
-// JSON-RPC result or SSE data field. Emits ONLY the A2A v1.0 spec
-// fields — never the sesh-ops storage-only `v` / `createdAt` fields.
+// ToWireMessage is a Slice-1 compatibility shim: delegates to a
+// zero-value Translator (GatewayURL=="" ⇒ obj:// pass-through). New
+// callers should instantiate *Translator at boot via NewTranslator and
+// use the method form — see internal/shim/server for the wiring.
+//
+// Deprecated: use Translator.ToWireMessage so obj:// URLs get the
+// Slice-7 gateway rewrite.
 func ToWireMessage(m *messages.Message) (json.RawMessage, error) {
-	if m == nil {
-		return nil, fmt.Errorf("ToWireMessage: nil message")
-	}
-	w := wireMessage{
-		MessageID:        m.ID,
-		TaskID:           m.TaskID,
-		ContextID:        m.ContextID,
-		Role:             ToA2ARole(m.Role),
-		Parts:            m.Parts,
-		Extensions:       m.Extensions,
-		ReferenceTaskIDs: m.ReferenceTaskIDs,
-		Metadata:         m.Metadata,
-	}
-	b, err := json.Marshal(&w)
-	if err != nil {
-		return nil, fmt.Errorf("ToWireMessage: %w", err)
-	}
-	return b, nil
+	return (&Translator{}).ToWireMessage(m)
 }

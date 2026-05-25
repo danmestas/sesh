@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/danmestas/sesh/internal/shim/a2a"
 	"github.com/danmestas/sesh/internal/shim/card"
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
 )
@@ -58,6 +59,14 @@ type Deps struct {
 	// false (production) rejects all http:// and all RFC1918/loopback
 	// resolutions.
 	PushDevAllowLocalhost bool
+
+	// Translator is the outbound A2A wire-shape projector (Slice 7).
+	// Constructed once at server boot from cfg.GatewayURL; SSE bridge
+	// call sites in stream.go + subscribe.go read it from here so the
+	// obj:// → HTTPS rewrite fires on every Part flowing to the wire.
+	// Nil ⇒ pass-through (zero-value behaviour matches the Slice-1
+	// free-function shim).
+	Translator *a2a.Translator
 }
 
 // JSON-RPC method names. Centralizing them here keeps the routing in

@@ -27,6 +27,13 @@ const DefaultKeepaliveInterval = 25 * time.Second
 // Options narrows Bridge's behaviour. Zero values mean defaults.
 type Options struct {
 	KeepaliveInterval time.Duration
+
+	// Translator is the outbound A2A message serialiser. Nil ⇒ Bridge
+	// falls back to a zero-value Translator (no gateway-URL rewrite —
+	// matches the Slice-1 free-function shape). Production callers
+	// (methods/{stream,subscribe}.go) wire d.deps.Translator so
+	// obj:// Part URLs become dereferenceable HTTPS for SSE clients.
+	Translator *a2a.Translator
 }
 
 // Bridge writes SSE events to w as messages and artifacts arrive on the
@@ -63,6 +70,13 @@ func Bridge(
 	if keepalive <= 0 {
 		keepalive = DefaultKeepaliveInterval
 	}
+	translator := opts.Translator
+	if translator == nil {
+		// Fallback preserves the Slice-1 contract (no obj:// rewrite)
+		// for callers that haven't been migrated yet — currently the
+		// bridge_test fixtures.
+		translator = &a2a.Translator{}
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -89,7 +103,7 @@ func Bridge(
 			if ev.Message == nil {
 				continue
 			}
-			data, err := a2a.ToWireMessage(ev.Message)
+			data, err := translator.ToWireMessage(ev.Message)
 			if err != nil {
 				continue
 			}

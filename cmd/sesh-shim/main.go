@@ -157,6 +157,7 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		Machine:               machine,
 		Logger:                log,
 		ShutdownGrace:         cli.ShutdownGrace,
+		GatewayURL:            cli.GatewayURL,
 		PushKey:               pushKey,
 		PushDevAllowLocalhost: cli.Dev,
 		PushWorkerDisabled:    cli.PushWorkerDisabled,
