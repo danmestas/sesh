@@ -136,7 +136,7 @@ func (d *Dispatcher) acceptInboundMessage(ctx context.Context, params json.RawMe
 		return nil, jsonrpc.ErrInternal
 	}
 
-	d.publishPromptV2(p.Message)
+	d.publishPromptV2(m)
 
 	return &acceptedInbound{message: m, tasksKV: tasksKV, msgsKV: msgsKV}, nil
 }
@@ -164,10 +164,18 @@ func (d *Dispatcher) openOrCreateKV(ctx context.Context, bucket string) (jetstre
 	return kv, nil
 }
 
-// publishPromptV2 emits the inbound Message bytes on the
+// publishPromptV2 emits the translated Message bytes on the
 // agents.prompt.v2.* subject so an adapter subscribed via the queue
-// group wakes up. Errors are logged and swallowed — the KV write
-// already happened and is authoritative.
+// group wakes up. The bytes are re-serialized via a2a.ToMeshMessage so
+// the published payload carries the v0.4 mesh-canonical lowercase Role
+// ("user"|"agent") expected by the sesh-channels SDK envelope
+// validator — NOT the a2a-go SCREAMING_SNAKE wire form
+// ("ROLE_USER"|"ROLE_AGENT") used on the SSE / JSON-RPC client wire
+// (see a2a.ToWireMessage for that distinct projection). This mirrors
+// the storage-path translation already done in acceptInboundMessage
+// (sesh#137: asymmetric translation — storage translated but publish
+// did not). Errors are logged and swallowed — the KV write already
+// happened and is authoritative.
 //
 // Subject construction matches sesh-channels SDK promptV2():
 //
@@ -192,7 +200,7 @@ func (d *Dispatcher) openOrCreateKV(ctx context.Context, bucket string) (jetstre
 //     query window), we fall back to the --agent flag value so the
 //     legacy single-token form still works for adapters that haven't
 //     populated metadata.role yet.
-func (d *Dispatcher) publishPromptV2(raw json.RawMessage) {
+func (d *Dispatcher) publishPromptV2(m *messages.Message) {
 	if d.deps.NC == nil || d.deps.Machine == "" {
 		return
 	}
@@ -202,6 +210,14 @@ func (d *Dispatcher) publishPromptV2(raw json.RawMessage) {
 		role = d.deps.AgentKey.Agent
 	}
 	if role == "" {
+		return
+	}
+	if m == nil {
+		return
+	}
+	raw, err := a2a.ToMeshMessage(m)
+	if err != nil {
+		d.deps.Log.Warn("sendMessage: marshal prompt", "err", err)
 		return
 	}
 

@@ -497,6 +497,72 @@ func TestSendMessage_LooseMatch_AbbreviatedAgent(t *testing.T) {
 	}
 }
 
+// TestSendMessage_PublishedRoleIsTranslated covers sesh#137: the v2
+// prompt payload must carry the A2A-JSON canonical role ("user" /
+// "agent"), NOT the inbound a2a-go SCREAMING_SNAKE wire form
+// ("ROLE_USER" / "ROLE_AGENT"). The adapter-side envelope validator
+// (sesh-channels sdk/src/envelope.ts) accepts only "user"|"agent" and
+// rejects the SCREAMING_SNAKE form with HTTP 400, which blocks the
+// whole Message/Artifact round-trip on the prompt path. Storage was
+// already translated via a2a.FromWireMessage; this guards that the
+// publish path applies the same translation symmetrically.
+func TestSendMessage_PublishedRoleIsTranslated(t *testing.T) {
+	cases := []struct {
+		name     string
+		wireRole string
+		wantRole string
+	}{
+		{"user", "ROLE_USER", "user"},
+		{"agent", "ROLE_AGENT", "agent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, nc, _ := testDeps(t)
+			disp := NewDispatcher(deps)
+			ctx, cancel := mustCtx(t)
+			defer cancel()
+
+			got := make(chan *nats.Msg, 1)
+			sub, err := nc.Subscribe("agents.prompt.v2.>", func(m *nats.Msg) {
+				select {
+				case got <- m:
+				default:
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sub.Unsubscribe()
+
+			params := json.RawMessage(`{"message":{"messageId":"M-ROLE","role":"` + tc.wireRole + `","parts":[{"text":"x"}]}}`)
+			if _, jerr := disp.sendMessage(ctx, params); jerr != nil {
+				t.Fatalf("sendMessage: %+v", jerr)
+			}
+
+			select {
+			case m := <-got:
+				var decoded struct {
+					Role string `json:"role"`
+				}
+				if err := json.Unmarshal(m.Data, &decoded); err != nil {
+					t.Fatalf("decode published payload: %v body=%s", err, m.Data)
+				}
+				if decoded.Role != tc.wantRole {
+					t.Errorf("published role = %q, want %q (sesh#137: publish path must translate "+
+						"ROLE_USER/ROLE_AGENT → user/agent to match storage); raw=%s", decoded.Role, tc.wantRole, m.Data)
+				}
+				// Belt-and-suspenders: ensure the SCREAMING_SNAKE form
+				// is not present anywhere in the payload.
+				if bytes.Contains(m.Data, []byte("ROLE_")) {
+					t.Errorf("published payload still contains SCREAMING_SNAKE role token: %s", m.Data)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("never received prompt publish")
+			}
+		})
+	}
+}
+
 // TestSendMessage_PublishNoOp_WhenAgentEmpty verifies that when no
 // agent token is configured (so publishPromptV2 early-returns), the
 // SendMessage path still completes successfully — i.e., the publish
