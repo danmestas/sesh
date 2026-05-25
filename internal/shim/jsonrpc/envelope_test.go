@@ -130,3 +130,19 @@ func TestError_WithDataNil(t *testing.T) {
 		t.Errorf("WithData(nil) should return the same pointer")
 	}
 }
+
+// TestErrPushNotConfigured_ShapeMatchesA2A locks the
+// A2A-spec-mandated triple (code, message, name) for the push-not-
+// configured error. The A2A reference client routes on Name, so any
+// drift breaks stock clients without producing a CI failure elsewhere.
+func TestErrPushNotConfigured_ShapeMatchesA2A(t *testing.T) {
+	if ErrPushNotConfigured.Code != -32008 {
+		t.Errorf("Code = %d, want -32008", ErrPushNotConfigured.Code)
+	}
+	if ErrPushNotConfigured.Name != "PushNotificationNotSupportedError" {
+		t.Errorf("Name = %q, want PushNotificationNotSupportedError", ErrPushNotConfigured.Name)
+	}
+	if ErrPushNotConfigured.Message == "" {
+		t.Errorf("Message must be non-empty")
+	}
+}

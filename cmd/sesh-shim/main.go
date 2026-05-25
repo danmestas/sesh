@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
+	"github.com/danmestas/sesh/internal/shim/push"
 	"github.com/danmestas/sesh/internal/shim/server"
 )
 
@@ -43,6 +46,13 @@ type CLI struct {
 	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the first segment of agents.prompt.cc.*; falls back to os.Hostname() if empty"`
 	Dev           bool          `name:"dev" env:"SESH_SHIM_DEV" help:"Enable dev mode: self-signed TLS + ephemeral signing key permitted"`
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"5s" env:"SESH_SHIM_SHUTDOWN_GRACE" help:"Max drain/shutdown wait"`
+
+	// Push notification (Slice 6) flags. PushEncryptionKey accepts a
+	// hex literal (env-preferred path) or a file path; --dev with
+	// neither set generates an ephemeral key.
+	PushEncryptionKey  string `name:"push-encryption-key" env:"SESH_SHIM_PUSH_ENCRYPTION_KEY" help:"Hex AES-256-GCM key (64 chars) OR file path; --dev generates ephemeral when empty"`
+	PushWorkerDisabled bool   `name:"push-worker-disabled" env:"SESH_SHIM_PUSH_WORKER_DISABLED" help:"Disable the JetStream-watching delivery worker (CRUD still works)"`
+	PushMaxRetries     int    `name:"push-max-retries" default:"4" env:"SESH_SHIM_PUSH_MAX_RETRIES" help:"Max delivery retries (total attempts = 1 + this)"`
 }
 
 func main() {
@@ -126,22 +136,31 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		name = cli.Agent
 	}
 
+	pushKey, err := buildPushKey(cli, log)
+	if err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+
 	cfg := server.Config{
-		Listen:        cli.Listen,
-		TLSCert:       cli.TLSCert,
-		TLSKey:        cli.TLSKey,
-		Dev:           cli.Dev,
-		Auth:          validator,
-		Card:          cache,
-		Signer:        signer,
-		NC:            nc,
-		JS:            js,
-		AgentKey:      card.AgentKey{Agent: cli.Agent, Owner: cli.Owner, Name: name},
-		ScopeKind:     cli.ScopeKind,
-		ScopeID:       cli.ScopeID,
-		Machine:       machine,
-		Logger:        log,
-		ShutdownGrace: cli.ShutdownGrace,
+		Listen:                cli.Listen,
+		TLSCert:               cli.TLSCert,
+		TLSKey:                cli.TLSKey,
+		Dev:                   cli.Dev,
+		Auth:                  validator,
+		Card:                  cache,
+		Signer:                signer,
+		NC:                    nc,
+		JS:                    js,
+		AgentKey:              card.AgentKey{Agent: cli.Agent, Owner: cli.Owner, Name: name},
+		ScopeKind:             cli.ScopeKind,
+		ScopeID:               cli.ScopeID,
+		Machine:               machine,
+		Logger:                log,
+		ShutdownGrace:         cli.ShutdownGrace,
+		PushKey:               pushKey,
+		PushDevAllowLocalhost: cli.Dev,
+		PushWorkerDisabled:    cli.PushWorkerDisabled,
+		PushMaxRetries:        cli.PushMaxRetries,
 	}
 
 	log.Info("sesh-shim: starting",
@@ -151,6 +170,13 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		"scope", cli.ScopeKind+"/"+cli.ScopeID,
 		"nats", nc.ConnectedUrl(),
 	)
+	if pushKey != nil {
+		log.Info("push: enabled",
+			"key_kid", keyKID(pushKey),
+			"worker", !cli.PushWorkerDisabled,
+			"max_retries", cli.PushMaxRetries,
+		)
+	}
 	return server.Run(ctx, cfg)
 }
 
@@ -185,6 +211,39 @@ func buildValidator(cli CLI, log *slog.Logger) (auth.Validator, error) {
 	default:
 		return nil, fmt.Errorf("unknown --auth mode %q", cli.Auth)
 	}
+}
+
+// buildPushKey resolves the push encryption key per plan §F3:
+//   - --push-encryption-key set ⇒ push.LoadKey (hex literal or file).
+//   - empty + --dev ⇒ push.NewDevKey (ephemeral, WARN'd kid).
+//   - empty + production ⇒ nil (push CRUD returns -32008 + worker
+//     stays parked). This is the explicit "feature off" state, not
+//     a boot error.
+func buildPushKey(cli CLI, log *slog.Logger) ([]byte, error) {
+	if cli.PushEncryptionKey != "" {
+		k, err := push.LoadKey(cli.PushEncryptionKey)
+		if err != nil {
+			return nil, err
+		}
+		return k, nil
+	}
+	if cli.Dev {
+		k, err := push.NewDevKey()
+		if err != nil {
+			return nil, err
+		}
+		log.Warn("push: using ephemeral dev key — credentials encrypted on this process do NOT survive restart", "key_kid", keyKID(k))
+		return k, nil
+	}
+	log.Info("push: disabled (no --push-encryption-key and not --dev)")
+	return nil, nil
+}
+
+// keyKID returns an 8-char hex of the SHA-256 of the key, used only
+// for log identification — NEVER exposes the key bytes themselves.
+func keyKID(key []byte) string {
+	h := sha256.Sum256(key)
+	return hex.EncodeToString(h[:4])
 }
 
 // sanitizeMachineToken replaces any rune that subject.validateToken

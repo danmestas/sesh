@@ -872,3 +872,153 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+// newTestServerWithPushKey wires the full stack with a randomly-
+// generated PushKey + dev-localhost SSRF override, so the 4 push
+// CRUD methods are exercisable end-to-end at the HTTP boundary.
+// Returns the URL + the *nats.Conn (currently unused but parallel
+// the existing helpers).
+func newTestServerWithPushKey(t *testing.T) (string, jetstream.JetStream) {
+	t.Helper()
+
+	url := startBroker(t)
+	nc := testConn(t, url)
+	js2, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("jetstream v2: %v", err)
+	}
+
+	signer, err := card.NewDevSigner()
+	if err != nil {
+		t.Fatalf("dev signer: %v", err)
+	}
+	composer := card.NewComposer(nc, card.L1Defaults{
+		GatewayURL:         "https://shim.test",
+		ProtocolVersion:    "1.0",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+	}, 200*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache := card.NewCache(composer, signer, time.Minute, 16)
+
+	pushKey := make([]byte, 32)
+	for i := range pushKey {
+		pushKey[i] = byte(i) // deterministic, fine for tests
+	}
+
+	srv := newServer(Config{
+		Listen:                "127.0.0.1:0",
+		Dev:                   true,
+		Auth:                  auth.NoopValidator{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Card:                  cache,
+		Signer:                signer,
+		NC:                    nc,
+		JS:                    js2,
+		AgentKey:              card.AgentKey{Agent: "test-agent", Owner: "test-owner", Name: "test-agent"},
+		ScopeKind:             "project",
+		ScopeID:               "abc123",
+		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PushKey:               pushKey,
+		PushDevAllowLocalhost: true,
+	})
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /a2a", auth.Middleware(srv.cfg.Auth)(srv.wrapHandler("/a2a", http.HandlerFunc(srv.handleA2A))))
+	ts := httptest.NewTLSServer(mux)
+	t.Cleanup(ts.Close)
+	return ts.URL, js2
+}
+
+// TestA2A_PushNotConfigured_When_Disabled — Config without PushKey
+// surfaces -32008 to every push method. Stock A2A clients route on
+// Name="PushNotificationNotSupportedError".
+func TestA2A_PushNotConfigured_When_Disabled(t *testing.T) {
+	url, _, _, _, _ := newTestServer(t)
+	for _, method := range []string{
+		"CreateTaskPushNotificationConfig",
+		"GetTaskPushNotificationConfig",
+		"ListTaskPushNotificationConfigs",
+		"DeleteTaskPushNotificationConfig",
+	} {
+		t.Run(method, func(t *testing.T) {
+			body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"taskId":"T1","pushNotificationConfigId":"cfg","pushNotificationConfig":{"url":"http://127.0.0.1:1/h"}}}`
+			status, resp := postJSONRPC(t, url, body)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d", status)
+			}
+			assertRPCError(t, resp, -32008, "PushNotificationNotSupportedError")
+		})
+	}
+}
+
+// TestA2A_PushCRUD_EndToEnd — full HTTP roundtrip exercising
+// Create→Get→List→Delete via the JSON-RPC envelope. Asserts:
+// plaintext in/out on the wire, ciphertext at rest in KV.
+func TestA2A_PushCRUD_EndToEnd(t *testing.T) {
+	url, js := newTestServerWithPushKey(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Seed a task so Create's existence check passes.
+	tasksKV, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "sesh_tasks_project_abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tasksKV.Put(ctx, "T1", []byte(`{"id":"T1","kind":"task","status":{"state":"TASK_STATE_SUBMITTED"}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	const sentinel = "PLAINTEXT_SENTINEL_42"
+	createBody := `{"jsonrpc":"2.0","id":1,"method":"CreateTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1","pushNotificationConfig":{"url":"http://127.0.0.1:9999/h","authentication":{"scheme":"Bearer","credentials":"` + sentinel + `"}}}}`
+	status, resp := postJSONRPC(t, url, createBody)
+	if status != http.StatusOK {
+		t.Fatalf("create status = %d body=%s", status, resp)
+	}
+	if !bytes.Contains(resp, []byte(sentinel)) {
+		t.Errorf("create response missing plaintext sentinel:\n%s", resp)
+	}
+
+	// Inspect KV directly: ciphertext must be present, plaintext absent.
+	notifyKV, err := js.KeyValue(ctx, "sesh_notifycfg_project_abc123")
+	if err != nil {
+		t.Fatalf("open notifycfg kv: %v", err)
+	}
+	entry, err := notifyKV.Get(ctx, "T1.cfg-1")
+	if err != nil {
+		t.Fatalf("get kv entry: %v", err)
+	}
+	if bytes.Contains(entry.Value(), []byte(sentinel)) {
+		t.Errorf("KV bytes contain plaintext:\n%s", entry.Value())
+	}
+	if !bytes.Contains(entry.Value(), []byte(`"credentials":"enc:`)) {
+		t.Errorf("KV bytes missing enc: prefix:\n%s", entry.Value())
+	}
+
+	// Get returns plaintext.
+	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":2,"method":"GetTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d", status)
+	}
+	if !bytes.Contains(resp, []byte(sentinel)) {
+		t.Errorf("get response missing plaintext:\n%s", resp)
+	}
+
+	// List returns plaintext.
+	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":3,"method":"ListTaskPushNotificationConfigs","params":{"taskId":"T1"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("list status = %d", status)
+	}
+	if !bytes.Contains(resp, []byte(sentinel)) {
+		t.Errorf("list response missing plaintext:\n%s", resp)
+	}
+
+	// Delete then Get returns TaskNotFoundError.
+	status, _ = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":4,"method":"DeleteTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("delete status = %d", status)
+	}
+	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":5,"method":"GetTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("post-delete get status = %d", status)
+	}
+	assertRPCError(t, resp, -32001, "TaskNotFoundError")
+}

@@ -60,6 +60,7 @@ var (
 	ErrTaskNotFound              = &Error{Code: -32001, Message: "task not found", Name: "TaskNotFoundError"}
 	ErrTaskNotCancelable         = &Error{Code: -32002, Message: "task cannot be canceled", Name: "TaskNotCancelableError"}
 	ErrExtendedCardNotConfigured = &Error{Code: -32007, Message: "extended agent card not configured", Name: "AuthenticatedExtendedCardNotConfiguredError"}
+	ErrPushNotConfigured         = &Error{Code: -32008, Message: "push notifications not configured", Name: "PushNotificationNotSupportedError"}
 )
 
 // Decode parses a JSON-RPC 2.0 request body. Returns ErrParse on JSON

@@ -106,11 +106,15 @@ func (n NoopValidator) Validate(r *http.Request) (Principal, error) {
 	log.Warn("auth: none-dev-only bypass", "path", r.URL.Path, "remote", r.RemoteAddr)
 	// `agent.read.extended` was added in Slice 5 so --auth=none-dev-only
 	// can exercise GetExtendedAgentCard end-to-end. Production JWT
-	// tokens must still carry the scope explicitly.
+	// tokens must still carry the scope explicitly. `agent.notify.read`
+	// + `agent.notify.write` were added in Slice 6 for the
+	// PushNotificationConfig CRUD surface; same dev-only rationale.
 	return Principal{Sub: "dev", Scopes: []string{
 		"agent.read",
 		"agent.write",
 		"agent.read.extended",
+		"agent.notify.read",
+		"agent.notify.write",
 	}}, nil
 }
 

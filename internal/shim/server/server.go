@@ -22,6 +22,7 @@ import (
 	"github.com/danmestas/sesh/internal/shim/card"
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
 	"github.com/danmestas/sesh/internal/shim/methods"
+	"github.com/danmestas/sesh/internal/shim/push"
 )
 
 // Config wires the shim's HTTP server to its collaborators. All fields
@@ -44,6 +45,14 @@ type Config struct {
 	Machine       string
 	Logger        *slog.Logger
 	ShutdownGrace time.Duration
+
+	// Push notification (Slice 6) wiring. Zero values disable the
+	// feature: nil PushKey ⇒ the 4 CRUD methods return -32008 and
+	// the delivery worker is NOT started.
+	PushKey               []byte
+	PushDevAllowLocalhost bool
+	PushWorkerDisabled    bool
+	PushMaxRetries        int
 }
 
 // server holds the mutable runtime state (counters) behind the http.Handler.
@@ -81,15 +90,17 @@ func newServer(cfg Config) *server {
 		jsonrpcErrs: map[jsonrpcErrKey]uint64{},
 	}
 	s.dispatcher = methods.NewDispatcher(methods.Deps{
-		NC:        cfg.NC,
-		JS:        cfg.JS,
-		ScopeKind: cfg.ScopeKind,
-		ScopeID:   cfg.ScopeID,
-		AgentKey:  cfg.AgentKey,
-		Machine:   cfg.Machine,
-		Log:       cfg.Logger,
-		Composer:  cfg.Card.Composer(),
-		Signer:    cfg.Signer,
+		NC:                    cfg.NC,
+		JS:                    cfg.JS,
+		ScopeKind:             cfg.ScopeKind,
+		ScopeID:               cfg.ScopeID,
+		AgentKey:              cfg.AgentKey,
+		Machine:               cfg.Machine,
+		Log:                   cfg.Logger,
+		Composer:              cfg.Card.Composer(),
+		Signer:                cfg.Signer,
+		PushKey:               cfg.PushKey,
+		PushDevAllowLocalhost: cfg.PushDevAllowLocalhost,
 	})
 	return s
 }
@@ -123,7 +134,11 @@ func New(cfg Config) (*http.Server, error) {
 }
 
 // Run starts the HTTPS server and blocks until ctx is cancelled, then
-// performs a graceful Shutdown bounded by cfg.ShutdownGrace.
+// performs a graceful Shutdown bounded by cfg.ShutdownGrace. When
+// cfg.PushKey is non-nil and cfg.PushWorkerDisabled is false, a
+// push delivery worker is started alongside the HTTP server; on
+// shutdown the worker is cancelled FIRST so its in-flight deliveries
+// race the ShutdownGrace timer rather than the HTTP Shutdown.
 func Run(ctx context.Context, cfg Config) error {
 	srv, err := New(cfg)
 	if err != nil {
@@ -140,6 +155,33 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("dev tls: %w", err)
 		}
 		srv.TLSConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	// Push delivery worker (Slice 6). Started before the HTTP listener
+	// so a webhook fires for any state-change that happens before the
+	// listener is ready.
+	var worker *push.Worker
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	if cfg.PushKey != nil && !cfg.PushWorkerDisabled {
+		if err := ensureNotifyFailBucket(workerCtx, cfg); err != nil {
+			return fmt.Errorf("notifyfail bucket: %w", err)
+		}
+		worker = push.NewWorker(push.WorkerConfig{
+			NC:                cfg.NC,
+			JS:                cfg.JS,
+			ScopeKind:         cfg.ScopeKind,
+			ScopeID:           cfg.ScopeID,
+			PushKey:           cfg.PushKey,
+			Log:               cfg.Logger,
+			MaxRetries:        cfg.PushMaxRetries,
+			DevAllowLocalhost: cfg.PushDevAllowLocalhost,
+		})
+		go func() {
+			if err := worker.Run(workerCtx); err != nil && cfg.Logger != nil {
+				cfg.Logger.Error("push worker: exited with error", "err", err)
+			}
+		}()
 	}
 
 	errCh := make(chan error, 1)
@@ -159,6 +201,20 @@ func Run(ctx context.Context, cfg Config) error {
 
 	select {
 	case <-ctx.Done():
+		// Cancel the worker FIRST so its in-flight deliveries race
+		// against ShutdownGrace rather than the HTTP Shutdown.
+		cancelWorker()
+		if worker != nil {
+			workerDone := make(chan struct{})
+			go func() {
+				worker.Wait()
+				close(workerDone)
+			}()
+			select {
+			case <-workerDone:
+			case <-time.After(grace):
+			}
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
 		shutErr := srv.Shutdown(shutCtx)
@@ -170,6 +226,34 @@ func Run(ctx context.Context, cfg Config) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// ensureNotifyFailBucket creates the per-scope notifyfail KV bucket
+// with a 168h (7-day) TTL when absent. The TTL bounds the unbounded-
+// growth risk noted in plan §11; operators inspecting the dead-letter
+// log have a week to act before entries roll off.
+func ensureNotifyFailBucket(ctx context.Context, cfg Config) error {
+	bucket, err := scope.Bucket(cfg.ScopeKind, cfg.ScopeID, "notifyfail")
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.JS.KeyValue(ctx, bucket); err == nil {
+		return nil
+	} else if !errors.Is(err, jetstream.ErrBucketNotFound) {
+		return err
+	}
+	_, err = cfg.JS.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket: bucket,
+		TTL:    168 * time.Hour,
+	})
+	if err == nil {
+		return nil
+	}
+	// Race: another process may have created it between our Open and Create.
+	if _, err2 := cfg.JS.KeyValue(ctx, bucket); err2 == nil {
+		return nil
+	}
+	return err
 }
 
 func validate(cfg Config) error {
