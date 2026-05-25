@@ -723,7 +723,8 @@ func TestShutdownDrains(t *testing.T) {
 	}
 
 	// After cancel + drain, $SRV.INFO.agents should yield nothing.
-	_, err := nc.Request("$SRV.INFO.agents", nil, 200*time.Millisecond)
+	// 1s budget tolerates CI runner jitter; locally completes in <10ms.
+	_, err := nc.Request("$SRV.INFO.agents", nil, 1*time.Second)
 	if err == nil {
 		t.Error("$SRV.INFO.agents still responds after shutdown")
 	} else if !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, nats.ErrNoResponders) {
