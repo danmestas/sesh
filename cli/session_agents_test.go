@@ -379,7 +379,6 @@ func TestConnectWithBackoff_RetriesUntilServerUp(t *testing.T) {
 	t.Cleanup(s2.Shutdown)
 }
 
-
 // TestConnectWithBackoff_HonorsCtxCancel verifies the retry loop exits
 // promptly when ctx is cancelled, even if the server is unreachable.
 func TestConnectWithBackoff_HonorsCtxCancel(t *testing.T) {

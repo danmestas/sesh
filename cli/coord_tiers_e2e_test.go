@@ -427,7 +427,6 @@ func collectHeartbeatsFromChannel(t *testing.T, ch <-chan *nats.Msg, sessionLabe
 				seen[a] = p
 			}
 		case <-ctx.Done():
-			break
 		}
 		if ctx.Err() != nil {
 			break
@@ -478,4 +477,3 @@ func stderrAll(sbs []*syncBuf) string {
 	}
 	return out.String()
 }
-

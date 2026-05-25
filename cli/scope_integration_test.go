@@ -327,4 +327,3 @@ func startSeshArgs(t *testing.T, bin, home, project, session string, extra ...st
 	}
 	return cmd, stderr
 }
-

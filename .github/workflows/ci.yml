@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: clone sibling repos for go.mod replace directives
+        # go.mod uses `replace ... => ../sesh-ops` and `=> ../EdgeSync`
+        # for local development. CI satisfies them by cloning the
+        # siblings next to this checkout. sesh-ops has no tagged
+        # release yet; pin HEAD until one lands.
+        run: |
+          cd "${{ runner.workspace }}"
+          git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
+          git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt needs to be run on:"
+            echo "$out"
+            exit 1
+          fi
+      - name: go test
+        # -short skips integration/E2E tests that require local fixtures
+        # (Claude/OMP creds, sibling-clone state, subprocess fork timing).
+        # Those tests are run manually via test/integration/ or by the
+        # operator's local AFK loop. CI runs unit tests + race detector.
+        run: go test ./... -short -race -count=1 -timeout 180s
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: clone sibling repos for go.mod replace directives
+        run: |
+          cd "${{ runner.workspace }}"
+          git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
+          git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          # goinstall builds golangci-lint with the runner's Go toolchain
+          # (Go 1.26 from go.mod). The pre-built binary is compiled
+          # against Go 1.25 and refuses to lint code targeting 1.26+.
+          install-mode: goinstall
+          version: v2.5.0
+          args: --timeout=5m
