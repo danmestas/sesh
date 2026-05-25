@@ -940,7 +940,12 @@ func TestA2A_PushNotConfigured_When_Disabled(t *testing.T) {
 		"DeleteTaskPushNotificationConfig",
 	} {
 		t.Run(method, func(t *testing.T) {
-			body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"taskId":"T1","pushNotificationConfigId":"cfg","pushNotificationConfig":{"url":"http://127.0.0.1:1/h"}}}`
+			// Flat a2a-go v2.3.1 PushConfig wire shape applies even to
+			// Get/List/Delete (their bodies tolerate extra fields). All
+			// four methods short-circuit on PushKey==nil before parsing,
+			// so the body shape is incidental here — keep it valid for
+			// when someone tightens that ordering.
+			body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"taskId":"T1","id":"cfg","url":"http://127.0.0.1:1/h"}}`
 			status, resp := postJSONRPC(t, url, body)
 			if status != http.StatusOK {
 				t.Fatalf("status = %d", status)
@@ -968,7 +973,7 @@ func TestA2A_PushCRUD_EndToEnd(t *testing.T) {
 	}
 
 	const sentinel = "PLAINTEXT_SENTINEL_42"
-	createBody := `{"jsonrpc":"2.0","id":1,"method":"CreateTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1","pushNotificationConfig":{"url":"http://127.0.0.1:9999/h","authentication":{"scheme":"Bearer","credentials":"` + sentinel + `"}}}}`
+	createBody := `{"jsonrpc":"2.0","id":1,"method":"CreateTaskPushNotificationConfig","params":{"taskId":"T1","id":"cfg-1","url":"http://127.0.0.1:9999/h","authentication":{"scheme":"Bearer","credentials":"` + sentinel + `"}}}`
 	status, resp := postJSONRPC(t, url, createBody)
 	if status != http.StatusOK {
 		t.Fatalf("create status = %d body=%s", status, resp)
@@ -994,7 +999,7 @@ func TestA2A_PushCRUD_EndToEnd(t *testing.T) {
 	}
 
 	// Get returns plaintext.
-	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":2,"method":"GetTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1"}}`)
+	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":2,"method":"GetTaskPushNotificationConfig","params":{"taskId":"T1","id":"cfg-1"}}`)
 	if status != http.StatusOK {
 		t.Fatalf("get status = %d", status)
 	}
@@ -1012,11 +1017,11 @@ func TestA2A_PushCRUD_EndToEnd(t *testing.T) {
 	}
 
 	// Delete then Get returns TaskNotFoundError.
-	status, _ = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":4,"method":"DeleteTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1"}}`)
+	status, _ = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":4,"method":"DeleteTaskPushNotificationConfig","params":{"taskId":"T1","id":"cfg-1"}}`)
 	if status != http.StatusOK {
 		t.Fatalf("delete status = %d", status)
 	}
-	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":5,"method":"GetTaskPushNotificationConfig","params":{"taskId":"T1","pushNotificationConfigId":"cfg-1"}}`)
+	status, resp = postJSONRPC(t, url, `{"jsonrpc":"2.0","id":5,"method":"GetTaskPushNotificationConfig","params":{"taskId":"T1","id":"cfg-1"}}`)
 	if status != http.StatusOK {
 		t.Fatalf("post-delete get status = %d", status)
 	}

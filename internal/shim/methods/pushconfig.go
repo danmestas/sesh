@@ -25,23 +25,55 @@ const (
 	notifyWriteScope = "agent.notify.write"
 )
 
-// pushConfigParams is the A2A "params" envelope shape for the four
-// push methods. All four route through the same wire shape;
-// optionality of pushNotificationConfig (Create/list don't both need
-// it) is enforced per-handler.
-type pushConfigParams struct {
-	// TaskID is the task this config belongs to. Required by every
-	// handler; missing ⇒ ErrInvalidParams.
-	TaskID string `json:"taskId,omitempty"`
+// The four push methods each ship their own params shape on the wire,
+// mirroring a2a-go v2.3.1's a2a/push.go request structs. The shim used
+// to share a single nested envelope (legacy {taskId,
+// pushNotificationConfigId, pushNotificationConfig:{...}}); that diverged
+// from the stock SDK and broke a2a-go clients. Sesh #132 tracks the fix.
+//
+// IMPORTANT: error.data shape on these four methods is intentionally
+// dropped. a2a-go declares jsonrpc.Error.Data as []*errordetails.Typed
+// (internal/jsonrpc/jsonrpc.go:54-58); pushing map[string]string into
+// the field fails the client-side unmarshal. The error.Message text
+// already carries the human-readable reason — that's enough for the
+// SDK to surface to the caller. Other shim methods can keep
+// WithData(...) where it's harmless; here we drop it for SDK parity.
 
-	// PushNotificationConfigID is the per-task config id. Required
-	// by Get/Delete; Create accepts blank and mints a ULID; List
-	// ignores it entirely.
-	PushNotificationConfigID string `json:"pushNotificationConfigId,omitempty"`
+// pushCreateParams matches a2a-go's *a2a.PushConfig used as the Create
+// request body. The wire shape is flat: taskId/id/url/authentication/
+// token/tenant — no nested pushNotificationConfig envelope. Because
+// notifications.NotifyConfig is wire-compatible with a2a.PushConfig
+// (Tenant added for sesh-ops multi-tenant carry, otherwise identical
+// JSON tags per sesh-ops/notifications/config.go), the shim unmarshals
+// the params bytes straight into a NotifyConfig and threads it into
+// the validate → encrypt → persist flow.
 
-	// PushNotificationConfig is the full config object. Required by
-	// Create; ignored by Get/List/Delete.
-	PushNotificationConfig *notifications.NotifyConfig `json:"pushNotificationConfig,omitempty"`
+// pushGetParams matches a2a-go's *a2a.GetTaskPushConfigRequest:
+// {taskId, id, tenant?}. Note `id` (not `pushNotificationConfigId`).
+type pushGetParams struct {
+	TaskID string `json:"taskId"`
+	ID     string `json:"id"`
+	Tenant string `json:"tenant,omitempty"`
+}
+
+// pushListParams matches a2a-go's *a2a.ListTaskPushConfigRequest:
+// {taskId, tenant?, pageSize?, pageToken?}. PageSize/PageToken are
+// accepted but ignored at v0.4 — sesh-ops List returns every config
+// for a task in one shot, and we don't yet have a strong reason to
+// page (per-task config counts are small).
+type pushListParams struct {
+	TaskID    string `json:"taskId"`
+	Tenant    string `json:"tenant,omitempty"`
+	PageSize  int    `json:"pageSize,omitempty"`
+	PageToken string `json:"pageToken,omitempty"`
+}
+
+// pushDeleteParams matches a2a-go's *a2a.DeleteTaskPushConfigRequest:
+// {taskId, id, tenant?}. Mirror of pushGetParams.
+type pushDeleteParams struct {
+	TaskID string `json:"taskId"`
+	ID     string `json:"id"`
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // createTaskPushNotificationConfig stores an encrypted NotifyConfig
@@ -55,30 +87,29 @@ func (d *Dispatcher) createTaskPushNotificationConfig(ctx context.Context, param
 		return nil, jsonrpc.ErrPushNotConfigured
 	}
 	if d.deps.JS == nil {
-		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream v2 not configured"})
+		return nil, jsonrpc.ErrInternal
 	}
 
 	principal, ok := auth.FromContext(ctx)
 	if !ok || !HasScope(principal, notifyWriteScope) {
-		return nil, jsonrpc.ErrInvalidReq.WithData(map[string]string{"reason": "missing scope " + notifyWriteScope})
+		return nil, jsonrpc.ErrInvalidReq
 	}
 
-	p, jerr := decodePushParams(params)
-	if jerr != nil {
-		return nil, jerr
+	if len(params) == 0 {
+		return nil, jsonrpc.ErrInvalidParams
 	}
-	if p.TaskID == "" {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "params.taskId is required"})
+	var cfg notifications.NotifyConfig
+	if err := json.Unmarshal(params, &cfg); err != nil {
+		return nil, jsonrpc.ErrInvalidParams
 	}
-	if p.PushNotificationConfig == nil {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "params.pushNotificationConfig is required"})
+	if cfg.TaskID == "" {
+		return nil, jsonrpc.ErrInvalidParams
 	}
-	cfg := *p.PushNotificationConfig
 	if cfg.URL == "" {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "pushNotificationConfig.url is required"})
+		return nil, jsonrpc.ErrInvalidParams
 	}
 	if err := push.ValidateURL(cfg.URL, d.deps.PushDevAllowLocalhost, nil); err != nil {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "url rejected", "detail": err.Error()})
+		return nil, jsonrpc.ErrInvalidParams
 	}
 
 	// Verify task exists before persisting the config (downgrade noise
@@ -87,18 +118,15 @@ func (d *Dispatcher) createTaskPushNotificationConfig(ctx context.Context, param
 	if jerr != nil {
 		return nil, jerr
 	}
-	if _, err := tasksKV.Get(ctx, p.TaskID); err != nil {
+	if _, err := tasksKV.Get(ctx, cfg.TaskID); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, jsonrpc.ErrTaskNotFound
 		}
-		d.deps.Log.Error("createPushCfg: read task", "task_id", p.TaskID, "err", err)
+		d.deps.Log.Error("createPushCfg: read task", "task_id", cfg.TaskID, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
 
-	configID := p.PushNotificationConfigID
-	if configID == "" && cfg.ID != "" {
-		configID = cfg.ID
-	}
+	configID := cfg.ID
 	if configID == "" {
 		configID = newULID()
 	}
@@ -106,12 +134,11 @@ func (d *Dispatcher) createTaskPushNotificationConfig(ctx context.Context, param
 	// Encrypt at the boundary. Encrypted copy goes into KV; the
 	// response returns the original plaintext (caller already has it).
 	stored := cfg
-	stored.TaskID = p.TaskID
 	stored.ID = configID
 	if cfg.Auth != nil && cfg.Auth.Credentials != "" {
 		enc, err := push.EncryptCredentials(cfg.Auth.Credentials, d.deps.PushKey)
 		if err != nil {
-			d.deps.Log.Error("createPushCfg: encrypt", "task_id", p.TaskID, "config_id", configID, "err", err)
+			d.deps.Log.Error("createPushCfg: encrypt", "task_id", cfg.TaskID, "config_id", configID, "err", err)
 			return nil, jsonrpc.ErrInternal
 		}
 		// Copy Auth so we don't mutate the caller's struct.
@@ -124,15 +151,14 @@ func (d *Dispatcher) createTaskPushNotificationConfig(ctx context.Context, param
 	if jerr != nil {
 		return nil, jerr
 	}
-	if err := notifications.Set(ctx, notifyKV, p.TaskID, configID, stored); err != nil {
-		d.deps.Log.Error("createPushCfg: notifications.Set", "task_id", p.TaskID, "config_id", configID, "err", err)
+	if err := notifications.Set(ctx, notifyKV, cfg.TaskID, configID, stored); err != nil {
+		d.deps.Log.Error("createPushCfg: notifications.Set", "task_id", cfg.TaskID, "config_id", configID, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
 
 	// Response: plaintext echoed. Caller already has it; this is
 	// confirmation, not disclosure.
 	resp := cfg
-	resp.TaskID = p.TaskID
 	resp.ID = configID
 	return resp, nil
 }
@@ -146,32 +172,35 @@ func (d *Dispatcher) getTaskPushNotificationConfig(ctx context.Context, params j
 		return nil, jsonrpc.ErrPushNotConfigured
 	}
 	if d.deps.JS == nil {
-		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream v2 not configured"})
+		return nil, jsonrpc.ErrInternal
 	}
 
 	principal, ok := auth.FromContext(ctx)
 	if !ok || !HasScope(principal, notifyReadScope) {
-		return nil, jsonrpc.ErrInvalidReq.WithData(map[string]string{"reason": "missing scope " + notifyReadScope})
+		return nil, jsonrpc.ErrInvalidReq
 	}
 
-	p, jerr := decodePushParams(params)
-	if jerr != nil {
-		return nil, jerr
+	if len(params) == 0 {
+		return nil, jsonrpc.ErrInvalidParams
 	}
-	if p.TaskID == "" || p.PushNotificationConfigID == "" {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "params.taskId and params.pushNotificationConfigId are required"})
+	var p pushGetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, jsonrpc.ErrInvalidParams
+	}
+	if p.TaskID == "" || p.ID == "" {
+		return nil, jsonrpc.ErrInvalidParams
 	}
 
 	notifyKV, jerr := d.openOrCreateKV(ctx, mustBucket(d.deps.ScopeKind, d.deps.ScopeID, "notifycfg"))
 	if jerr != nil {
 		return nil, jerr
 	}
-	cfg, err := notifications.Get(ctx, notifyKV, p.TaskID, p.PushNotificationConfigID)
+	cfg, err := notifications.Get(ctx, notifyKV, p.TaskID, p.ID)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, jsonrpc.ErrTaskNotFound
 		}
-		d.deps.Log.Error("getPushCfg: notifications.Get", "task_id", p.TaskID, "config_id", p.PushNotificationConfigID, "err", err)
+		d.deps.Log.Error("getPushCfg: notifications.Get", "task_id", p.TaskID, "config_id", p.ID, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
 	if err := decryptIntoCfg(&cfg, d.deps.PushKey, d.deps.Log); err != nil {
@@ -188,15 +217,18 @@ func (d *Dispatcher) listTaskPushNotificationConfigs(ctx context.Context, params
 		return nil, jsonrpc.ErrPushNotConfigured
 	}
 	if d.deps.JS == nil {
-		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream v2 not configured"})
+		return nil, jsonrpc.ErrInternal
 	}
 
-	p, jerr := decodePushParams(params)
-	if jerr != nil {
-		return nil, jerr
+	if len(params) == 0 {
+		return nil, jsonrpc.ErrInvalidParams
+	}
+	var p pushListParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, jsonrpc.ErrInvalidParams
 	}
 	if p.TaskID == "" {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "params.taskId is required"})
+		return nil, jsonrpc.ErrInvalidParams
 	}
 
 	principal, ok := auth.FromContext(ctx)
@@ -206,7 +238,7 @@ func (d *Dispatcher) listTaskPushNotificationConfigs(ctx context.Context, params
 
 	bucket, err := scope.Bucket(d.deps.ScopeKind, d.deps.ScopeID, "notifycfg")
 	if err != nil {
-		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "invalid scope"})
+		return nil, jsonrpc.ErrInternal
 	}
 	notifyKV, err := d.deps.JS.KeyValue(ctx, bucket)
 	if err != nil {
@@ -239,28 +271,31 @@ func (d *Dispatcher) deleteTaskPushNotificationConfig(ctx context.Context, param
 		return nil, jsonrpc.ErrPushNotConfigured
 	}
 	if d.deps.JS == nil {
-		return nil, jsonrpc.ErrInternal.WithData(map[string]string{"reason": "JetStream v2 not configured"})
+		return nil, jsonrpc.ErrInternal
 	}
 
 	principal, ok := auth.FromContext(ctx)
 	if !ok || !HasScope(principal, notifyWriteScope) {
-		return nil, jsonrpc.ErrInvalidReq.WithData(map[string]string{"reason": "missing scope " + notifyWriteScope})
+		return nil, jsonrpc.ErrInvalidReq
 	}
 
-	p, jerr := decodePushParams(params)
-	if jerr != nil {
-		return nil, jerr
+	if len(params) == 0 {
+		return nil, jsonrpc.ErrInvalidParams
 	}
-	if p.TaskID == "" || p.PushNotificationConfigID == "" {
-		return nil, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "params.taskId and params.pushNotificationConfigId are required"})
+	var p pushDeleteParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, jsonrpc.ErrInvalidParams
+	}
+	if p.TaskID == "" || p.ID == "" {
+		return nil, jsonrpc.ErrInvalidParams
 	}
 
 	notifyKV, jerr := d.openOrCreateKV(ctx, mustBucket(d.deps.ScopeKind, d.deps.ScopeID, "notifycfg"))
 	if jerr != nil {
 		return nil, jerr
 	}
-	if err := notifications.Delete(ctx, notifyKV, p.TaskID, p.PushNotificationConfigID); err != nil {
-		d.deps.Log.Error("deletePushCfg: notifications.Delete", "task_id", p.TaskID, "config_id", p.PushNotificationConfigID, "err", err)
+	if err := notifications.Delete(ctx, notifyKV, p.TaskID, p.ID); err != nil {
+		d.deps.Log.Error("deletePushCfg: notifications.Delete", "task_id", p.TaskID, "config_id", p.ID, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
 	return struct{}{}, nil
@@ -275,20 +310,6 @@ type pushListResponse struct {
 
 func emptyPushList() pushListResponse {
 	return pushListResponse{Configs: []notifications.NotifyConfig{}}
-}
-
-// decodePushParams unmarshals the JSON-RPC params envelope into a
-// pushConfigParams. Centralized so the four handlers share the same
-// "params is required + must be JSON" failure shape.
-func decodePushParams(params json.RawMessage) (pushConfigParams, *jsonrpc.Error) {
-	var p pushConfigParams
-	if len(params) == 0 {
-		return p, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": "params is required"})
-	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return p, jsonrpc.ErrInvalidParams.WithData(map[string]string{"err": err.Error()})
-	}
-	return p, nil
 }
 
 // decryptIntoCfg unpacks cfg.Auth.Credentials in place. Legacy
