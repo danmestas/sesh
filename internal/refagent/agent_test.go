@@ -723,12 +723,22 @@ func TestShutdownDrains(t *testing.T) {
 	}
 
 	// After cancel + drain, $SRV.INFO.agents should yield nothing.
-	// 1s budget tolerates CI runner jitter; locally completes in <10ms.
-	_, err := nc.Request("$SRV.INFO.agents", nil, 1*time.Second)
-	if err == nil {
-		t.Error("$SRV.INFO.agents still responds after shutdown")
-	} else if !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, nats.ErrNoResponders) {
-		t.Errorf("unexpected error type %v", err)
+	// Run() returning is necessary but not sufficient: micro service
+	// deregistration is async and on CI runners can lag the Run() return
+	// by hundreds of ms. Poll until the request times out (no responder)
+	// or our 2s budget elapses. Locally completes on the first poll.
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		_, lastErr = nc.Request("$SRV.INFO.agents", nil, 100*time.Millisecond)
+		if lastErr != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		t.Error("$SRV.INFO.agents still responds 2s after shutdown")
+	} else if !errors.Is(lastErr, nats.ErrTimeout) && !errors.Is(lastErr, nats.ErrNoResponders) {
+		t.Errorf("unexpected error type %v", lastErr)
 	}
 }
 
