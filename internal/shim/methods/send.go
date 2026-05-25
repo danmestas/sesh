@@ -168,31 +168,48 @@ func (d *Dispatcher) openOrCreateKV(ctx context.Context, bucket string) (jetstre
 // agents.prompt.v2.* subject so an adapter subscribed via the queue
 // group wakes up. Errors are logged and swallowed — the KV write
 // already happened and is authoritative.
+//
+// Subject construction matches sesh-channels SDK promptV2():
+//
+//	agents.prompt.v2.<machine>.<project>.<session>.<role>
+//
+// Three contract details, all gotchas surfaced by sesh#124:
+//
+//  1. Project and session are SEPARATE tokens. Session-scoped shims
+//     carry a dotted ScopeID ("<project>.<session>") — we split on the
+//     first '.' so the subject's project + session tokens match the
+//     adapter's SESH_PROJECT / SESH_SESSION env split. ScopeIDs with no
+//     dot fall back to project=session=scopeid (back-compat with
+//     project-scoped shims that only have a single token).
+//
+//  2. Role is the abbreviated subject token (e.g. "cc"), discovered
+//     from the adapter's $SRV.INFO `metadata.role`. The shim's --agent
+//     flag carries the canonical agent ID ("claude-code") which is
+//     unsuitable as a subject token; the canonical ID stays in
+//     metadata.agent for L1+L2 card composition.
+//
+//  3. When discovery fails (no adapter responding within the composer
+//     query window), we fall back to the --agent flag value so the
+//     legacy single-token form still works for adapters that haven't
+//     populated metadata.role yet.
 func (d *Dispatcher) publishPromptV2(raw json.RawMessage) {
 	if d.deps.NC == nil || d.deps.Machine == "" {
 		return
 	}
-	role := d.deps.AgentKey.Agent
+
+	role := d.discoverRoleToken()
+	if role == "" {
+		role = d.deps.AgentKey.Agent
+	}
 	if role == "" {
 		return
 	}
-	// Session scope-ids of the form "<project>.<session>" contain '.',
-	// which subject.PromptV2's validateToken rejects. Sanitize by
-	// replacing '.' with '_' — mirrors sesh-ops/scope.Bucket and the
-	// sesh-channels SDK's matching sanitization. Adapters apply the
-	// same rule on subscribe, so both sides converge on the same
-	// subject string.
-	//
-	// v0.4 ships session-scoped only, so Project=Session=ScopeID is
-	// intentional — the subject reads as
-	// `agents.prompt.v2.<m>.<s>.<s>.<r>` and adapters subscribe with
-	// the matching coord. Project/session split lands when scope
-	// plumbing carries both independently.
-	token := sanitizeScopeToken(d.deps.ScopeID)
+
+	project, session := splitScopeIDForSubject(d.deps.ScopeID)
 	subj, err := subject.PromptV2(subject.Coord{
 		Machine: d.deps.Machine,
-		Project: token,
-		Session: token,
+		Project: project,
+		Session: session,
 		Role:    role,
 	})
 	if err != nil {
@@ -202,6 +219,50 @@ func (d *Dispatcher) publishPromptV2(raw json.RawMessage) {
 	if err := d.deps.NC.Publish(subj, raw); err != nil {
 		d.deps.Log.Warn("sendMessage: publish prompt", "subj", subj, "err", err)
 	}
+}
+
+// discoverRoleToken asks the Composer for the adapter's
+// `metadata.role` via $SRV.INFO. Best-effort: returns "" when the
+// composer isn't wired (older test deps), when discovery times out, or
+// when the matched adapter omits the role field — callers fall back
+// to the --agent flag. The window is bounded by the composer's own
+// queryWindow so a missing adapter doesn't stall the publish path.
+func (d *Dispatcher) discoverRoleToken() string {
+	if d.deps.Composer == nil {
+		return ""
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	role, ok := d.deps.Composer.DiscoverRoleToken(ctx, d.deps.AgentKey)
+	if !ok {
+		return ""
+	}
+	return role
+}
+
+// splitScopeIDForSubject splits a (possibly dotted) scope-id into the
+// project + session tokens used by the v2 prompt subject. The
+// canonical session-scoped form is "<project>.<session>"; we split on
+// the first '.' so a scope-id like "acme.demo" yields
+// project="acme", session="demo", matching the adapter's SESH_PROJECT
+// / SESH_SESSION env split.
+//
+// Scope-ids with no dot (project-scoped shims, single-token tests)
+// fall back to project=session=scopeid for back-compat: the v0.3 path
+// was Project=Session=ScopeID and several integration tests pin that
+// shape with a single-token scope-id like "abc123".
+//
+// Each output token is then sanitized to be subject-safe (any
+// remaining '.' or whitespace becomes '_'). The sanitize step is a
+// belt-and-braces guard — splitScopeIDForSubject's own logic only
+// leaves one '.' per token when the scope-id has more than one dot
+// (rare; the v0.4 contract is exactly one).
+func splitScopeIDForSubject(scopeID string) (project, session string) {
+	if i := strings.Index(scopeID, "."); i >= 0 {
+		return sanitizeScopeToken(scopeID[:i]), sanitizeScopeToken(scopeID[i+1:])
+	}
+	t := sanitizeScopeToken(scopeID)
+	return t, t
 }
 
 // sanitizeScopeToken makes a scope-id safe to use as a single NATS
