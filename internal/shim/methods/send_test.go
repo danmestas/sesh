@@ -38,10 +38,7 @@ func TestSendMessage_NewTask(t *testing.T) {
 	if jerr != nil {
 		t.Fatalf("sendMessage: %+v", jerr)
 	}
-	raw, ok := res.(json.RawMessage)
-	if !ok {
-		t.Fatalf("result type = %T, want json.RawMessage", res)
-	}
+	raw := mustUnwrapTask(t, res)
 	var task struct {
 		ID        string `json:"id"`
 		Kind      string `json:"kind"`
@@ -125,7 +122,7 @@ func TestSendMessage_ExistingTask(t *testing.T) {
 	if jerr != nil {
 		t.Fatalf("sendMessage: %+v", jerr)
 	}
-	raw, _ := res.(json.RawMessage)
+	raw := mustUnwrapTask(t, res)
 	if !bytes.Contains(raw, []byte(`"id":"PRE-T"`)) {
 		t.Errorf("returned task not PRE-T: %s", raw)
 	}
@@ -241,7 +238,7 @@ func TestSendMessage_RoleTranslation_AgentRoleStored(t *testing.T) {
 	if jerr != nil {
 		t.Fatalf("sendMessage: %+v", jerr)
 	}
-	raw, _ := res.(json.RawMessage)
+	raw := mustUnwrapTask(t, res)
 	var task struct {
 		ID string `json:"id"`
 	}
@@ -354,4 +351,19 @@ func TestSendMessage_PublishNoOp_WhenAgentEmpty(t *testing.T) {
 	if _, jerr := disp.sendMessage(ctx, params); jerr != nil {
 		t.Fatalf("sendMessage should succeed even with publish no-op: %+v", jerr)
 	}
+}
+
+// mustUnwrapTask extracts the raw task JSON from sendMessage's
+// StreamResponse envelope (`{"task": <raw>}` per the a2a-go spec).
+func mustUnwrapTask(t *testing.T, res any) json.RawMessage {
+	t.Helper()
+	env, ok := res.(map[string]json.RawMessage)
+	if !ok {
+		t.Fatalf("result type = %T, want map[string]json.RawMessage", res)
+	}
+	raw, ok := env["task"]
+	if !ok {
+		t.Fatalf("result envelope missing 'task' key: %v", env)
+	}
+	return raw
 }
