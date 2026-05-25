@@ -45,19 +45,36 @@ type Deps struct {
 	// Tests inject a short interval to make keepalive observable
 	// without 25s of real-time wait.
 	KeepaliveInterval time.Duration
+
+	// PushKey is the 32-byte AES-256-GCM key used by the push CRUD
+	// handlers to encrypt Auth.Credentials at the storage boundary.
+	// Nil ⇒ all 4 push methods return jsonrpc.ErrPushNotConfigured.
+	// Slice 6 plumbs this from server.Config; main.go derives it from
+	// --push-encryption-key.
+	PushKey []byte
+
+	// PushDevAllowLocalhost mirrors --dev for the push SSRF guard.
+	// True permits http://{localhost,127.0.0.1,[::1]} in webhook URLs;
+	// false (production) rejects all http:// and all RFC1918/loopback
+	// resolutions.
+	PushDevAllowLocalhost bool
 }
 
 // JSON-RPC method names. Centralizing them here keeps the routing in
 // methods.go, the streaming-branch in server.go, and the test fixtures
 // from drifting apart.
 const (
-	MethodGetTask              = "GetTask"
-	MethodGetExtendedAgentCard = "GetExtendedAgentCard"
-	MethodSendMessage          = "SendMessage"
-	MethodSendStreamingMessage = "SendStreamingMessage"
-	MethodSubscribeToTask      = "SubscribeToTask"
-	MethodCancelTask           = "CancelTask"
-	MethodListTasks            = "ListTasks"
+	MethodGetTask                          = "GetTask"
+	MethodGetExtendedAgentCard             = "GetExtendedAgentCard"
+	MethodSendMessage                      = "SendMessage"
+	MethodSendStreamingMessage             = "SendStreamingMessage"
+	MethodSubscribeToTask                  = "SubscribeToTask"
+	MethodCancelTask                       = "CancelTask"
+	MethodListTasks                        = "ListTasks"
+	MethodCreateTaskPushNotificationConfig = "CreateTaskPushNotificationConfig"
+	MethodGetTaskPushNotificationConfig    = "GetTaskPushNotificationConfig"
+	MethodListTaskPushNotificationConfigs  = "ListTaskPushNotificationConfigs"
+	MethodDeleteTaskPushNotificationConfig = "DeleteTaskPushNotificationConfig"
 )
 
 // Dispatcher is the JSON-RPC method router. Construct via NewDispatcher.
@@ -89,6 +106,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, method string, params json.Ra
 		return d.cancelTask(ctx, params)
 	case MethodListTasks:
 		return d.listTasks(ctx, params)
+	case MethodCreateTaskPushNotificationConfig:
+		return d.createTaskPushNotificationConfig(ctx, params)
+	case MethodGetTaskPushNotificationConfig:
+		return d.getTaskPushNotificationConfig(ctx, params)
+	case MethodListTaskPushNotificationConfigs:
+		return d.listTaskPushNotificationConfigs(ctx, params)
+	case MethodDeleteTaskPushNotificationConfig:
+		return d.deleteTaskPushNotificationConfig(ctx, params)
 	default:
 		return nil, jsonrpc.ErrMethodNotFound
 	}
