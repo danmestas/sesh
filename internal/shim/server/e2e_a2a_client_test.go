@@ -463,7 +463,6 @@ func TestE2E_A2AClient(t *testing.T) {
 	})
 
 	t.Run("CreateTaskPushConfig", func(t *testing.T) {
-		t.Skip("blocked on #132: PushConfig params must be flat; error data must be []errordetails.Typed")
 		fix := newE2EFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

@@ -74,21 +74,22 @@ func seedTaskForPush(t *testing.T, ctx context.Context, d Deps, taskID string) {
 	seedTask(t, ctx, d, taskID, payload)
 }
 
+// validCreateParams emits the FLAT a2a-go PushConfig wire shape used
+// by CreateTaskPushNotificationConfig: taskId/id/url/authentication
+// at the top level (no nested pushNotificationConfig envelope).
+// Matches a2a-go v2.3.1 a2a/push.go PushConfig.
 func validCreateParams(t *testing.T, taskID, configID, credentials string) json.RawMessage {
 	t.Helper()
 	body := map[string]any{
 		"taskId": taskID,
-		"pushNotificationConfig": map[string]any{
-			"url": "http://127.0.0.1:9999/hook",
-			"authentication": map[string]any{
-				"scheme":      "Bearer",
-				"credentials": credentials,
-			},
+		"url":    "http://127.0.0.1:9999/hook",
+		"authentication": map[string]any{
+			"scheme":      "Bearer",
+			"credentials": credentials,
 		},
 	}
 	if configID != "" {
-		body["pushNotificationConfigId"] = configID
-		body["pushNotificationConfig"].(map[string]any)["id"] = configID
+		body["id"] = configID
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -157,7 +158,7 @@ func TestCreatePushCfg_AssignsBlankID(t *testing.T) {
 	ctx := notifyWriteCtx(t)
 	seedTaskForPush(t, ctx, d, "T1")
 
-	params := json.RawMessage(`{"taskId":"T1","pushNotificationConfig":{"url":"http://127.0.0.1:9999/h"}}`)
+	params := json.RawMessage(`{"taskId":"T1","url":"http://127.0.0.1:9999/h"}`)
 	res, jerr := disp.createTaskPushNotificationConfig(ctx, params)
 	if jerr != nil {
 		t.Fatalf("create: %+v", jerr)
@@ -203,9 +204,9 @@ func TestCreatePushCfg_RejectsSSRF(t *testing.T) {
 	}
 	for _, u := range bad {
 		body := map[string]any{
-			"taskId":                   "T1",
-			"pushNotificationConfigId": "cfg-x",
-			"pushNotificationConfig":   map[string]any{"url": u},
+			"taskId": "T1",
+			"id":     "cfg-x",
+			"url":    u,
 		}
 		raw, _ := json.Marshal(body)
 		_, jerr := disp.createTaskPushNotificationConfig(ctx, raw)
@@ -256,7 +257,7 @@ func TestGetPushCfg_HappyPath_Decrypts(t *testing.T) {
 		t.Fatalf("seed create: %+v", jerr)
 	}
 
-	params := json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"cfg-1"}`)
+	params := json.RawMessage(`{"taskId":"T1","id":"cfg-1"}`)
 	res, jerr := disp.getTaskPushNotificationConfig(notifyReadCtx(t), params)
 	if jerr != nil {
 		t.Fatalf("get: %+v", jerr)
@@ -282,7 +283,7 @@ func TestGetPushCfg_NotFound(t *testing.T) {
 	if _, err := d.JS.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
 		t.Fatal(err)
 	}
-	_, jerr := disp.getTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"missing"}`))
+	_, jerr := disp.getTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","id":"missing"}`))
 	if jerr == nil || jerr.Name != "TaskNotFoundError" {
 		t.Fatalf("got %+v, want TaskNotFoundError", jerr)
 	}
@@ -294,7 +295,7 @@ func TestGetPushCfg_NotFound(t *testing.T) {
 func TestGetPushCfg_MissingScope(t *testing.T) {
 	d, _ := pushDeps(t)
 	disp := NewDispatcher(d)
-	_, jerr := disp.getTaskPushNotificationConfig(notifyNoScopeCtx(t), json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"x"}`))
+	_, jerr := disp.getTaskPushNotificationConfig(notifyNoScopeCtx(t), json.RawMessage(`{"taskId":"T1","id":"x"}`))
 	if jerr == nil || jerr.Code != jsonrpc.ErrInvalidReq.Code {
 		t.Fatalf("got %+v, want ErrInvalidReq", jerr)
 	}
@@ -324,7 +325,7 @@ func TestGetPushCfg_LegacyPlaintextWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, jerr := disp.getTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"cfg-old"}`))
+	res, jerr := disp.getTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","id":"cfg-old"}`))
 	if jerr != nil {
 		t.Fatalf("get: %+v", jerr)
 	}
@@ -413,11 +414,11 @@ func TestDeletePushCfg_HappyPath(t *testing.T) {
 		t.Fatalf("seed create: %+v", jerr)
 	}
 
-	_, jerr := disp.deleteTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"cfg-1"}`))
+	_, jerr := disp.deleteTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","id":"cfg-1"}`))
 	if jerr != nil {
 		t.Fatalf("delete: %+v", jerr)
 	}
-	_, jerr = disp.getTaskPushNotificationConfig(notifyReadCtx(t), json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"cfg-1"}`))
+	_, jerr = disp.getTaskPushNotificationConfig(notifyReadCtx(t), json.RawMessage(`{"taskId":"T1","id":"cfg-1"}`))
 	if jerr == nil || jerr.Name != "TaskNotFoundError" {
 		t.Errorf("post-delete get: got %+v, want TaskNotFoundError", jerr)
 	}
@@ -431,7 +432,7 @@ func TestDeletePushCfg_Idempotent(t *testing.T) {
 	disp := NewDispatcher(d)
 	ctx := notifyWriteCtx(t)
 	// No prior Set.
-	_, jerr := disp.deleteTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"missing"}`))
+	_, jerr := disp.deleteTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","id":"missing"}`))
 	if jerr != nil {
 		t.Fatalf("idempotent delete: %+v", jerr)
 	}
@@ -441,7 +442,7 @@ func TestDeletePushCfg_Idempotent(t *testing.T) {
 func TestDeletePushCfg_MissingScope(t *testing.T) {
 	d, _ := pushDeps(t)
 	disp := NewDispatcher(d)
-	_, jerr := disp.deleteTaskPushNotificationConfig(notifyNoScopeCtx(t), json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"x"}`))
+	_, jerr := disp.deleteTaskPushNotificationConfig(notifyNoScopeCtx(t), json.RawMessage(`{"taskId":"T1","id":"x"}`))
 	if jerr == nil || jerr.Code != jsonrpc.ErrInvalidReq.Code {
 		t.Fatalf("got %+v, want ErrInvalidReq", jerr)
 	}
@@ -461,13 +462,13 @@ func TestPush_CredentialsNeverLeak_InLogs(t *testing.T) {
 	if _, jerr := disp.createTaskPushNotificationConfig(ctx, validCreateParams(t, "T1", "cfg-1", pushSentinel)); jerr != nil {
 		t.Fatalf("create: %+v", jerr)
 	}
-	if _, jerr := disp.getTaskPushNotificationConfig(notifyReadCtx(t), json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"cfg-1"}`)); jerr != nil {
+	if _, jerr := disp.getTaskPushNotificationConfig(notifyReadCtx(t), json.RawMessage(`{"taskId":"T1","id":"cfg-1"}`)); jerr != nil {
 		t.Fatalf("get: %+v", jerr)
 	}
 	if _, jerr := disp.listTaskPushNotificationConfigs(notifyReadCtx(t), json.RawMessage(`{"taskId":"T1"}`)); jerr != nil {
 		t.Fatalf("list: %+v", jerr)
 	}
-	if _, jerr := disp.deleteTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","pushNotificationConfigId":"cfg-1"}`)); jerr != nil {
+	if _, jerr := disp.deleteTaskPushNotificationConfig(ctx, json.RawMessage(`{"taskId":"T1","id":"cfg-1"}`)); jerr != nil {
 		t.Fatalf("delete: %+v", jerr)
 	}
 
