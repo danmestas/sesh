@@ -610,3 +610,58 @@ func TestBuildStatusEvent_RejectsMissingContextID(t *testing.T) {
 		t.Fatal("expected error for missing contextId")
 	}
 }
+
+// TestWorker_RunsOnFreshHub — the worker is started before the HTTP
+// listener (see server.go), so on a fresh hub it boots before any
+// SendMessage has lazily created the tasks bucket. The watcher must
+// tolerate the missing bucket by auto-creating it (matches every
+// other shim path that touches tasks KV).
+//
+// Regression for #140: pre-fix, w.cfg.JS.KeyValue(ctx, tasksBucket)
+// returned ErrBucketNotFound and the worker exited with
+// "worker: open tasks kv: bucket not found", killing webhook delivery
+// for the entire session.
+func TestWorker_RunsOnFreshHub(t *testing.T) {
+	url := startBroker(t)
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	pushKey, err := NewDevKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No CreateKeyValue calls — buckets do not exist on this hub.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewWorker(WorkerConfig{
+		NC:        nc,
+		JS:        js,
+		ScopeKind: "project",
+		ScopeID:   "abc123",
+		PushKey:   pushKey,
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+
+	select {
+	case err := <-runErr:
+		// Run should NOT return inside the watch window with an error.
+		t.Fatalf("worker.Run exited prematurely on fresh hub: %v", err)
+	case <-time.After(200 * time.Millisecond):
+		// Worker is alive after 200ms ⇒ bucket creation succeeded and
+		// the watcher attached. Cancel and let it drain.
+	}
+
+	cancel()
+	w.Wait()
+}

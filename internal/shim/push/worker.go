@@ -130,7 +130,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("worker: notifyfail bucket: %w", err)
 	}
 
-	tasksKV, err := w.cfg.JS.KeyValue(ctx, tasksBucket)
+	tasksKV, err := openOrCreateKV(ctx, w.cfg.JS, tasksBucket)
 	if err != nil {
 		return fmt.Errorf("worker: open tasks kv: %w", err)
 	}
