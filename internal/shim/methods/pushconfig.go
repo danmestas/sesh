@@ -59,7 +59,7 @@ func (d *Dispatcher) createTaskPushNotificationConfig(ctx context.Context, param
 	}
 
 	principal, ok := auth.FromContext(ctx)
-	if !ok || !hasScope(principal, notifyWriteScope) {
+	if !ok || !HasScope(principal, notifyWriteScope) {
 		return nil, jsonrpc.ErrInvalidReq.WithData(map[string]string{"reason": "missing scope " + notifyWriteScope})
 	}
 
@@ -150,7 +150,7 @@ func (d *Dispatcher) getTaskPushNotificationConfig(ctx context.Context, params j
 	}
 
 	principal, ok := auth.FromContext(ctx)
-	if !ok || !hasScope(principal, notifyReadScope) {
+	if !ok || !HasScope(principal, notifyReadScope) {
 		return nil, jsonrpc.ErrInvalidReq.WithData(map[string]string{"reason": "missing scope " + notifyReadScope})
 	}
 
@@ -200,7 +200,7 @@ func (d *Dispatcher) listTaskPushNotificationConfigs(ctx context.Context, params
 	}
 
 	principal, ok := auth.FromContext(ctx)
-	if !ok || !hasScope(principal, notifyReadScope) {
+	if !ok || !HasScope(principal, notifyReadScope) {
 		return emptyPushList(), nil
 	}
 
@@ -243,7 +243,7 @@ func (d *Dispatcher) deleteTaskPushNotificationConfig(ctx context.Context, param
 	}
 
 	principal, ok := auth.FromContext(ctx)
-	if !ok || !hasScope(principal, notifyWriteScope) {
+	if !ok || !HasScope(principal, notifyWriteScope) {
 		return nil, jsonrpc.ErrInvalidReq.WithData(map[string]string{"reason": "missing scope " + notifyWriteScope})
 	}
 

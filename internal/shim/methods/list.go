@@ -63,7 +63,7 @@ func (d *Dispatcher) listTasks(ctx context.Context, params json.RawMessage) (any
 	// principal counts as "unscoped" — defensive against ctx flowing
 	// from non-middleware paths.
 	principal, ok := auth.FromContext(ctx)
-	if !ok || !hasScope(principal, readScope) {
+	if !ok || !HasScope(principal, readScope) {
 		return emptyListResponse(), nil
 	}
 
@@ -122,9 +122,11 @@ func (d *Dispatcher) listTasks(ctx context.Context, params json.RawMessage) (any
 	}, nil
 }
 
-// hasScope returns true when want appears in p.Scopes. Linear scan is
+// HasScope returns true when want appears in p.Scopes. Linear scan is
 // fine for the slice sizes we expect (<10 scopes per principal).
-func hasScope(p auth.Principal, want string) bool {
+// Exported so sibling packages (server/objects.go) can apply the same
+// scope-membership check without re-implementing it.
+func HasScope(p auth.Principal, want string) bool {
 	for _, s := range p.Scopes {
 		if s == want {
 			return true

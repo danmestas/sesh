@@ -100,5 +100,8 @@ func (d *Dispatcher) SubscribeToTask(w http.ResponseWriter, r *http.Request, par
 		return
 	}
 
-	_ = sse.Bridge(r.Context(), w, msgCh, msgStop, artCh, sse.Options{KeepaliveInterval: d.deps.KeepaliveInterval})
+	_ = sse.Bridge(r.Context(), w, msgCh, msgStop, artCh, sse.Options{
+		KeepaliveInterval: d.deps.KeepaliveInterval,
+		Translator:        d.deps.Translator,
+	})
 }

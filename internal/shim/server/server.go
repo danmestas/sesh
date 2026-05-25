@@ -18,6 +18,7 @@ import (
 
 	"github.com/danmestas/sesh-ops/scope"
 
+	"github.com/danmestas/sesh/internal/shim/a2a"
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
 	"github.com/danmestas/sesh/internal/shim/jsonrpc"
@@ -46,6 +47,13 @@ type Config struct {
 	Logger        *slog.Logger
 	ShutdownGrace time.Duration
 
+	// GatewayURL is the public-facing absolute URL clients reach the
+	// shim at. Used by the a2a.Translator (Slice 7) to rewrite obj://
+	// Part URLs to dereferenceable HTTPS. Required outside Dev mode;
+	// empty in Dev means obj:// URLs pass through unchanged (with a
+	// one-shot INFO log).
+	GatewayURL string
+
 	// Push notification (Slice 6) wiring. Zero values disable the
 	// feature: nil PushKey ⇒ the 4 CRUD methods return -32008 and
 	// the delivery worker is NOT started.
@@ -60,6 +68,7 @@ type server struct {
 	cfg        Config
 	log        *slog.Logger
 	dispatcher *methods.Dispatcher
+	translator *a2a.Translator
 
 	mu            sync.Mutex
 	httpReqs      map[httpKey]uint64
@@ -83,9 +92,11 @@ func newServer(cfg Config) *server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	translator := a2a.NewTranslator(cfg.GatewayURL, cfg.Logger)
 	s := &server{
 		cfg:         cfg,
 		log:         cfg.Logger,
+		translator:  translator,
 		httpReqs:    map[httpKey]uint64{},
 		jsonrpcErrs: map[jsonrpcErrKey]uint64{},
 	}
@@ -101,6 +112,7 @@ func newServer(cfg Config) *server {
 		Signer:                cfg.Signer,
 		PushKey:               cfg.PushKey,
 		PushDevAllowLocalhost: cfg.PushDevAllowLocalhost,
+		Translator:            translator,
 	})
 	return s
 }
@@ -121,6 +133,13 @@ func New(cfg Config) (*http.Server, error) {
 
 	a2aHandler := http.HandlerFunc(s.handleA2A)
 	mux.Handle("POST /a2a", auth.Middleware(cfg.Auth)(s.wrapHandler("/a2a", a2aHandler)))
+
+	// Slice 7: gateway-rooted object download. Mounted under the same
+	// JWT/Bearer middleware as /a2a; the handler enforces the
+	// `agent.read` scope. Constant metrics label `/obj` keeps the
+	// cardinality bounded (NO templated `{scopeKind}` leak).
+	mux.Handle("GET "+a2a.ObjectPathPrefix+"{scopeKind}/{scopeID}/{taskID}/{artifactID}",
+		auth.Middleware(cfg.Auth)(s.wrapHandler("/obj", http.HandlerFunc(s.handleObjectGet))))
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
@@ -282,6 +301,13 @@ func validate(cfg Config) error {
 	}
 	if _, err := scope.Bucket(cfg.ScopeKind, cfg.ScopeID, "tasks"); err != nil {
 		return fmt.Errorf("server.Config: invalid scope (kind=%q id=%q): %w", cfg.ScopeKind, cfg.ScopeID, err)
+	}
+	// Slice 7: outside --dev mode, GatewayURL is required so the
+	// obj:// → HTTPS rewrite has a non-empty origin. --dev keeps the
+	// pre-Slice-7 behaviour (pass-through with a one-shot INFO log)
+	// to ease local manual smoke testing.
+	if cfg.GatewayURL == "" && !cfg.Dev {
+		return errors.New("server.Config: GatewayURL is required outside --dev mode (Slice 7)")
 	}
 	return nil
 }

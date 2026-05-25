@@ -42,7 +42,7 @@ func (d *Dispatcher) getExtendedAgentCard(ctx context.Context, _ json.RawMessage
 	}
 
 	p, ok := auth.FromContext(ctx)
-	if !ok || !hasScope(p, extendedReadScope) {
+	if !ok || !HasScope(p, extendedReadScope) {
 		return nil, jsonrpc.ErrExtendedCardNotConfigured
 	}
 
