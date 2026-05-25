@@ -20,6 +20,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: clone sibling repos for go.mod replace directives
+        # go.mod uses `replace ... => ../sesh-ops` and `=> ../EdgeSync`
+        # for local development. CI satisfies them by cloning the
+        # siblings next to this checkout. sesh-ops has no tagged
+        # release yet; pin HEAD until one lands.
+        run: |
+          cd "${{ runner.workspace }}"
+          git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
+          git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -43,11 +52,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: clone sibling repos for go.mod replace directives
+        run: |
+          cd "${{ runner.workspace }}"
+          git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
+          git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
           args: --timeout=5m
