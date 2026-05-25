@@ -63,5 +63,9 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v7
         with:
+          # goinstall builds golangci-lint with the runner's Go toolchain
+          # (Go 1.26 from go.mod). The pre-built binary is compiled
+          # against Go 1.25 and refuses to lint code targeting 1.26+.
+          install-mode: goinstall
           version: v2.5.0
           args: --timeout=5m
