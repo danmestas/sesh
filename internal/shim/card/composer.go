@@ -148,9 +148,24 @@ func (c *Composer) FetchExtended(ctx context.Context, key AgentKey) (cardPartial
 // $SRV.INFO metadata so the resulting subject matches whatever the
 // adapter registered its card endpoint under. Falls back to the
 // caller's key when a particular metadata field is absent.
+//
+// For the Agent token specifically, we prefer `metadata.role` over
+// `metadata.agent`. The adapter's L3 card endpoint is registered on
+// `agents.card.get.<subject-token>.<owner>.<name>` where
+// <subject-token> is the abbreviated form (e.g. "cc"), not the
+// canonical agent ID (e.g. "claude-code"). The canonical ID lives in
+// metadata.agent for L1+L2 composition; the subject token lives in
+// metadata.role. Using metadata.agent for the subject (as #123 did)
+// produces a subject no responder owns. See sesh#124.
+//
+// Preserving the caller's key as the final fallback lets the operator
+// override discovery: if --agent was deliberately set to the right
+// subject token (the rig pattern), it wins when discovery omits role.
 func resolveSubjectTokens(info microInfo, fallback AgentKey) AgentKey {
 	out := fallback
-	if v := info.Metadata["agent"]; v != "" {
+	if v := info.Metadata["role"]; v != "" {
+		out.Agent = v
+	} else if v := info.Metadata["agent"]; v != "" {
 		out.Agent = v
 	}
 	if v := info.Metadata["owner"]; v != "" {

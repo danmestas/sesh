@@ -339,7 +339,10 @@ func TestComposer_L3_AppliesL3_OverlaysOverL2(t *testing.T) {
 	}
 	defer nc.Close()
 
-	registerStubAgent(t, nc, "echo", "alice", "implementer", "cc")
+	// metadata.role doubles as the subject token (sesh#124). Set it
+	// equal to key.Agent so the L3 fetch lands on a subject the stub
+	// L3 reply is registered under.
+	registerStubAgent(t, nc, "echo", "alice", "echo", "cc")
 	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	stubL3Reply(t, nc, mustCardGet(t, key), []byte(`{
 		"description": "L3 wins description",
@@ -540,7 +543,10 @@ func TestComposer_L3_UsesAdapterAdvertisedAgentToken(t *testing.T) {
 
 	const operatorName = "claude-code"
 	const advertisedName = "cc-instance-1"
-	registerStubAgentWithName(t, nc, "cc", "alice", advertisedName, "implementer", "cc")
+	// metadata.role doubles as the subject token (sesh#124). Set it
+	// to "cc" so the resolved subject token matches the operator's
+	// --agent "cc" and stays at the L3-stubbed subject.
+	registerStubAgentWithName(t, nc, "cc", "alice", advertisedName, "cc", "cc")
 
 	key := AgentKey{Agent: "cc", Owner: "alice", Name: operatorName}
 
@@ -565,6 +571,11 @@ func TestComposer_L3_UsesAdapterAdvertisedAgentToken(t *testing.T) {
 // FetchExtended to merge $SRV.INFO metadata with the fallback key.
 // Metadata wins per-field when present; falls back to key when a
 // field is absent.
+//
+// The Agent field has a two-step preference per sesh#124:
+// metadata.role wins when present (the abbreviated subject token the
+// adapter registers its L3 card under), else metadata.agent
+// (canonical agent ID), else the operator's fallback key.
 func TestResolveSubjectTokens(t *testing.T) {
 	fallback := AgentKey{Agent: "op-agent", Owner: "op-owner", Name: "op-name"}
 
@@ -574,7 +585,12 @@ func TestResolveSubjectTokens(t *testing.T) {
 		want AgentKey
 	}{
 		{
-			name: "all metadata present overrides fallback",
+			name: "role+agent+owner+name present: role wins for Agent",
+			md:   map[string]string{"agent": "md-agent", "role": "md-role", "owner": "md-owner", "name": "md-name"},
+			want: AgentKey{Agent: "md-role", Owner: "md-owner", Name: "md-name"},
+		},
+		{
+			name: "agent present, role absent: agent wins for Agent",
 			md:   map[string]string{"agent": "md-agent", "owner": "md-owner", "name": "md-name"},
 			want: AgentKey{Agent: "md-agent", Owner: "md-owner", Name: "md-name"},
 		},
@@ -590,8 +606,13 @@ func TestResolveSubjectTokens(t *testing.T) {
 		},
 		{
 			name: "empty-string metadata values fall back to key",
-			md:   map[string]string{"agent": "", "owner": "", "name": ""},
+			md:   map[string]string{"agent": "", "role": "", "owner": "", "name": ""},
 			want: fallback,
+		},
+		{
+			name: "role only: role overrides fallback Agent",
+			md:   map[string]string{"role": "subject-token"},
+			want: AgentKey{Agent: "subject-token", Owner: "op-owner", Name: "op-name"},
 		},
 	}
 	for _, tc := range cases {
