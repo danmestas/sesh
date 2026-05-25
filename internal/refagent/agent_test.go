@@ -1,6 +1,7 @@
 package refagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -446,18 +447,28 @@ func subSync(t *testing.T, nc *nats.Conn, subject string) *nats.Subscription {
 	return sub
 }
 
-// waitForService spins until $SRV.INFO.agents returns at least one
-// response. The agent registers asynchronously; tests get flaky if
-// they probe too early.
+// waitForService spins until $SRV.INFO.agents returns a response
+// with at least one endpoint registered. The agent registers
+// asynchronously and AddService + AddEndpoint are non-atomic, so
+// a probe that lands between them sees an empty endpoints array.
+// Returning at the first response triggers tests that assert on
+// the endpoint subject; we keep polling until endpoints is populated.
 func waitForService(t *testing.T, nc *nats.Conn) []byte {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
+	var last []byte
 	for time.Now().Before(deadline) {
 		msg, err := nc.Request("$SRV.INFO.agents", nil, 200*time.Millisecond)
 		if err == nil {
-			return msg.Data
+			last = msg.Data
+			if !bytes.Contains(last, []byte(`"endpoints":[]`)) {
+				return last
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if len(last) > 0 {
+		t.Fatalf("agent registered but endpoints stayed empty after 3s:\n%s", last)
 	}
 	t.Fatal("agent never registered (no $SRV.INFO response)")
 	return nil
