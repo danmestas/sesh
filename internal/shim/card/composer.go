@@ -323,14 +323,53 @@ func (c *Composer) discover(ctx context.Context, key AgentKey) (microInfo, bool)
 	}
 }
 
+// matches reports whether info is the adapter the caller's key refers
+// to. The matcher is intentionally loose on the agent field because the
+// shim's `--agent` flag is overloaded across the v0.4 deployment: some
+// operators pass the canonical agent ID (e.g. "claude-code", matching
+// `metadata.agent`) while integration rigs and short-form invocations
+// pass the abbreviated subject token (e.g. "cc", matching the role
+// token the adapter publishes as `metadata.role`). One flag cannot be
+// two things at once, so we accept either form as a match. The owner
+// check stays exact — owners are not abbreviated.
+//
+// See sesh#124 for the motivating rig failure: shim has --agent=cc but
+// the adapter advertises metadata.agent="claude-code", metadata.role="cc".
+// The strict canonical-only match left discover() returning "no match"
+// and L3 + prompt routing both starved.
 func matches(info microInfo, key AgentKey) bool {
-	if key.Agent != "" && info.Metadata["agent"] != key.Agent {
-		return false
+	if key.Agent != "" {
+		if info.Metadata["agent"] != key.Agent && info.Metadata["role"] != key.Agent {
+			return false
+		}
 	}
 	if key.Owner != "" && info.Metadata["owner"] != key.Owner {
 		return false
 	}
 	return true
+}
+
+// DiscoverRoleToken returns the abbreviated subject token the adapter
+// publishes as `metadata.role` in $SRV.INFO. The shim uses this to
+// build the prompt subject's role token, which adapters subscribe with
+// on agents.prompt.v2.<machine>.<project>.<session>.<role>. Returns
+// ("", false) when discovery times out or the matched adapter omits
+// the role metadata — callers fall back to the operator's --agent flag.
+//
+// Decoupling the role token from --agent is required because --agent
+// carries the canonical agent ID (e.g. "claude-code") whereas the v2
+// prompt subject expects the adapter-defined abbreviation (e.g. "cc").
+// See sesh#124.
+func (c *Composer) DiscoverRoleToken(ctx context.Context, key AgentKey) (string, bool) {
+	info, found := c.discover(ctx, key)
+	if !found {
+		return "", false
+	}
+	role := strings.TrimSpace(info.Metadata["role"])
+	if role == "" {
+		return "", false
+	}
+	return role, true
 }
 
 func (c *Composer) applyL2(card *a2a.AgentCard, info microInfo) {
