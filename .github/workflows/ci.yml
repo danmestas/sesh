@@ -44,7 +44,11 @@ jobs:
             exit 1
           fi
       - name: go test
-        run: go test ./... -race -count=1 -timeout 180s
+        # -short skips integration/E2E tests that require local fixtures
+        # (Claude/OMP creds, sibling-clone state, subprocess fork timing).
+        # Those tests are run manually via test/integration/ or by the
+        # operator's local AFK loop. CI runs unit tests + race detector.
+        run: go test ./... -short -race -count=1 -timeout 180s
 
   lint:
     name: lint
