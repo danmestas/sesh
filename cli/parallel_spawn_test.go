@@ -154,4 +154,3 @@ func countMatches(t *testing.T, path, needle string) int {
 	}
 	return count
 }
-

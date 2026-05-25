@@ -355,7 +355,7 @@ func TestUp_ChildHarnessExitTriggersShutdown(t *testing.T) {
 // child's process group via syscall.Kill(-pgid, sig) from inside the
 // spawnHarness site.
 //
-// The child is constructed to ignore SIGTERM (trap '' TERM) and only act on
+// The child is constructed to ignore SIGTERM (trap "" TERM) and only act on
 // the forwarded signal (trap on INT that touches a marker and exits). This
 // proves we are using the explicit forward path, not some incidental kill or
 // default TERM. Without the forwarder goroutine the child survives sesh up's

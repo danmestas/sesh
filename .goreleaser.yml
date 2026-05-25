@@ -1,0 +1,54 @@
+version: 2
+
+project_name: sesh-shim
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sesh-shim
+    main: ./cmd/sesh-shim
+    binary: sesh-shim
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - id: sesh-shim
+    builds: [sesh-shim]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    files:
+      - LICENSE*
+      - README.md
+      - cmd/sesh-shim/README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: danmestas
+    name: sesh
+  draft: true
+  prerelease: auto

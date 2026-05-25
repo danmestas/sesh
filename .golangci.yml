@@ -1,0 +1,24 @@
+version: "2"
+
+# Bug-finding linters. errcheck is intentionally omitted until a cleanup
+# pass — the codebase has ~50 `defer x.Close()` sites where the
+# convention is fire-and-forget. QF* (staticcheck quickfix suggestions)
+# are stylistic refactors, not bugs; we'll re-enable after a sweep.
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -QF1001  # De Morgan's law suggestion
+        - -QF1002  # tagged switch suggestion
+        - -QF1006  # lift into loop condition
+        - -QF1008  # remove embedded field from selector
+        - -ST1003  # underscore naming (ExportForTest_X is intentional)
+
+run:
+  timeout: 5m
