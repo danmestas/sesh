@@ -300,7 +300,6 @@ func TestE2E_A2AClient(t *testing.T) {
 	})
 
 	t.Run("SendMessage", func(t *testing.T) {
-		t.Skip("blocked on #130: shim SendMessage result must wrap Task in {\"task\": ...}")
 		fix := newE2EFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

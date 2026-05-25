@@ -38,7 +38,11 @@ func (d *Dispatcher) sendMessage(ctx context.Context, params json.RawMessage) (a
 		d.deps.Log.Error("sendMessage: re-read task", "task_id", acc.message.TaskID, "err", err)
 		return nil, jsonrpc.ErrInternal
 	}
-	return json.RawMessage(entry.Value()), nil
+	// a2a-go unmarshals JSON-RPC result into StreamResponse, which is a
+	// single-field envelope ({"task": ...} | {"message": ...} | ...).
+	// Wrap the raw task bytes rather than re-marshalling the typed
+	// struct — the bytes already canonicalize what the KV holds.
+	return map[string]json.RawMessage{"task": entry.Value()}, nil
 }
 
 // acceptedInbound captures the post-accept state for callers that
