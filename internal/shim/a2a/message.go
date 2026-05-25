@@ -60,3 +60,64 @@ type wireMessage struct {
 func ToWireMessage(m *messages.Message) (json.RawMessage, error) {
 	return (&Translator{}).ToWireMessage(m)
 }
+
+// meshMessage mirrors wireMessage's field set but types Role as the
+// sesh-canonical lowercase string ("user"|"agent") rather than the
+// a2a-go MessageRole (which JSON-marshals to "ROLE_USER"|"ROLE_AGENT").
+// This is the v0.4 mesh wire shape — the form the adapter-side
+// envelope validator (sesh-channels sdk/src/envelope.ts) accepts.
+//
+// The two projections diverge ONLY on Role:
+//   - wireMessage → outbound a2a-go SSE/JSON-RPC clients (SCREAMING_SNAKE)
+//   - meshMessage → in-process NATS prompt subjects (lowercase)
+//
+// Keep both struct definitions co-located so the divergence stays
+// grep-able and any future Message-spec change updates both at once.
+type meshMessage struct {
+	MessageID        string               `json:"messageId"`
+	TaskID           string               `json:"taskId,omitempty"`
+	ContextID        string               `json:"contextId,omitempty"`
+	Role             messages.MessageRole `json:"role"`
+	Parts            []messages.Part      `json:"parts"`
+	Extensions       []string             `json:"extensions,omitempty"`
+	ReferenceTaskIDs []string             `json:"referenceTaskIds,omitempty"`
+	Metadata         map[string]any       `json:"metadata,omitempty"`
+}
+
+// ToMeshMessage serialises m for the v0.4 NATS mesh wire — the form
+// the sesh-channels adapter SDK envelope validator accepts. Differs
+// from ToWireMessage only in Role projection: lowercase "user"|"agent"
+// instead of a2a-go's SCREAMING_SNAKE constants. Callers on the
+// publishPromptV2 path use this; SSE/JSON-RPC outbound paths use
+// ToWireMessage (sesh#137).
+//
+// Like ToWireMessage, this defensively copies Parts before any rewrite
+// — though the current mesh projection does no Part rewrites, the copy
+// keeps the contract symmetric so a future rewrite (e.g., gateway-
+// rebased obj:// URLs for mesh consumers) doesn't mutate caller state.
+func ToMeshMessage(m *messages.Message) (json.RawMessage, error) {
+	if m == nil {
+		return nil, fmt.Errorf("ToMeshMessage: nil message")
+	}
+	parts := m.Parts
+	if len(parts) > 0 {
+		cp := make([]messages.Part, len(parts))
+		copy(cp, parts)
+		parts = cp
+	}
+	w := meshMessage{
+		MessageID:        m.ID,
+		TaskID:           m.TaskID,
+		ContextID:        m.ContextID,
+		Role:             m.Role,
+		Parts:            parts,
+		Extensions:       m.Extensions,
+		ReferenceTaskIDs: m.ReferenceTaskIDs,
+		Metadata:         m.Metadata,
+	}
+	b, err := json.Marshal(&w)
+	if err != nil {
+		return nil, fmt.Errorf("ToMeshMessage: %w", err)
+	}
+	return b, nil
+}

@@ -118,6 +118,45 @@ func TestRoundTrip_WireToStorageToWire(t *testing.T) {
 	}
 }
 
+// TestToMeshMessage_RoleIsLowercase guards sesh#137: the v0.4 mesh
+// wire projection must emit lowercase "user"/"agent" (not the a2a-go
+// SCREAMING_SNAKE "ROLE_USER"/"ROLE_AGENT") so the sesh-channels
+// adapter SDK envelope validator accepts the published payload.
+func TestToMeshMessage_RoleIsLowercase(t *testing.T) {
+	cases := []struct {
+		role messages.MessageRole
+		want string
+	}{
+		{messages.MessageRoleUser, "user"},
+		{messages.MessageRoleAgent, "agent"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.role), func(t *testing.T) {
+			m := &messages.Message{
+				ID:    "M1",
+				Role:  tc.role,
+				Parts: []messages.Part{{Text: "x"}},
+			}
+			raw, err := ToMeshMessage(m)
+			if err != nil {
+				t.Fatalf("ToMeshMessage: %v", err)
+			}
+			if !strings.Contains(string(raw), `"role":"`+tc.want+`"`) {
+				t.Errorf("payload missing lowercase role %q: %s", tc.want, raw)
+			}
+			if strings.Contains(string(raw), "ROLE_") {
+				t.Errorf("payload still contains SCREAMING_SNAKE form: %s", raw)
+			}
+		})
+	}
+}
+
+func TestToMeshMessage_NilErrors(t *testing.T) {
+	if _, err := ToMeshMessage(nil); err == nil {
+		t.Error("nil: want error")
+	}
+}
+
 func TestFromWireMessage_DoesNotMutateRoleOnUserAndAgentOnly(t *testing.T) {
 	for wire, want := range map[string]messages.MessageRole{
 		"ROLE_USER":  messages.MessageRoleUser,
