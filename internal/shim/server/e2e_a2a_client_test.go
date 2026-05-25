@@ -17,7 +17,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -335,38 +334,47 @@ func TestE2E_A2AClient(t *testing.T) {
 	})
 
 	t.Run("SendStreamingMessage", func(t *testing.T) {
-		t.Skip("blocked on #131: SSE chunks must be full JSON-RPC ClientResponse envelopes")
 		fix := newE2EFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		cl := newE2EClient(ctx, t, fix)
 
-		// Mock plays the adapter: when the prompt arrives, write a
-		// task-state update to the messages KV so the SSE bridge picks
-		// it up (the bridge tails messages, not tasks, so this matches
-		// production behavior).
+		// Mock plays the adapter: when the prompt arrives, look up the
+		// freshly minted task (the shim mints taskId on first message;
+		// the published prompt is the inbound wire-form, which in this
+		// test doesn't carry a taskId — so we discover it by listing
+		// the tasks KV). Then drop an agent reply into the messages KV
+		// so the SSE bridge picks it up.
 		go func() {
-			// Watch for the prompt, then drop an agent reply into the
-			// tasks-scoped messages bucket so the bridge emits an SSE
-			// event. Done as a background goroutine so the streaming
-			// call below can iterate while the mock is reacting.
-			msg := fix.mock.waitForPrompt(2 * time.Second)
-			var inbound struct {
-				TaskID string `json:"taskId"`
-			}
-			_ = json.Unmarshal(msg.Data, &inbound)
-			if inbound.TaskID == "" {
-				return
-			}
+			_ = fix.mock.waitForPrompt(2 * time.Second)
+			tasksBucket := "sesh_tasks_project_e2escope"
 			msgsBucket := "sesh_messages_project_e2escope"
-			kv, err := fix.js.KeyValue(ctx, msgsBucket)
+			tasksKV, err := fix.js.KeyValue(ctx, tasksBucket)
 			if err != nil {
 				return
 			}
-			reply := []byte(`{"messageId":"reply-1","taskId":"` + inbound.TaskID + `","role":"agent","parts":[{"text":"ack","mediaType":"text/plain"}]}`)
+			// Tasks KV may take a tick to settle after the shim's Create.
+			var taskID string
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) && taskID == "" {
+				keys, _ := tasksKV.Keys(ctx)
+				if len(keys) > 0 {
+					taskID = keys[0]
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if taskID == "" {
+				return
+			}
+			msgsKV, err := fix.js.KeyValue(ctx, msgsBucket)
+			if err != nil {
+				return
+			}
+			reply := []byte(`{"messageId":"reply-1","taskId":"` + taskID + `","role":"agent","parts":[{"text":"ack","mediaType":"text/plain"}]}`)
 			// Key shape: <taskId>.<messageId> per sesh-ops messages.Key.
-			_, _ = kv.Put(ctx, inbound.TaskID+".reply-1", reply)
+			_, _ = msgsKV.Put(ctx, taskID+".reply-1", reply)
 		}()
 
 		req := &a2a.SendMessageRequest{
