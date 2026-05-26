@@ -29,7 +29,7 @@ jobs:
           cd "${{ runner.workspace }}"
           git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
           git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v5.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -61,7 +61,7 @@ jobs:
           cd "${{ runner.workspace }}"
           git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
           git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v5.5.0
         with:
           go-version-file: go.mod
           cache: true
