@@ -277,15 +277,15 @@ func TestSanitizeLabelFromBasename(t *testing.T) {
 	}{
 		{"sesh", "sesh"},
 		{"my-project", "my-project"},
-		{"my project", "my project"},       // spaces are printable ASCII, kept
-		{".hidden", "hidden"},              // leading dot stripped
-		{"a/b", "ab"},                     // path separator removed
-		{"a\\b", "ab"},                    // backslash removed
-		{"\x00nul", "nul"},               // NUL stripped
-		{"\x1b[red]", "[red]"},           // control chars stripped
-		{"café", "caf"},                   // non-ASCII stripped
-		{"", ""},                          // empty stays empty
-		{"..", ""},                        // all-dot → empty after strip
+		{"my project", "my project"}, // spaces are printable ASCII, kept
+		{".hidden", "hidden"},        // leading dot stripped
+		{"a/b", "ab"},                // path separator removed
+		{"a\\b", "ab"},               // backslash removed
+		{"\x00nul", "nul"},           // NUL stripped
+		{"\x1b[red]", "[red]"},       // control chars stripped
+		{"café", "caf"},              // non-ASCII stripped
+		{"", ""},                     // empty stays empty
+		{"..", ""},                   // all-dot → empty after strip
 		{strings.Repeat("x", 200), strings.Repeat("x", 128)}, // capped at 128
 	}
 	for _, tc := range cases {
