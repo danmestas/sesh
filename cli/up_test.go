@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alecthomas/kong"
@@ -167,7 +168,7 @@ func TestUpCmd_FlagsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kong.New: %v", err)
 	}
-	// Parse as the "up" subcommand; required Session + the three new flags.
+	// Parse as the "up" subcommand; optional Session + the three new flags.
 	_, err = k.Parse([]string{"up", "--session=foo", "--exec=echo hi", "--role=implementer", "--class=active"})
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
@@ -264,5 +265,110 @@ func TestHarnessSysProcAttr_NilStdinFallsBack(t *testing.T) {
 	}
 	if spa.Foreground || spa.Ctty != 0 {
 		t.Error("Foreground/Ctty must remain unset for nil stdin")
+	}
+}
+
+// TestSanitizeLabelFromBasename covers the stripping rules applied to cwd
+// basenames before they're used as session labels.
+func TestSanitizeLabelFromBasename(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"sesh", "sesh"},
+		{"my-project", "my-project"},
+		{"my project", "my project"},       // spaces are printable ASCII, kept
+		{".hidden", "hidden"},              // leading dot stripped
+		{"a/b", "ab"},                     // path separator removed
+		{"a\\b", "ab"},                    // backslash removed
+		{"\x00nul", "nul"},               // NUL stripped
+		{"\x1b[red]", "[red]"},           // control chars stripped
+		{"café", "caf"},                   // non-ASCII stripped
+		{"", ""},                          // empty stays empty
+		{"..", ""},                        // all-dot → empty after strip
+		{strings.Repeat("x", 200), strings.Repeat("x", 128)}, // capped at 128
+	}
+	for _, tc := range cases {
+		got := sanitizeLabelFromBasename(tc.in)
+		if got != tc.want {
+			t.Errorf("sanitizeLabelFromBasename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDeriveSessionName_UsesBasename verifies that deriveSessionName returns
+// the cwd basename when no claim file exists.
+func TestDeriveSessionName_UsesBasename(t *testing.T) {
+	dir := t.TempDir()
+	// Rename to a predictable basename.
+	named := filepath.Join(filepath.Dir(dir), "myproject")
+	if err := os.Rename(dir, named); err != nil {
+		t.Skipf("rename temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(named) })
+	t.Chdir(named)
+
+	got, err := deriveSessionName()
+	if err != nil {
+		t.Fatalf("deriveSessionName: %v", err)
+	}
+	if got != "myproject" {
+		t.Errorf("deriveSessionName = %q, want %q", got, "myproject")
+	}
+}
+
+// TestDeriveSessionName_IncrementsOnConflict verifies that deriveSessionName
+// appends -2, -3, … when claim files exist for earlier candidates.
+func TestDeriveSessionName_IncrementsOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	named := filepath.Join(filepath.Dir(dir), "myproject")
+	if err := os.Rename(dir, named); err != nil {
+		t.Skipf("rename temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(named) })
+	t.Chdir(named)
+
+	// Plant claim files for "myproject" and "myproject-2".
+	stateDir := filepath.Join(named, ".sesh", "sessions")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir stateDir: %v", err)
+	}
+	for _, name := range []string{"myproject", "myproject-2"} {
+		if err := os.WriteFile(filepath.Join(stateDir, name+".json"), []byte(`{"pid":999999}`), 0o644); err != nil {
+			t.Fatalf("plant claim %s: %v", name, err)
+		}
+	}
+
+	got, err := deriveSessionName()
+	if err != nil {
+		t.Fatalf("deriveSessionName: %v", err)
+	}
+	if got != "myproject-3" {
+		t.Errorf("deriveSessionName = %q, want %q", got, "myproject-3")
+	}
+}
+
+// TestUpCmd_Run_DerivesSessionFromCwd verifies that UpCmd.Run populates
+// c.Session from the cwd when --session is omitted. We invoke Run and
+// expect it to fail past the label-derivation point (no hub) but confirm
+// the label was set before the failure.
+func TestUpCmd_Run_DerivesSessionFromCwd(t *testing.T) {
+	dir := t.TempDir()
+	named := filepath.Join(filepath.Dir(dir), "myrunproject")
+	if err := os.Rename(dir, named); err != nil {
+		t.Skipf("rename temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(named) })
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(named)
+
+	c := &UpCmd{Seed: "all", Scope: "session"}
+	// Run will fail (no hub, no git repo), but Session must be set before it does.
+	_ = c.Run()
+	if c.Session == "" {
+		t.Error("UpCmd.Session was not populated from cwd; want non-empty")
+	}
+	if c.Session != "myrunproject" {
+		t.Errorf("UpCmd.Session = %q, want %q", c.Session, "myrunproject")
 	}
 }
