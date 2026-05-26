@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,7 +54,7 @@ type Harness struct {
 // agent attach, etc.) means registering a step on Starter rather than
 // editing this method.
 type UpCmd struct {
-	Session string `required:"" help:"Session label (free-form). Held exclusively by this sesh up — a second sesh up --session=<same-label> in another shell will fail. Run multiple adapters in one session by passing a multiplex wrapper to --exec."`
+	Session string `optional:"" help:"Session label (free-form). Defaults to the cwd basename; if that label is already claimed, '-2', '-3', … is appended until a free slot is found. Held exclusively by this sesh up — a second sesh up --session=<same-label> in another shell will fail. Run multiple adapters in one session by passing a multiplex wrapper to --exec."`
 
 	HTTPPort          int `help:"Fossil HTTP port (0 = auto)" default:"0"`
 	NATSClientPort    int `help:"NATS client port (0 = auto)" default:"0"`
@@ -93,7 +95,64 @@ type UpCmd struct {
 	Class string `name:"class" help:"Class for coordination subjects: active (default) or observer. Passed as SESH_CLASS to --exec child." enum:"active,observer" default:"active"`
 }
 
+// sanitizeLabelFromBasename strips characters that validateLabel rejects from a
+// filesystem basename so it can be used as a session label. Drops every rune
+// outside printable 7-bit ASCII (0x20–0x7e) and any path separator. Trims
+// whitespace and leading dots, then caps at 128 bytes. Returns "" when nothing
+// printable survives.
+func sanitizeLabelFromBasename(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0x20 && r <= 0x7e && r != '/' && r != '\\' {
+			b.WriteRune(r)
+		}
+	}
+	result := strings.TrimSpace(b.String())
+	result = strings.TrimLeft(result, ".")
+	if len(result) > 128 {
+		result = result[:128]
+	}
+	return result
+}
+
+// deriveSessionName picks a session label from the cwd basename, incrementing
+// a numeric suffix (-2, -3, …) until a slot whose claim file is absent is
+// found. The check is best-effort (not atomic); the real ownership claim uses
+// O_EXCL inside ClaimSession.
+func deriveSessionName() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("getwd: %w", err)
+	}
+	base := sanitizeLabelFromBasename(filepath.Base(cwd))
+	if base == "" || validateLabel(base) != nil {
+		base = "session"
+	}
+	stateDir := filepath.Join(cwd, ".sesh", "sessions")
+	candidate := base
+	for i := 2; ; i++ {
+		claimPath := filepath.Join(stateDir, candidate+".json")
+		if _, err := os.Stat(claimPath); os.IsNotExist(err) {
+			return candidate, nil
+		}
+		candidate = fmt.Sprintf("%s-%d", base, i)
+	}
+}
+
 func (c *UpCmd) Run() error {
+	// If the caller omitted --session, derive a label from the cwd basename.
+	// Stale claim files will be reaped by ClaimSession's reapStaleSessions,
+	// so a file-present check is a conservative (safe) heuristic: at worst
+	// we pick -2 when -1 would have been claimable.
+	if c.Session == "" {
+		derived, err := deriveSessionName()
+		if err != nil {
+			return fmt.Errorf("sesh up: could not derive session name: %w", err)
+		}
+		c.Session = derived
+		slog.Info("sesh up: no --session given; derived from cwd", "session", c.Session)
+	}
+
 	// Tier-1 safety: validate the session label before ANY path math.
 	// NewStarter computes <cwd>/.sesh/sessions/<label>.repo, the
 	// JetStream storeDir at <cwd>/.sesh/sessions/<label>.messaging/,
