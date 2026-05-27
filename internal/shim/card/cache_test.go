@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/danmestas/sesh/internal/subject"
 )
 
 // newTestCache wires a real signer with a real composer (NATS-backed)
@@ -26,7 +28,12 @@ func newTestCache(t *testing.T, ttl time.Duration, cap int) (*Cache, *nats.Conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	composer := NewComposer(nc, defaultL1(), 250*time.Millisecond, nil)
+	// The cache tests never stub an L3 card responder; they assert
+	// freshness/eviction/concurrency over L1+L2 composition only. An
+	// empty Coord disables L3 so each GetOrCompose returns without
+	// paying the queryWindow timeout. (subject-binding is exercised in
+	// composer_test.go.)
+	composer := NewComposer(nc, subject.Coord{}, defaultL1(), 250*time.Millisecond, nil)
 	return NewCache(composer, signer, ttl, cap), nc
 }
 

@@ -78,7 +78,11 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	ts := httptest.NewTLSServer(tsHandler)
 	t.Cleanup(ts.Close)
 
-	composer := card.NewComposer(nc, card.L1Defaults{
+	// L3-bind the composer to the same (machine, project, session) the
+	// mock adapter stubs its card/cardx responders on (Slice 3C). The
+	// mock derives cardCoord from (agentToken, owner, name) =
+	// (testagent, testowner, testagent); keep this literal in lockstep.
+	composer := card.NewComposer(nc, subject.Coord{Machine: "testagent", Project: "testowner", Session: "testagent"}, card.L1Defaults{
 		GatewayURL:      ts.URL + "/a2a",
 		ProtocolVersion: "1.0",
 		Capabilities: a2a.AgentCapabilities{
@@ -139,10 +143,10 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 //   - agents.prompt.<machine>.<project>.<session>.<role> — captures the
 //     inbound prompt so subtests can assert publish happened
 //
-// The card/cardx subjects use the v0.4 cutover positional punt
+// The card/cardx subjects use the v0.4 positional mapping
 // (Agent→Machine, Owner→Project, Name→Session) so they line up with the
-// shim composer's agentKeyAsCoord mapping. Captured prompts go into
-// prompts; subtests inspect under mu.
+// subject.Coord the shim composer L3-binds to at construction (Slice
+// 3C). Captured prompts go into prompts; subtests inspect under mu.
 type mockAdapter struct {
 	t       *testing.T
 	svc     micro.Service
@@ -172,9 +176,9 @@ func startMockAdapter(t *testing.T, nc *nats.Conn, agentToken, owner, name, scop
 
 	m := &mockAdapter{t: t, svc: svc, scope: scopeID}
 
-	// v0.4 positional punt: card subjects key on (machine, project,
-	// session) which the shim composer derives from AgentKey via
-	// agentKeyAsCoord (Agent→Machine, Owner→Project, Name→Session).
+	// v0.4 positional mapping: card subjects key on (machine, project,
+	// session). The shim composer L3-binds to this same Coord at
+	// construction (Slice 3C), derived from (agentToken, owner, name).
 	cardCoord := subject.Coord{Machine: agentToken, Project: owner, Session: name}
 
 	cardSubj, err := subject.Card(cardCoord)

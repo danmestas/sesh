@@ -17,6 +17,7 @@ import (
 	"github.com/danmestas/sesh-ops/scope"
 
 	"github.com/danmestas/sesh/internal/shim/card"
+	"github.com/danmestas/sesh/internal/subject"
 )
 
 func TestSendMessage_NewTask(t *testing.T) {
@@ -395,8 +396,12 @@ func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
 	}
 	defer func() { _ = svc.Stop() }()
 
-	// Wire the composer the dispatcher will discover through.
-	composer := card.NewComposer(nc, card.L1Defaults{
+	// Wire the composer the dispatcher will discover through. Its Coord
+	// matches deps.Machine + the split of deps.ScopeID (Slice 3C); these
+	// tests assert only the prompt subject, so the card binding is
+	// incidental here.
+	project, session := SplitScopeIDForSubject(deps.ScopeID)
+	composer := card.NewComposer(nc, subject.Coord{Machine: deps.Machine, Project: project, Session: session}, card.L1Defaults{
 		GatewayURL: "https://shim.example/a2a",
 	}, 750*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	deps.Composer = composer
@@ -460,7 +465,8 @@ func TestSendMessage_LooseMatch_AbbreviatedAgent(t *testing.T) {
 	}
 	defer func() { _ = svc.Stop() }()
 
-	composer := card.NewComposer(nc, card.L1Defaults{
+	project, session := SplitScopeIDForSubject(deps.ScopeID)
+	composer := card.NewComposer(nc, subject.Coord{Machine: deps.Machine, Project: project, Session: session}, card.L1Defaults{
 		GatewayURL: "https://shim.example/a2a",
 	}, 750*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	deps.Composer = composer

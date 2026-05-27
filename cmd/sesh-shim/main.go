@@ -24,8 +24,10 @@ import (
 
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
+	"github.com/danmestas/sesh/internal/shim/methods"
 	"github.com/danmestas/sesh/internal/shim/push"
 	"github.com/danmestas/sesh/internal/shim/server"
+	"github.com/danmestas/sesh/internal/subject"
 )
 
 type CLI struct {
@@ -104,14 +106,6 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		return fmt.Errorf("auth: %w", err)
 	}
 
-	composer := card.NewComposer(nc, card.L1Defaults{
-		GatewayURL:         cli.GatewayURL,
-		ProtocolVersion:    "1.0",
-		DefaultInputModes:  []string{"text/plain"},
-		DefaultOutputModes: []string{"text/plain"},
-	}, 500*time.Millisecond, log)
-	cache := card.NewCache(composer, signer, 5*time.Minute, 64)
-
 	machine := cli.Machine
 	if machine == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -126,6 +120,20 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 	if machine == "" {
 		return errors.New("--machine resolved empty after sanitization; set SESH_SHIM_MACHINE explicitly")
 	}
+
+	// Derive the Composer's session coordinate the SAME way the prompt
+	// path does (methods.SplitScopeIDForSubject) so the card/cardx
+	// subjects and the prompt subject stay byte-identical for a given
+	// scope-id. Slice 3C: the Composer L3-binds to this session.
+	project, session := methods.SplitScopeIDForSubject(cli.ScopeID)
+
+	composer := card.NewComposer(nc, subject.Coord{Machine: machine, Project: project, Session: session}, card.L1Defaults{
+		GatewayURL:         cli.GatewayURL,
+		ProtocolVersion:    "1.0",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+	}, 500*time.Millisecond, log)
+	cache := card.NewCache(composer, signer, 5*time.Minute, 64)
 
 	// --name is the adapter instance name advertised in $SRV.INFO
 	// metadata; the composer matches on it when resolving the L3 card

@@ -27,7 +27,7 @@ func withCardDeps(t *testing.T) (Deps, *nats.Conn) {
 	if err != nil {
 		t.Fatalf("dev signer: %v", err)
 	}
-	composer := card.NewComposer(nc, card.L1Defaults{
+	composer := card.NewComposer(nc, cardKeyAsCoord(deps.AgentKey), card.L1Defaults{
 		GatewayURL:         "https://shim.test/a2a",
 		ProtocolVersion:    "1.0",
 		DefaultInputModes:  []string{"text/plain"},
