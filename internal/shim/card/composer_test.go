@@ -170,18 +170,18 @@ func stubL3Sleep(t *testing.T, nc *nats.Conn, subj string, body []byte, delay ti
 
 func mustCardGet(t *testing.T, key AgentKey) string {
 	t.Helper()
-	subj, err := subject.CardGet(key.Agent, key.Owner, key.Name)
+	subj, err := subject.Card(agentKeyAsCoord(key))
 	if err != nil {
-		t.Fatalf("subject.CardGet: %v", err)
+		t.Fatalf("subject.Card: %v", err)
 	}
 	return subj
 }
 
 func mustCardExtended(t *testing.T, key AgentKey) string {
 	t.Helper()
-	subj, err := subject.CardExtended(key.Agent, key.Owner, key.Name)
+	subj, err := subject.Cardx(agentKeyAsCoord(key))
 	if err != nil {
-		t.Fatalf("subject.CardExtended: %v", err)
+		t.Fatalf("subject.Cardx: %v", err)
 	}
 	return subj
 }
@@ -528,11 +528,12 @@ func registerStubAgentWithName(t *testing.T, nc *nats.Conn, agent, owner, name, 
 //
 // The shim's discover() filters $SRV.INFO replies by (agent, owner)
 // equality, so any divergence has to be on a non-filtered field —
-// the `name` token. Operators that pass --name=claude-code may
-// connect to an adapter whose registerAgentCard call advertised
-// name=cc-instance-1. Pre-fix the L3 subject was
-// agents.card.get.<agent>.<owner>.claude-code (no responder).
-// Post-fix it's agents.card.get.<agent>.<owner>.cc-instance-1.
+// the `name` token (which maps to the <session> segment under the
+// v0.4 positional punt agentKeyAsCoord). Operators that pass
+// --name=claude-code may connect to an adapter whose registerAgentCard
+// call advertised name=cc-instance-1. Pre-fix the L3 subject's last
+// segment was claude-code (no responder). Post-fix it's
+// cc-instance-1, the adapter-advertised name.
 func TestComposer_L3_UsesAdapterAdvertisedAgentToken(t *testing.T) {
 	url := startTestNATS(t)
 	nc, err := nats.Connect(url)
@@ -626,7 +627,7 @@ func TestResolveSubjectTokens(t *testing.T) {
 }
 
 func TestComposer_FetchExtended_PubliccardGetUnused(t *testing.T) {
-	// Confirm FetchExtended hits agents.card.extended.* not agents.card.get.*.
+	// Confirm FetchExtended hits agents.cardx.* not agents.card.*.
 	url := startTestNATS(t)
 	nc, err := nats.Connect(url)
 	if err != nil {
@@ -647,6 +648,6 @@ func TestComposer_FetchExtended_PubliccardGetUnused(t *testing.T) {
 		t.Errorf("Description = %q, want extended", p.Description)
 	}
 	if atomic.LoadInt32(publicCalls) != 0 {
-		t.Errorf("FetchExtended issued %d requests to agents.card.get.*, want 0", atomic.LoadInt32(publicCalls))
+		t.Errorf("FetchExtended issued %d requests to agents.card.*, want 0", atomic.LoadInt32(publicCalls))
 	}
 }

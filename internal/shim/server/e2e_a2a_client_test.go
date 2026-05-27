@@ -2,8 +2,8 @@
 // NATS hub and a mock v0.4 adapter, driven by the stock a2a-go client
 // SDK. Mirrors a real client → shim → mesh path: a2a-go marshals
 // JSON-RPC envelopes onto the wire, the shim publishes prompts onto
-// NATS, our mock adapter replies via micro/$SRV.INFO, agents.card.get.*,
-// and agents.prompt.v2.* — same surface a real sesh-channels adapter
+// NATS, our mock adapter replies via micro/$SRV.INFO, agents.card.*,
+// and agents.prompt.* — same surface a real sesh-channels adapter
 // would expose.
 //
 // This is the gate test per the v0.4 master plan: green here means the
@@ -134,12 +134,15 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 // name) tuple. Speaks four subjects:
 //   - $SRV.INFO.agents — micro service registration so the shim's
 //     composer.discover() finds an adapter for this AgentKey
-//   - agents.card.get.<agent>.<owner>.<name> — L3 AgentCard partial
-//   - agents.card.extended.<agent>.<owner>.<name> — L3 extended overlay
-//   - agents.prompt.v2.<machine>.<scope>.<scope>.<role> — captures the
+//   - agents.card.<machine>.<project>.<session> — L3 AgentCard partial
+//   - agents.cardx.<machine>.<project>.<session> — L3 extended overlay
+//   - agents.prompt.<machine>.<project>.<session>.<role> — captures the
 //     inbound prompt so subtests can assert publish happened
 //
-// Captured prompts go into prompts; subtests inspect under mu.
+// The card/cardx subjects use the v0.4 cutover positional punt
+// (Agent→Machine, Owner→Project, Name→Session) so they line up with the
+// shim composer's agentKeyAsCoord mapping. Captured prompts go into
+// prompts; subtests inspect under mu.
 type mockAdapter struct {
 	t       *testing.T
 	svc     micro.Service
@@ -169,9 +172,14 @@ func startMockAdapter(t *testing.T, nc *nats.Conn, agentToken, owner, name, scop
 
 	m := &mockAdapter{t: t, svc: svc, scope: scopeID}
 
-	cardSubj, err := subject.CardGet(agentToken, owner, name)
+	// v0.4 positional punt: card subjects key on (machine, project,
+	// session) which the shim composer derives from AgentKey via
+	// agentKeyAsCoord (Agent→Machine, Owner→Project, Name→Session).
+	cardCoord := subject.Coord{Machine: agentToken, Project: owner, Session: name}
+
+	cardSubj, err := subject.Card(cardCoord)
 	if err != nil {
-		t.Fatalf("CardGet: %v", err)
+		t.Fatalf("Card: %v", err)
 	}
 	cardSub, err := nc.Subscribe(cardSubj, func(msg *nats.Msg) {
 		_ = msg.Respond([]byte(`{
@@ -186,9 +194,9 @@ func startMockAdapter(t *testing.T, nc *nats.Conn, agentToken, owner, name, scop
 	t.Cleanup(func() { _ = cardSub.Unsubscribe() })
 	m.subs = append(m.subs, cardSub)
 
-	extSubj, err := subject.CardExtended(agentToken, owner, name)
+	extSubj, err := subject.Cardx(cardCoord)
 	if err != nil {
-		t.Fatalf("CardExtended: %v", err)
+		t.Fatalf("Cardx: %v", err)
 	}
 	extSub, err := nc.Subscribe(extSubj, func(msg *nats.Msg) {
 		_ = msg.Respond([]byte(`{
@@ -205,7 +213,7 @@ func startMockAdapter(t *testing.T, nc *nats.Conn, agentToken, owner, name, scop
 	// AgentKey.Agent (== agentToken in this fixture) and the
 	// machine/scope come from server Config; we match the wildcard slot
 	// for the role and last segment to keep the subscriber loose.
-	promptSubj := "agents.prompt.v2.>"
+	promptSubj := "agents.prompt.>"
 	promptSub, err := nc.Subscribe(promptSubj, func(msg *nats.Msg) {
 		m.mu.Lock()
 		m.prompts = append(m.prompts, msg)

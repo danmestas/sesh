@@ -64,9 +64,9 @@ func noExtendedScopeCtx(t *testing.T) context.Context {
 
 func stubExtendedReply(t *testing.T, nc *nats.Conn, key card.AgentKey, body []byte) *int32 {
 	t.Helper()
-	subj, err := subject.CardExtended(key.Agent, key.Owner, key.Name)
+	subj, err := subject.Cardx(cardKeyAsCoord(key))
 	if err != nil {
-		t.Fatalf("CardExtended: %v", err)
+		t.Fatalf("Cardx: %v", err)
 	}
 	var n int32
 	sub, err := nc.Subscribe(subj, func(m *nats.Msg) {
@@ -156,9 +156,9 @@ func TestGetExtendedAgentCard_PerRequestNoCache(t *testing.T) {
 	second := []byte(`{"description":"second body"}`)
 	current.Store(&first)
 
-	subj, err := subject.CardExtended(deps.AgentKey.Agent, deps.AgentKey.Owner, deps.AgentKey.Name)
+	subj, err := subject.Cardx(cardKeyAsCoord(deps.AgentKey))
 	if err != nil {
-		t.Fatalf("CardExtended: %v", err)
+		t.Fatalf("Cardx: %v", err)
 	}
 	sub, err := nc.Subscribe(subj, func(m *nats.Msg) {
 		body := *current.Load()

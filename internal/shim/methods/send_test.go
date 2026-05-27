@@ -25,9 +25,9 @@ func TestSendMessage_NewTask(t *testing.T) {
 	ctx, cancel := mustCtx(t)
 	defer cancel()
 
-	// Subscribe to the v2 prompt subject so we can confirm publish.
+	// Subscribe to the prompt subject so we can confirm publish.
 	got := make(chan *nats.Msg, 1)
-	sub, err := nc.Subscribe("agents.prompt.v2.>", func(m *nats.Msg) {
+	sub, err := nc.Subscribe("agents.prompt.>", func(m *nats.Msg) {
 		select {
 		case got <- m:
 		default:
@@ -94,7 +94,7 @@ func TestSendMessage_NewTask(t *testing.T) {
 	// Confirm publish.
 	select {
 	case m := <-got:
-		if !strings.HasPrefix(m.Subject, "agents.prompt.v2.test-machine.abc123.abc123.test-agent") {
+		if !strings.HasPrefix(m.Subject, "agents.prompt.test-machine.abc123.abc123.test-agent") {
 			t.Errorf("publish subject = %q", m.Subject)
 		}
 		if !bytes.Contains(m.Data, []byte(`"messageId":"M1"`)) {
@@ -295,17 +295,17 @@ func TestSendMessage_InvalidParams(t *testing.T) {
 	}
 }
 
-// TestSendMessage_DottedScopeID_PublishesPromptV2 covers sesh#121 +
+// TestSendMessage_DottedScopeID_PublishesPrompt covers sesh#121 +
 // sesh#124: a session-scoped shim has ScopeID = "<project>.<session>".
-// The v2 prompt subject grammar is
-// `agents.prompt.v2.<machine>.<project>.<session>.<role>`, with
+// The clean v0.4 prompt subject grammar is
+// `agents.prompt.<machine>.<project>.<session>.<role>`, with
 // project and session as SEPARATE tokens — adapters subscribe with
 // SESH_PROJECT / SESH_SESSION split, not a collapsed single token.
-// publishPromptV2 must split the scope-id on '.' so both sides
+// publishPrompt must split the scope-id on '.' so both sides
 // converge on the same subject. Regression guard: the pre-#124 code
 // collapsed project=session=ScopeID (sanitized "acme_demo.acme_demo")
 // and the adapter starved.
-func TestSendMessage_DottedScopeID_PublishesPromptV2(t *testing.T) {
+func TestSendMessage_DottedScopeID_PublishesPrompt(t *testing.T) {
 	deps, nc, _ := testDeps(t)
 	deps.ScopeKind = "session"
 	deps.ScopeID = "acme.demo"
@@ -314,7 +314,7 @@ func TestSendMessage_DottedScopeID_PublishesPromptV2(t *testing.T) {
 	defer cancel()
 
 	// Subscribe to the exact split-token subject we expect.
-	wantSubj := "agents.prompt.v2.test-machine.acme.demo.test-agent"
+	wantSubj := "agents.prompt.test-machine.acme.demo.test-agent"
 	got := make(chan *nats.Msg, 1)
 	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
 		select {
@@ -359,7 +359,7 @@ func TestSendMessage_DottedScopeID_PublishesPromptV2(t *testing.T) {
 //     (which happens to work in the rig because --agent IS the token,
 //     but masks the real flow).
 //
-//  2. publishPromptV2 must build the subject from the DISCOVERED role
+//  2. publishPrompt must build the subject from the DISCOVERED role
 //     token (metadata.role), not the operator's --agent flag — so a
 //     real production deployment with --agent="claude-code" and
 //     metadata.role="cc" routes to the right adapter subscription.
@@ -405,7 +405,7 @@ func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
 	ctx, cancel := mustCtx(t)
 	defer cancel()
 
-	wantSubj := "agents.prompt.v2.test-machine.integ.cc.cc-discovered"
+	wantSubj := "agents.prompt.test-machine.integ.cc.cc-discovered"
 	got := make(chan *nats.Msg, 1)
 	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
 		select {
@@ -469,7 +469,7 @@ func TestSendMessage_LooseMatch_AbbreviatedAgent(t *testing.T) {
 	ctx, cancel := mustCtx(t)
 	defer cancel()
 
-	wantSubj := "agents.prompt.v2.test-machine.integ.cc.cc"
+	wantSubj := "agents.prompt.test-machine.integ.cc.cc"
 	got := make(chan *nats.Msg, 1)
 	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
 		select {
@@ -523,7 +523,7 @@ func TestSendMessage_PublishedRoleIsTranslated(t *testing.T) {
 			defer cancel()
 
 			got := make(chan *nats.Msg, 1)
-			sub, err := nc.Subscribe("agents.prompt.v2.>", func(m *nats.Msg) {
+			sub, err := nc.Subscribe("agents.prompt.>", func(m *nats.Msg) {
 				select {
 				case got <- m:
 				default:
@@ -564,12 +564,12 @@ func TestSendMessage_PublishedRoleIsTranslated(t *testing.T) {
 }
 
 // TestSendMessage_PublishNoOp_WhenAgentEmpty verifies that when no
-// agent token is configured (so publishPromptV2 early-returns), the
+// agent token is configured (so publishPrompt early-returns), the
 // SendMessage path still completes successfully — i.e., the publish
 // is fire-and-forget and never gates the JSON-RPC response.
 func TestSendMessage_PublishNoOp_WhenAgentEmpty(t *testing.T) {
 	deps, _, _ := testDeps(t)
-	deps.AgentKey.Agent = "" // force publishPromptV2 to return early
+	deps.AgentKey.Agent = "" // force publishPrompt to return early
 	disp := NewDispatcher(deps)
 	ctx, cancel := mustCtx(t)
 	defer cancel()

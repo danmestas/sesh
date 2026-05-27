@@ -7,181 +7,208 @@ import (
 	"testing"
 )
 
-func TestPromptV2_Build(t *testing.T) {
+// TestPrompt_Build pins the canonical byte strings the team-lead spec
+// locks in. The shapes here MUST match the TS SDK's golden fixtures
+// (sesh-channels/sdk/test/subjects.test.ts) byte-for-byte. Any change
+// here is a cross-stack wire change and requires the paired TS PR.
+func TestPrompt_Build(t *testing.T) {
 	cases := []struct {
 		name string
 		in   Coord
 		want string
 	}{
 		{
-			name: "canonical with inst",
-			in:   Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "r1", Inst: "i1"},
-			want: "agents.prompt.v2.m1.p1.s1.r1.i1",
+			name: "5-token session orch (empty role)",
+			in:   Coord{Machine: "m1", Project: "p1", Session: "s1"},
+			want: "agents.prompt.m1.p1.s1",
 		},
 		{
-			name: "no inst",
-			in:   Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "r1"},
-			want: "agents.prompt.v2.m1.p1.s1.r1",
+			name: "6-token role pool",
+			in:   Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "impl"},
+			want: "agents.prompt.m1.p1.s1.impl",
 		},
 		{
-			name: "hyphenated tokens",
+			name: "7-token direct instance",
+			in:   Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "impl", Inst: "i7"},
+			want: "agents.prompt.m1.p1.s1.impl.i7",
+		},
+		{
+			name: "hyphenated tokens stay intact",
 			in:   Coord{Machine: "laptop", Project: "sesh-channels", Session: "main", Role: "worker"},
-			want: "agents.prompt.v2.laptop.sesh-channels.main.worker",
+			want: "agents.prompt.laptop.sesh-channels.main.worker",
 		},
 		{
 			name: "numeric inst",
 			in:   Coord{Machine: "laptop", Project: "p", Session: "s", Role: "r", Inst: "1"},
-			want: "agents.prompt.v2.laptop.p.s.r.1",
+			want: "agents.prompt.laptop.p.s.r.1",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := PromptV2(tc.in)
+			got, err := Prompt(tc.in)
 			if err != nil {
-				t.Fatalf("PromptV2(%+v) err = %v", tc.in, err)
+				t.Fatalf("Prompt(%+v) err = %v", tc.in, err)
 			}
 			if got != tc.want {
-				t.Fatalf("PromptV2(%+v) = %q, want %q", tc.in, got, tc.want)
+				t.Fatalf("Prompt(%+v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestPromptV2_RejectsBadTokens(t *testing.T) {
+func TestPrompt_RejectsBadTokens(t *testing.T) {
 	cases := []struct {
 		name string
 		in   Coord
 	}{
-		{"dot in machine", Coord{Machine: "m.1", Project: "p", Session: "s", Role: "r"}},
-		{"star in project", Coord{Machine: "m", Project: "*", Session: "s", Role: "r"}},
-		{"gt in role", Coord{Machine: "m", Project: "p", Session: "s", Role: ">"}},
+		{"dot in machine", Coord{Machine: "m.1", Project: "p", Session: "s"}},
+		{"star in project", Coord{Machine: "m", Project: "*", Session: "s"}},
+		{"gt in session", Coord{Machine: "m", Project: "p", Session: ">"}},
 		{"space in role", Coord{Machine: "m", Project: "p", Session: "s", Role: "r "}},
-		{"empty machine", Coord{Machine: "", Project: "p", Session: "s", Role: "r"}},
+		{"empty machine", Coord{Machine: "", Project: "p", Session: "s"}},
 		{"bad inst", Coord{Machine: "m", Project: "p", Session: "s", Role: "r", Inst: "i.1"}},
+		{"inst without role", Coord{Machine: "m", Project: "p", Session: "s", Inst: "i1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := PromptV2(tc.in)
+			_, err := Prompt(tc.in)
 			if err == nil {
-				t.Fatalf("PromptV2(%+v) want error, got nil", tc.in)
+				t.Fatalf("Prompt(%+v) want error, got nil", tc.in)
 			}
 			var ite *InvalidTokenError
 			if !errors.As(err, &ite) {
-				t.Fatalf("PromptV2(%+v) err type = %T, want *InvalidTokenError", tc.in, err)
-			}
-		})
-	}
-
-	t.Run("empty inst is omitted not rejected", func(t *testing.T) {
-		got, err := PromptV2(Coord{Machine: "m", Project: "p", Session: "s", Role: "r"})
-		if err != nil {
-			t.Fatalf("empty Inst should be omitted, got err=%v", err)
-		}
-		if got != "agents.prompt.v2.m.p.s.r" {
-			t.Fatalf("got %q", got)
-		}
-	})
-}
-
-func TestPromptV2_RoundTrip(t *testing.T) {
-	cases := []Coord{
-		{Machine: "m1", Project: "p1", Session: "s1", Role: "r1", Inst: "i1"},
-		{Machine: "m1", Project: "p1", Session: "s1", Role: "r1"},
-		{Machine: "laptop", Project: "sesh-channels", Session: "main", Role: "worker"},
-		{Machine: "laptop", Project: "p", Session: "s", Role: "r", Inst: "1"},
-	}
-	for _, c := range cases {
-		t.Run(fmt.Sprintf("%+v", c), func(t *testing.T) {
-			s, err := PromptV2(c)
-			if err != nil {
-				t.Fatalf("PromptV2: %v", err)
-			}
-			got, err := ParsePromptV2(s)
-			if err != nil {
-				t.Fatalf("ParsePromptV2(%q): %v", s, err)
-			}
-			if got != c {
-				t.Fatalf("round-trip mismatch:\n got=%+v\nwant=%+v", got, c)
+				t.Fatalf("Prompt(%+v) err type = %T, want *InvalidTokenError", tc.in, err)
 			}
 		})
 	}
 }
 
-func TestParsePromptV2_Rejects(t *testing.T) {
+func TestHeartbeat(t *testing.T) {
+	got, err := Heartbeat(Coord{Machine: "m1", Project: "p1", Session: "s1"})
+	if err != nil {
+		t.Fatalf("Heartbeat err = %v", err)
+	}
+	if want := "agents.hb.m1.p1.s1"; got != want {
+		t.Fatalf("Heartbeat = %q, want %q", got, want)
+	}
+
+	// Role and Inst are ignored — Heartbeat is always 5-token.
+	gotIgnored, err := Heartbeat(Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "r", Inst: "i"})
+	if err != nil {
+		t.Fatalf("Heartbeat with role+inst err = %v", err)
+	}
+	if gotIgnored != "agents.hb.m1.p1.s1" {
+		t.Fatalf("Heartbeat ignored-tokens = %q, want %q", gotIgnored, "agents.hb.m1.p1.s1")
+	}
+
+	if _, err := Heartbeat(Coord{Machine: "", Project: "p", Session: "s"}); err == nil {
+		t.Fatalf("empty machine should error")
+	}
+	if _, err := Heartbeat(Coord{Machine: "m", Project: "p.1", Session: "s"}); err == nil {
+		t.Fatalf("dotted project should error")
+	}
+}
+
+func TestStatus(t *testing.T) {
+	got, err := Status(Coord{Machine: "m1", Project: "p1", Session: "s1"})
+	if err != nil {
+		t.Fatalf("Status err = %v", err)
+	}
+	if want := "agents.status.m1.p1.s1"; got != want {
+		t.Fatalf("Status = %q, want %q", got, want)
+	}
+	if _, err := Status(Coord{Machine: "m", Project: "p", Session: ""}); err == nil {
+		t.Fatalf("empty session should error")
+	}
+}
+
+func TestCard(t *testing.T) {
+	got, err := Card(Coord{Machine: "m1", Project: "p1", Session: "s1"})
+	if err != nil {
+		t.Fatalf("Card err = %v", err)
+	}
+	if want := "agents.card.m1.p1.s1"; got != want {
+		t.Fatalf("Card = %q, want %q", got, want)
+	}
+	if _, err := Card(Coord{Machine: "m.bad", Project: "p", Session: "s"}); err == nil {
+		t.Fatalf("dotted machine should error")
+	}
+}
+
+func TestCardx(t *testing.T) {
+	got, err := Cardx(Coord{Machine: "m1", Project: "p1", Session: "s1"})
+	if err != nil {
+		t.Fatalf("Cardx err = %v", err)
+	}
+	if want := "agents.cardx.m1.p1.s1"; got != want {
+		t.Fatalf("Cardx = %q, want %q", got, want)
+	}
+	if _, err := Cardx(Coord{Machine: "m", Project: "", Session: "s"}); err == nil {
+		t.Fatalf("empty project should error")
+	}
+}
+
+// TestVerbsAreSingleSegment is a structural guard: every session-scoped
+// verb MUST occupy exactly one segment between `agents` and the first
+// machine token. Compound verbs (e.g. `card.get`) would shift the
+// 5/6/7-token tier boundary downstream consumers count on. The check
+// runs against the canonical 5-token output of each builder.
+func TestVerbsAreSingleSegment(t *testing.T) {
+	c := Coord{Machine: "m", Project: "p", Session: "s"}
 	cases := []struct {
 		name string
-		in   string
+		fn   func(Coord) (string, error)
 	}{
-		{"empty", ""},
-		{"two tokens", "foo.bar"},
-		{"v1 prefix", "agents.prompt.v1.a.b.c.d"},
-		{"too few tokens", "agents.prompt.v2.a.b.c"},
-		{"too many tokens", "agents.prompt.v2.a.b.c.d.e.f"},
-		{"empty token within", "agents.prompt.v2.a..s.r"},
-		{"trailing dot", "agents.prompt.v2.a.b.c.d."},
+		{"Heartbeat", Heartbeat},
+		{"Status", Status},
+		{"Card", Card},
+		{"Cardx", Cardx},
+		{"Prompt", Prompt},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParsePromptV2(tc.in)
-			if err == nil {
-				t.Fatalf("ParsePromptV2(%q) want error, got nil", tc.in)
+			got, err := tc.fn(c)
+			if err != nil {
+				t.Fatalf("%s err = %v", tc.name, err)
+			}
+			parts := strings.Split(got, ".")
+			if len(parts) != 5 {
+				t.Fatalf("%s = %q (%d parts), want 5 (single-segment verb tier)", tc.name, got, len(parts))
+			}
+			if parts[0] != "agents" {
+				t.Fatalf("%s = %q, want first token = agents", tc.name, got)
+			}
+			if parts[1] == "" {
+				t.Fatalf("%s = %q, empty verb token", tc.name, got)
+			}
+			if strings.Contains(parts[1], ".") {
+				t.Fatalf("%s verb token %q contains a dot — verbs MUST be single-segment", tc.name, parts[1])
 			}
 		})
 	}
 }
 
-func TestTaskStream(t *testing.T) {
-	got, err := TaskStream("session", "abc123", "01HX")
+func TestStream(t *testing.T) {
+	got, err := Stream("session", "abc123", "01HX")
 	if err != nil {
-		t.Fatalf("TaskStream: %v", err)
+		t.Fatalf("Stream: %v", err)
 	}
 	if want := "agents.task.stream.session.abc123.01HX"; got != want {
-		t.Fatalf("TaskStream = %q, want %q", got, want)
+		t.Fatalf("Stream = %q, want %q", got, want)
 	}
 
-	if _, err := TaskStream("session", "", "01HX"); err == nil {
+	if _, err := Stream("session", "", "01HX"); err == nil {
 		t.Fatalf("empty scopeID should error")
 	}
-	if _, err := TaskStream("", "abc", "01HX"); err == nil {
+	if _, err := Stream("", "abc", "01HX"); err == nil {
 		t.Fatalf("empty scopeKind should error")
 	}
-}
-
-func TestCard_Builders(t *testing.T) {
-	t.Run("CardGet canonical", func(t *testing.T) {
-		got, err := CardGet("claude", "dmestas", "main")
-		if err != nil {
-			t.Fatalf("CardGet: %v", err)
-		}
-		if want := "agents.card.get.claude.dmestas.main"; got != want {
-			t.Fatalf("CardGet = %q, want %q", got, want)
-		}
-	})
-	t.Run("CardExtended canonical", func(t *testing.T) {
-		got, err := CardExtended("claude", "dmestas", "main")
-		if err != nil {
-			t.Fatalf("CardExtended: %v", err)
-		}
-		if want := "agents.card.extended.claude.dmestas.main"; got != want {
-			t.Fatalf("CardExtended = %q, want %q", got, want)
-		}
-	})
 
 	badTokens := []string{".", "*", ">", "a.b", "x y", "\t", "\n", ""}
 	for _, bad := range badTokens {
-		t.Run("CardGet rejects "+fmt.Sprintf("%q", bad), func(t *testing.T) {
-			if _, err := CardGet(bad, "dmestas", "main"); err == nil {
-				t.Fatalf("CardGet(%q) want error", bad)
-			}
-		})
-		t.Run("CardExtended rejects "+fmt.Sprintf("%q", bad), func(t *testing.T) {
-			if _, err := CardExtended("claude", bad, "main"); err == nil {
-				t.Fatalf("CardExtended(_, %q, _) want error", bad)
-			}
-		})
-		t.Run("TaskStream rejects "+fmt.Sprintf("%q", bad), func(t *testing.T) {
-			if _, err := TaskStream("session", "abc", bad); err == nil {
-				t.Fatalf("TaskStream(_, _, %q) want error", bad)
+		t.Run("Stream rejects "+fmt.Sprintf("%q", bad), func(t *testing.T) {
+			if _, err := Stream("session", "abc", bad); err == nil {
+				t.Fatalf("Stream(_, _, %q) want error", bad)
 			}
 		})
 	}
@@ -236,8 +263,10 @@ func TestValidateToken(t *testing.T) {
 	})
 }
 
-func TestPromptV2QueueGroup(t *testing.T) {
-	if PromptV2QueueGroup != "agents-prompt-v2" {
-		t.Fatalf("PromptV2QueueGroup = %q, want %q", PromptV2QueueGroup, "agents-prompt-v2")
+func TestPromptQueueGroup(t *testing.T) {
+	// The literal value is retained from the v0.3 era for queue-group
+	// continuity across the cutover — see PromptQueueGroup doc comment.
+	if PromptQueueGroup != "agents-prompt-v2" {
+		t.Fatalf("PromptQueueGroup = %q, want %q", PromptQueueGroup, "agents-prompt-v2")
 	}
 }

@@ -16,7 +16,7 @@ const extendedReadScope = "agent.read.extended"
 // getExtendedAgentCard returns a signed extended AgentCard composed
 // per-request from L1 + L2 (via Composer.ComposeBase) overlaid with
 // the L3 extended-card partial from the adapter
-// (agents.card.extended.<agent>.<owner>.<name>).
+// (agents.cardx.<machine>.<project>.<session>).
 //
 // Per plan D4 there is NO cache for the extended card: every
 // authorized request re-composes and re-signs. The cost is one NATS

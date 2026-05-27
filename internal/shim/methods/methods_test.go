@@ -12,7 +12,22 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/danmestas/sesh/internal/shim/card"
+	"github.com/danmestas/sesh/internal/subject"
 )
+
+// cardKeyAsCoord mirrors the card package's unexported agentKeyAsCoord
+// positional punt: it maps a card.AgentKey to a subject.Coord by slot
+// (Agent→Machine, Owner→Project, Name→Session) so tests can rebuild the
+// exact v0.4 card/cardx subject the Composer fetches under during the
+// cutover. Replaced when Slice 3C threads a real Coord through the
+// Composer.
+func cardKeyAsCoord(key card.AgentKey) subject.Coord {
+	return subject.Coord{
+		Machine: key.Agent,
+		Project: key.Owner,
+		Session: key.Name,
+	}
+}
 
 // startBroker spins up an in-memory nats-server with JetStream enabled
 // on a random port. Mirrors the helper in internal/shim/server.

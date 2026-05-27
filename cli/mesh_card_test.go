@@ -33,17 +33,17 @@ func TestMeshCardCmd_Public_Happy(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer nc.Close()
-	subj, err := subject.CardGet("echo", "dmestas", "echo")
+	subj, err := subject.Card(subject.Coord{Machine: "m1", Project: "p1", Session: "s1"})
 	if err != nil {
-		t.Fatalf("CardGet: %v", err)
+		t.Fatalf("Card: %v", err)
 	}
 	stubCardSubject(t, nc, subj, []byte(`{"description":"public echo card","skills":[]}`))
 
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "echo",
-		Owner:   "dmestas",
-		Name:    "echo",
+		Session: "s1",
+		Project: "p1",
+		Machine: "m1",
 		NATSURL: url,
 		Window:  500 * time.Millisecond,
 		Format:  "json",
@@ -55,7 +55,7 @@ func TestMeshCardCmd_Public_Happy(t *testing.T) {
 	if !strings.Contains(out.String(), "public echo card") {
 		t.Errorf("output missing description:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "agents.card.get.echo.dmestas.echo") {
+	if !strings.Contains(out.String(), "agents.card.m1.p1.s1") {
 		t.Errorf("output missing subject header:\n%s", out.String())
 	}
 }
@@ -67,17 +67,17 @@ func TestMeshCardCmd_Extended_Happy(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer nc.Close()
-	subj, err := subject.CardExtended("echo", "dmestas", "echo")
+	subj, err := subject.Cardx(subject.Coord{Machine: "m1", Project: "p1", Session: "s1"})
 	if err != nil {
-		t.Fatalf("CardExtended: %v", err)
+		t.Fatalf("Cardx: %v", err)
 	}
 	stubCardSubject(t, nc, subj, []byte(`{"description":"extended view","skills":[]}`))
 
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:    "echo",
-		Owner:    "dmestas",
-		Name:     "echo",
+		Session:  "s1",
+		Project:  "p1",
+		Machine:  "m1",
 		Extended: true,
 		NATSURL:  url,
 		Window:   500 * time.Millisecond,
@@ -90,7 +90,7 @@ func TestMeshCardCmd_Extended_Happy(t *testing.T) {
 	if !strings.Contains(out.String(), "extended view") {
 		t.Errorf("output missing extended description:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "agents.card.extended.echo.dmestas.echo") {
+	if !strings.Contains(out.String(), "agents.cardx.m1.p1.s1") {
 		t.Errorf("output missing extended subject header:\n%s", out.String())
 	}
 }
@@ -100,9 +100,9 @@ func TestMeshCardCmd_Timeout_ReturnsError(t *testing.T) {
 	// No stub subscribed — request must time out within window.
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "ghost",
-		Owner:   "nobody",
-		Name:    "ghost",
+		Session: "ghost",
+		Project: "p1",
+		Machine: "m1",
 		NATSURL: url,
 		Window:  100 * time.Millisecond,
 		Format:  "json",
@@ -122,23 +122,27 @@ func TestMeshCardCmd_Timeout_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestMeshCardCmd_OwnerDefaultsToUser(t *testing.T) {
-	t.Setenv("USER", "rosalind")
+// TestMeshCardCmd_MachineDefaultsToCoord verifies that omitting
+// --machine falls back to coord.Machine() (which honors $SESH_MACHINE).
+func TestMeshCardCmd_MachineDefaultsToCoord(t *testing.T) {
+	t.Setenv("SESH_MACHINE", "envmachine")
 	_, url := startTestNATSServer(t)
 	nc, err := nats.Connect(url, nats.Timeout(3*time.Second))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	defer nc.Close()
-	subj, err := subject.CardGet("echo", "rosalind", "echo")
+	subj, err := subject.Card(subject.Coord{Machine: "envmachine", Project: "p1", Session: "s1"})
 	if err != nil {
-		t.Fatalf("CardGet: %v", err)
+		t.Fatalf("Card: %v", err)
 	}
 	stubCardSubject(t, nc, subj, []byte(`{"description":"x"}`))
 
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "echo",
+		Session: "s1",
+		Project: "p1",
+		// Machine intentionally empty — must default to $SESH_MACHINE.
 		NATSURL: url,
 		Window:  500 * time.Millisecond,
 		Format:  "json",
@@ -147,8 +151,30 @@ func TestMeshCardCmd_OwnerDefaultsToUser(t *testing.T) {
 	if err := cmd.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(out.String(), "rosalind") {
-		t.Errorf("output should reference owner=rosalind:\n%s", out.String())
+	if !strings.Contains(out.String(), "agents.card.envmachine.p1.s1") {
+		t.Errorf("Machine did not default to $SESH_MACHINE; output:\n%s", out.String())
+	}
+}
+
+// TestMeshCardCmd_ProjectRequired confirms an empty --project (and no
+// $SESH_PROJECT) is a hard error before any NATS round trip.
+func TestMeshCardCmd_ProjectRequired(t *testing.T) {
+	_, url := startTestNATSServer(t)
+	var out bytes.Buffer
+	cmd := &MeshCardCmd{
+		Session: "s1",
+		Machine: "m1",
+		// Project intentionally empty.
+		NATSURL: url,
+		Window:  500 * time.Millisecond,
+		Out:     &out,
+	}
+	err := cmd.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing --project")
+	}
+	if !strings.Contains(err.Error(), "--project is required") {
+		t.Errorf("error = %q, want '--project is required'", err.Error())
 	}
 }
 
@@ -159,9 +185,9 @@ func TestMeshCardCmd_FormatTree(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer nc.Close()
-	subj, err := subject.CardGet("echo", "dmestas", "echo")
+	subj, err := subject.Card(subject.Coord{Machine: "m1", Project: "p1", Session: "s1"})
 	if err != nil {
-		t.Fatalf("CardGet: %v", err)
+		t.Fatalf("Card: %v", err)
 	}
 	stubCardSubject(t, nc, subj, []byte(`{
 		"description": "echo card",
@@ -171,9 +197,9 @@ func TestMeshCardCmd_FormatTree(t *testing.T) {
 
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "echo",
-		Owner:   "dmestas",
-		Name:    "echo",
+		Session: "s1",
+		Project: "p1",
+		Machine: "m1",
 		NATSURL: url,
 		Window:  500 * time.Millisecond,
 		Format:  "tree",
@@ -183,7 +209,7 @@ func TestMeshCardCmd_FormatTree(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	for _, want := range []string{
-		"subject", "agents.card.get.echo.dmestas.echo",
+		"subject", "agents.card.m1.p1.s1",
 		"description echo card",
 		"icon", "https://x/icon.png",
 		"skills", "echo.say",
@@ -194,55 +220,23 @@ func TestMeshCardCmd_FormatTree(t *testing.T) {
 	}
 }
 
-func TestMeshCardCmd_RejectsBadAgentToken(t *testing.T) {
+func TestMeshCardCmd_RejectsBadSessionToken(t *testing.T) {
 	_, url := startTestNATSServer(t)
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "bad.token", // dot is reserved per subject.validateToken
-		Owner:   "dmestas",
-		Name:    "echo",
+		Session: "bad.token", // dot is reserved per subject.validateToken
+		Project: "p1",
+		Machine: "m1",
 		NATSURL: url,
 		Window:  500 * time.Millisecond,
 		Out:     &out,
 	}
 	err := cmd.Run(context.Background())
 	if err == nil {
-		t.Fatal("expected validation error for bad agent token")
+		t.Fatal("expected validation error for bad session token")
 	}
 	if !strings.Contains(err.Error(), "build subject") {
 		t.Errorf("error = %q, want 'build subject' wrapping", err.Error())
-	}
-}
-
-func TestMeshCardCmd_DefaultNameMirrorsAgent(t *testing.T) {
-	_, url := startTestNATSServer(t)
-	nc, err := nats.Connect(url, nats.Timeout(3*time.Second))
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer nc.Close()
-	// Both Name=="" and Agent=="echo" → subject token should be "echo".
-	subj, err := subject.CardGet("echo", "dmestas", "echo")
-	if err != nil {
-		t.Fatalf("CardGet: %v", err)
-	}
-	stubCardSubject(t, nc, subj, []byte(`{"description":"x"}`))
-
-	var out bytes.Buffer
-	cmd := &MeshCardCmd{
-		Agent:   "echo",
-		Owner:   "dmestas",
-		Name:    "", // explicit zero — must default to agent
-		NATSURL: url,
-		Window:  500 * time.Millisecond,
-		Format:  "json",
-		Out:     &out,
-	}
-	if err := cmd.Run(context.Background()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !strings.Contains(out.String(), "agents.card.get.echo.dmestas.echo") {
-		t.Errorf("Name=\"\" did not default to Agent; output:\n%s", out.String())
 	}
 }
 
@@ -253,17 +247,17 @@ func TestMeshCardCmd_NonJSONReplyFallback(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer nc.Close()
-	subj, err := subject.CardGet("echo", "dmestas", "echo")
+	subj, err := subject.Card(subject.Coord{Machine: "m1", Project: "p1", Session: "s1"})
 	if err != nil {
-		t.Fatalf("CardGet: %v", err)
+		t.Fatalf("Card: %v", err)
 	}
 	stubCardSubject(t, nc, subj, []byte(`not json at all`))
 
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "echo",
-		Owner:   "dmestas",
-		Name:    "echo",
+		Session: "s1",
+		Project: "p1",
+		Machine: "m1",
 		NATSURL: url,
 		Window:  500 * time.Millisecond,
 		Format:  "json", // raw passthrough for non-JSON
@@ -289,17 +283,17 @@ func TestMeshCardCmd_OutputIsValidJSON(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer nc.Close()
-	subj, err := subject.CardGet("echo", "dmestas", "echo")
+	subj, err := subject.Card(subject.Coord{Machine: "m1", Project: "p1", Session: "s1"})
 	if err != nil {
-		t.Fatalf("CardGet: %v", err)
+		t.Fatalf("Card: %v", err)
 	}
 	stubCardSubject(t, nc, subj, []byte(`{"description":"hello"}`))
 
 	var out bytes.Buffer
 	cmd := &MeshCardCmd{
-		Agent:   "echo",
-		Owner:   "dmestas",
-		Name:    "echo",
+		Session: "s1",
+		Project: "p1",
+		Machine: "m1",
 		NATSURL: url,
 		Window:  500 * time.Millisecond,
 		Format:  "json",
