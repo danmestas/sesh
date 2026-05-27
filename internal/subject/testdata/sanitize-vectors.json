@@ -1,0 +1,21 @@
+{
+  "rule": "replace each disallowed char [^A-Za-z0-9_-] with one '-' per UTF-16 code unit (1 for BMP, 2 for astral/supplementary-plane chars like emoji — matches the non-`u` TS regex /[^a-zA-Z0-9_-]/g), then ASCII-lowercase, then trim leading/trailing '-'. Internal '-' runs are preserved. Empty result returned empty; caller applies a per-token fallback.",
+  "vectors": [
+    {"in": "m4-macbook-tail51604c-ts-net", "out": "m4-macbook-tail51604c-ts-net"},
+    {"in": "M4-MacBook.local", "out": "m4-macbook-local"},
+    {"in": "sesh-channels", "out": "sesh-channels"},
+    {"in": "MyProj", "out": "myproj"},
+    {"in": "My Proj", "out": "my-proj"},
+    {"in": "feature/X", "out": "feature-x"},
+    {"in": "proj@1", "out": "proj-1"},
+    {"in": "agents.prompt", "out": "agents-prompt"},
+    {"in": "UPPER_snake", "out": "upper_snake"},
+    {"in": "-leading-and-trailing-", "out": "leading-and-trailing"},
+    {"in": "a.b*c>d e", "out": "a-b-c-d-e"},
+    {"in": "a..b", "out": "a--b"},
+    {"in": "Über", "out": "ber"},
+    {"in": "a😀b", "out": "a--b"},
+    {"in": "😀", "out": ""},
+    {"in": "", "out": ""}
+  ]
+}

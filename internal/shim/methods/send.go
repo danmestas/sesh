@@ -268,30 +268,23 @@ func (d *Dispatcher) discoverRoleToken() string {
 // was Project=Session=ScopeID and several integration tests pin that
 // shape with a single-token scope-id like "abc123".
 //
-// Each output token is then sanitized to be subject-safe (any
-// remaining '.' or whitespace becomes '_'). The sanitize step is a
-// belt-and-braces guard — SplitScopeIDForSubject's own logic only
-// leaves one '.' per token when the scope-id has more than one dot
-// (rare; the v0.4 contract is exactly one).
+// Each output half is then run through subject.SanitizeToken — the
+// canonical Axis-A subject-token rule shared with the TS SDK. The raw
+// scope-id is split on its FIRST '.' BEFORE sanitizing so the
+// project/session separator is preserved; sanitizing first would
+// collapse the separator into the token. Any remaining out-of-class
+// chars in a half (including a second '.') become '-' and the half is
+// ASCII-lowercased, matching the TS sanitizeSubjectToken contract.
 //
 // Exported (Slice 3C) so cmd/sesh-shim can derive the Composer's
 // subject.Coord project/session tokens identically to the prompt path;
 // the two paths MUST stay byte-identical.
 func SplitScopeIDForSubject(scopeID string) (project, session string) {
 	if i := strings.Index(scopeID, "."); i >= 0 {
-		return sanitizeScopeToken(scopeID[:i]), sanitizeScopeToken(scopeID[i+1:])
+		return subject.SanitizeToken(scopeID[:i]), subject.SanitizeToken(scopeID[i+1:])
 	}
-	t := sanitizeScopeToken(scopeID)
+	t := subject.SanitizeToken(scopeID)
 	return t, t
-}
-
-// sanitizeScopeToken makes a scope-id safe to use as a single NATS
-// subject token. Mirrors sesh-ops/scope's sanitize rule narrowed to
-// the only character that's both valid in a scope-id and invalid in
-// a subject token: '.'. Single-segment scope-ids are returned
-// unchanged; dotted scope-ids like "acme.demo" become "acme_demo".
-func sanitizeScopeToken(s string) string {
-	return strings.ReplaceAll(s, ".", "_")
 }
 
 // newULID returns a new ULID string using crypto/rand for entropy
