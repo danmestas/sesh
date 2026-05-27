@@ -221,7 +221,7 @@ func (d *Dispatcher) publishPrompt(m *messages.Message) {
 		return
 	}
 
-	project, session := splitScopeIDForSubject(d.deps.ScopeID)
+	project, session := SplitScopeIDForSubject(d.deps.ScopeID)
 	subj, err := subject.Prompt(subject.Coord{
 		Machine: d.deps.Machine,
 		Project: project,
@@ -256,10 +256,10 @@ func (d *Dispatcher) discoverRoleToken() string {
 	return role
 }
 
-// splitScopeIDForSubject splits a (possibly dotted) scope-id into the
-// project + session tokens used by the v0.4 prompt subject. The
-// canonical session-scoped form is "<project>.<session>"; we split on
-// the first '.' so a scope-id like "acme.demo" yields
+// SplitScopeIDForSubject splits a (possibly dotted) scope-id into the
+// project + session tokens used by the v0.4 prompt and card subjects.
+// The canonical session-scoped form is "<project>.<session>"; we split
+// on the first '.' so a scope-id like "acme.demo" yields
 // project="acme", session="demo", matching the adapter's SESH_PROJECT
 // / SESH_SESSION env split.
 //
@@ -270,10 +270,14 @@ func (d *Dispatcher) discoverRoleToken() string {
 //
 // Each output token is then sanitized to be subject-safe (any
 // remaining '.' or whitespace becomes '_'). The sanitize step is a
-// belt-and-braces guard — splitScopeIDForSubject's own logic only
+// belt-and-braces guard — SplitScopeIDForSubject's own logic only
 // leaves one '.' per token when the scope-id has more than one dot
 // (rare; the v0.4 contract is exactly one).
-func splitScopeIDForSubject(scopeID string) (project, session string) {
+//
+// Exported (Slice 3C) so cmd/sesh-shim can derive the Composer's
+// subject.Coord project/session tokens identically to the prompt path;
+// the two paths MUST stay byte-identical.
+func SplitScopeIDForSubject(scopeID string) (project, session string) {
 	if i := strings.Index(scopeID, "."); i >= 0 {
 		return sanitizeScopeToken(scopeID[:i]), sanitizeScopeToken(scopeID[i+1:])
 	}

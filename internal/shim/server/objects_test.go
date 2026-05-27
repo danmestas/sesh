@@ -23,6 +23,7 @@ import (
 	"github.com/danmestas/sesh/internal/shim/a2a"
 	"github.com/danmestas/sesh/internal/shim/auth"
 	"github.com/danmestas/sesh/internal/shim/card"
+	"github.com/danmestas/sesh/internal/subject"
 )
 
 // newObjectsTestServer wires the full stack with the /obj route mounted
@@ -43,7 +44,7 @@ func newObjectsTestServer(t *testing.T, v auth.Validator) (*server, *httptest.Se
 	if err != nil {
 		t.Fatalf("dev signer: %v", err)
 	}
-	composer := card.NewComposer(nc, card.L1Defaults{
+	composer := card.NewComposer(nc, subject.Coord{Machine: "a", Project: "o", Session: "a"}, card.L1Defaults{
 		GatewayURL:         "https://shim.test",
 		ProtocolVersion:    "1.0",
 		DefaultInputModes:  []string{"text/plain"},

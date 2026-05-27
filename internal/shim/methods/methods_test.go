@@ -15,12 +15,13 @@ import (
 	"github.com/danmestas/sesh/internal/subject"
 )
 
-// cardKeyAsCoord mirrors the card package's unexported agentKeyAsCoord
-// positional punt: it maps a card.AgentKey to a subject.Coord by slot
-// (Agent→Machine, Owner→Project, Name→Session) so tests can rebuild the
-// exact v0.4 card/cardx subject the Composer fetches under during the
-// cutover. Replaced when Slice 3C threads a real Coord through the
-// Composer.
+// cardKeyAsCoord maps a card.AgentKey to a subject.Coord by slot
+// (Agent→Machine, Owner→Project, Name→Session). Post-Slice-3C the
+// Composer L3-binds to a subject.Coord set at construction; these tests
+// build that Coord from the dispatcher's AgentKey via this helper so
+// the card/cardx subject the Composer fetches lands where the test stub
+// responder is registered. (It also drives the responder-subject
+// builder in stubExtendedReply.)
 func cardKeyAsCoord(key card.AgentKey) subject.Coord {
 	return subject.Coord{
 		Machine: key.Agent,

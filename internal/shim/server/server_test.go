@@ -76,7 +76,7 @@ func newTestServer(t *testing.T) (string, *card.Cache, *card.Signer, jetstream.J
 	if err != nil {
 		t.Fatalf("dev signer: %v", err)
 	}
-	composer := card.NewComposer(nc, card.L1Defaults{
+	composer := card.NewComposer(nc, subject.Coord{Machine: "test-agent", Project: "test-owner", Session: "test-agent"}, card.L1Defaults{
 		GatewayURL:         "https://shim.test",
 		ProtocolVersion:    "1.0",
 		DefaultInputModes:  []string{"text/plain"},
@@ -669,7 +669,7 @@ func newTestServerWithAuth(t *testing.T, v auth.Validator) string {
 	if err != nil {
 		t.Fatalf("dev signer: %v", err)
 	}
-	composer := card.NewComposer(nc, card.L1Defaults{
+	composer := card.NewComposer(nc, subject.Coord{Machine: "test-agent", Project: "test-owner", Session: "test-agent"}, card.L1Defaults{
 		GatewayURL:         "https://shim.test",
 		ProtocolVersion:    "1.0",
 		DefaultInputModes:  []string{"text/plain"},
@@ -739,7 +739,7 @@ func baseRunCfg(t *testing.T) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	composer := card.NewComposer(nc, card.L1Defaults{
+	composer := card.NewComposer(nc, subject.Coord{Machine: "test", Project: "test", Session: "test"}, card.L1Defaults{
 		GatewayURL:         "https://shim.test",
 		ProtocolVersion:    "1.0",
 		DefaultInputModes:  []string{"text/plain"},
@@ -892,7 +892,7 @@ func newTestServerWithPushKey(t *testing.T) (string, jetstream.JetStream) {
 	if err != nil {
 		t.Fatalf("dev signer: %v", err)
 	}
-	composer := card.NewComposer(nc, card.L1Defaults{
+	composer := card.NewComposer(nc, subject.Coord{Machine: "test-agent", Project: "test-owner", Session: "test-agent"}, card.L1Defaults{
 		GatewayURL:         "https://shim.test",
 		ProtocolVersion:    "1.0",
 		DefaultInputModes:  []string{"text/plain"},

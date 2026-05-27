@@ -71,8 +71,9 @@ func TestComposer_AppliesL2(t *testing.T) {
 
 	registerStubAgent(t, nc, "echo", "dmestas", "implementer", "cc")
 
-	c := NewComposer(nc, defaultL1(), 750*time.Millisecond, nil)
-	card, err := c.Compose(context.Background(), AgentKey{Agent: "echo", Owner: "dmestas", Name: "echo"})
+	key := AgentKey{Agent: "echo", Owner: "dmestas", Name: "echo"}
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 750*time.Millisecond, nil)
+	card, err := c.Compose(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +102,9 @@ func TestComposer_NoMatchReturnsL1Skeleton(t *testing.T) {
 	}
 	defer nc.Close()
 
-	c := NewComposer(nc, defaultL1(), 250*time.Millisecond, nil)
-	card, err := c.Compose(context.Background(), AgentKey{Agent: "nobody", Owner: "ghost", Name: "nobody"})
+	key := AgentKey{Agent: "nobody", Owner: "ghost", Name: "nobody"}
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 250*time.Millisecond, nil)
+	card, err := c.Compose(context.Background(), key)
 	if err != nil {
 		t.Fatalf("Compose should not error on no match: %v", err)
 	}
@@ -125,8 +127,9 @@ func TestComposer_OwnerFiltersOutOtherAgents(t *testing.T) {
 	registerStubAgent(t, nc, "echo", "alice", "r1", "c1")
 	registerStubAgent(t, nc, "echo", "bob", "r2", "c2")
 
-	c := NewComposer(nc, defaultL1(), 750*time.Millisecond, nil)
-	card, err := c.Compose(context.Background(), AgentKey{Agent: "echo", Owner: "bob", Name: "echo"})
+	key := AgentKey{Agent: "echo", Owner: "bob", Name: "echo"}
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 750*time.Millisecond, nil)
+	card, err := c.Compose(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,9 +171,20 @@ func stubL3Sleep(t *testing.T, nc *nats.Conn, subj string, body []byte, delay ti
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 }
 
+// coordForKey maps an AgentKey to the subject.Coord a Composer must be
+// constructed with so the v0.4 card/cardx subjects land where the test
+// stub responder is registered. This is the SAME positional mapping the
+// (now-deleted) production agentKeyAsCoord performed (Agent→Machine,
+// Owner→Project, Name→Session) — keeping it here keeps every responder
+// stub and subject assertion in this file byte-identical; only the
+// Composer construction changed under Slice 3C.
+func coordForKey(key AgentKey) subject.Coord {
+	return subject.Coord{Machine: key.Agent, Project: key.Owner, Session: key.Name}
+}
+
 func mustCardGet(t *testing.T, key AgentKey) string {
 	t.Helper()
-	subj, err := subject.Card(agentKeyAsCoord(key))
+	subj, err := subject.Card(coordForKey(key))
 	if err != nil {
 		t.Fatalf("subject.Card: %v", err)
 	}
@@ -179,7 +193,7 @@ func mustCardGet(t *testing.T, key AgentKey) string {
 
 func mustCardExtended(t *testing.T, key AgentKey) string {
 	t.Helper()
-	subj, err := subject.Cardx(agentKeyAsCoord(key))
+	subj, err := subject.Cardx(coordForKey(key))
 	if err != nil {
 		t.Fatalf("subject.Cardx: %v", err)
 	}
@@ -193,7 +207,7 @@ func silentLogger() *slog.Logger {
 }
 
 func TestComposer_ApplyPartial_PreservesL1Fields(t *testing.T) {
-	c := NewComposer(nil, defaultL1(), 0, silentLogger())
+	c := NewComposer(nil, subject.Coord{}, defaultL1(), 0, silentLogger())
 	card := c.l1Card()
 	card.Name = "preserved-name"
 	card.Version = "preserved-version"
@@ -234,7 +248,7 @@ func TestComposer_ApplyPartial_PreservesL1Fields(t *testing.T) {
 }
 
 func TestComposer_ApplyPartial_EmptyFieldsPreserveBase(t *testing.T) {
-	c := NewComposer(nil, defaultL1(), 0, silentLogger())
+	c := NewComposer(nil, subject.Coord{}, defaultL1(), 0, silentLogger())
 	card := c.l1Card()
 	card.Description = "base-desc"
 	card.Skills = []a2a.AgentSkill{{ID: "base"}}
@@ -318,7 +332,7 @@ func TestComposer_ComposeBase_OmitsL3(t *testing.T) {
 	// If ComposeBase ever fetched L3, this counter would fire.
 	calls := stubL3Reply(t, nc, mustCardGet(t, key), []byte(`{"description":"L3"}`))
 
-	c := NewComposer(nc, defaultL1(), 250*time.Millisecond, silentLogger())
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 250*time.Millisecond, silentLogger())
 	card, err := c.ComposeBase(context.Background(), key)
 	if err != nil {
 		t.Fatalf("ComposeBase: %v", err)
@@ -350,7 +364,7 @@ func TestComposer_L3_AppliesL3_OverlaysOverL2(t *testing.T) {
 		"iconUrl": "https://x/icon.png"
 	}`))
 
-	c := NewComposer(nc, defaultL1(), 750*time.Millisecond, silentLogger())
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 750*time.Millisecond, silentLogger())
 	card, err := c.Compose(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
@@ -383,9 +397,10 @@ func TestComposer_L3_MissingFallsThrough(t *testing.T) {
 	defer nc.Close()
 	registerStubAgent(t, nc, "echo", "alice", "r", "c")
 
-	c := NewComposer(nc, defaultL1(), 150*time.Millisecond, silentLogger())
+	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 150*time.Millisecond, silentLogger())
 	start := time.Now()
-	card, err := c.Compose(context.Background(), AgentKey{Agent: "echo", Owner: "alice", Name: "echo"})
+	card, err := c.Compose(context.Background(), key)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Compose: %v", err)
@@ -412,7 +427,7 @@ func TestComposer_L3_DecodeErrorFallsThrough(t *testing.T) {
 	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	stubL3Reply(t, nc, mustCardGet(t, key), []byte(`this is not JSON {`))
 
-	c := NewComposer(nc, defaultL1(), 250*time.Millisecond, silentLogger())
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 250*time.Millisecond, silentLogger())
 	card, err := c.Compose(context.Background(), key)
 	if err != nil {
 		t.Fatalf("Compose: %v", err)
@@ -434,7 +449,7 @@ func TestComposer_L3_Timeout(t *testing.T) {
 	key := AgentKey{Agent: "echo", Owner: "alice", Name: "echo"}
 	stubL3Sleep(t, nc, mustCardGet(t, key), []byte(`{"description":"too late"}`), 500*time.Millisecond)
 
-	c := NewComposer(nc, defaultL1(), 100*time.Millisecond, silentLogger())
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 100*time.Millisecond, silentLogger())
 	start := time.Now()
 	card, err := c.Compose(context.Background(), key)
 	elapsed := time.Since(start)
@@ -463,7 +478,7 @@ func TestComposer_FetchExtended_Happy(t *testing.T) {
 		"skills": [{"id":"echo.privileged","name":"Privileged","description":"d","tags":["t"]}]
 	}`))
 
-	c := NewComposer(nc, defaultL1(), 250*time.Millisecond, silentLogger())
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 250*time.Millisecond, silentLogger())
 	p, ok := c.FetchExtended(context.Background(), key)
 	if !ok {
 		t.Fatal("FetchExtended returned !ok on happy path")
@@ -484,145 +499,16 @@ func TestComposer_FetchExtended_Timeout(t *testing.T) {
 	}
 	defer nc.Close()
 
-	c := NewComposer(nc, defaultL1(), 100*time.Millisecond, silentLogger())
+	key := AgentKey{Agent: "echo", Owner: "ghost", Name: "echo"}
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 100*time.Millisecond, silentLogger())
 	start := time.Now()
-	_, ok := c.FetchExtended(context.Background(), AgentKey{Agent: "echo", Owner: "ghost", Name: "echo"})
+	_, ok := c.FetchExtended(context.Background(), key)
 	elapsed := time.Since(start)
 	if ok {
 		t.Error("FetchExtended returned ok when no responder")
 	}
 	if elapsed > 800*time.Millisecond {
 		t.Errorf("FetchExtended blocked %s past timeout", elapsed)
-	}
-}
-
-// registerStubAgentWithName extends registerStubAgent with a metadata
-// "name" key, so tests can exercise the Name-token side of
-// resolveSubjectTokens (sesh#122).
-func registerStubAgentWithName(t *testing.T, nc *nats.Conn, agent, owner, name, role, class string) {
-	t.Helper()
-	svc, err := micro.AddService(nc, micro.Config{
-		Name:        "agents",
-		Version:     "0.0.0",
-		Description: "stub for composer test",
-		Metadata: map[string]string{
-			"agent":       agent,
-			"owner":       owner,
-			"name":        name,
-			"role":        role,
-			"class":       class,
-			"harness_ver": "9.9.9",
-		},
-	})
-	if err != nil {
-		t.Fatalf("add service: %v", err)
-	}
-	t.Cleanup(func() { _ = svc.Stop() })
-}
-
-// TestComposer_L3_UsesAdapterAdvertisedAgentToken covers sesh#122:
-// the operator's AgentKey may differ from what the adapter
-// advertises in $SRV.INFO metadata. Compose's L3 fetch must build
-// the subject from the discovered metadata, not the operator-side
-// key.
-//
-// The shim's discover() filters $SRV.INFO replies by (agent, owner)
-// equality, so any divergence has to be on a non-filtered field —
-// the `name` token (which maps to the <session> segment under the
-// v0.4 positional punt agentKeyAsCoord). Operators that pass
-// --name=claude-code may connect to an adapter whose registerAgentCard
-// call advertised name=cc-instance-1. Pre-fix the L3 subject's last
-// segment was claude-code (no responder). Post-fix it's
-// cc-instance-1, the adapter-advertised name.
-func TestComposer_L3_UsesAdapterAdvertisedAgentToken(t *testing.T) {
-	url := startTestNATS(t)
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer nc.Close()
-
-	const operatorName = "claude-code"
-	const advertisedName = "cc-instance-1"
-	// metadata.role doubles as the subject token (sesh#124). Set it
-	// to "cc" so the resolved subject token matches the operator's
-	// --agent "cc" and stays at the L3-stubbed subject.
-	registerStubAgentWithName(t, nc, "cc", "alice", advertisedName, "cc", "cc")
-
-	key := AgentKey{Agent: "cc", Owner: "alice", Name: operatorName}
-
-	// Stub L3 reply ONLY on the adapter-advertised subject; if the
-	// shim still keys off the operator's Name, this responder never
-	// fires and Skills stays empty.
-	stubL3Reply(t, nc, mustCardGet(t, AgentKey{Agent: "cc", Owner: "alice", Name: advertisedName}), []byte(`{
-		"skills": [{"id":"cc.echo","name":"CC Echo","description":"d","tags":["t"]}]
-	}`))
-
-	c := NewComposer(nc, defaultL1(), 500*time.Millisecond, silentLogger())
-	card, err := c.Compose(context.Background(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(card.Skills) != 1 || card.Skills[0].ID != "cc.echo" {
-		t.Errorf("Skills = %+v, want one skill cc.echo (proves shim used adapter's advertised name token, not operator's --name flag)", card.Skills)
-	}
-}
-
-// TestResolveSubjectTokens unit-tests the helper used by Compose +
-// FetchExtended to merge $SRV.INFO metadata with the fallback key.
-// Metadata wins per-field when present; falls back to key when a
-// field is absent.
-//
-// The Agent field has a two-step preference per sesh#124:
-// metadata.role wins when present (the abbreviated subject token the
-// adapter registers its L3 card under), else metadata.agent
-// (canonical agent ID), else the operator's fallback key.
-func TestResolveSubjectTokens(t *testing.T) {
-	fallback := AgentKey{Agent: "op-agent", Owner: "op-owner", Name: "op-name"}
-
-	cases := []struct {
-		name string
-		md   map[string]string
-		want AgentKey
-	}{
-		{
-			name: "role+agent+owner+name present: role wins for Agent",
-			md:   map[string]string{"agent": "md-agent", "role": "md-role", "owner": "md-owner", "name": "md-name"},
-			want: AgentKey{Agent: "md-role", Owner: "md-owner", Name: "md-name"},
-		},
-		{
-			name: "agent present, role absent: agent wins for Agent",
-			md:   map[string]string{"agent": "md-agent", "owner": "md-owner", "name": "md-name"},
-			want: AgentKey{Agent: "md-agent", Owner: "md-owner", Name: "md-name"},
-		},
-		{
-			name: "empty metadata falls back to key",
-			md:   map[string]string{},
-			want: fallback,
-		},
-		{
-			name: "partial metadata (name absent) falls back to key.Name",
-			md:   map[string]string{"agent": "md-agent", "owner": "md-owner"},
-			want: AgentKey{Agent: "md-agent", Owner: "md-owner", Name: "op-name"},
-		},
-		{
-			name: "empty-string metadata values fall back to key",
-			md:   map[string]string{"agent": "", "role": "", "owner": "", "name": ""},
-			want: fallback,
-		},
-		{
-			name: "role only: role overrides fallback Agent",
-			md:   map[string]string{"role": "subject-token"},
-			want: AgentKey{Agent: "subject-token", Owner: "op-owner", Name: "op-name"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := resolveSubjectTokens(microInfo{Metadata: tc.md}, fallback)
-			if got != tc.want {
-				t.Errorf("got %+v, want %+v", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -639,7 +525,7 @@ func TestComposer_FetchExtended_PubliccardGetUnused(t *testing.T) {
 	publicCalls := stubL3Reply(t, nc, mustCardGet(t, key), []byte(`{"description":"public"}`))
 	stubL3Reply(t, nc, mustCardExtended(t, key), []byte(`{"description":"extended"}`))
 
-	c := NewComposer(nc, defaultL1(), 250*time.Millisecond, silentLogger())
+	c := NewComposer(nc, coordForKey(key), defaultL1(), 250*time.Millisecond, silentLogger())
 	p, ok := c.FetchExtended(context.Background(), key)
 	if !ok {
 		t.Fatal("FetchExtended returned !ok")

@@ -41,38 +41,15 @@ type partialCaps struct {
 }
 
 // AgentKey identifies which adapter a composed AgentCard describes.
-// Originally (Slice 5) the (Agent, Owner, Name) triple addressed the
-// adapter directly via the v0.3 `agents.card.get.<agent>.<owner>.<name>`
-// subject. The clean v0.4 scheme reshapes that addressing to
-// (Machine, Project, Session); during the cutover this struct remains
-// the matcher key against $SRV.INFO metadata (where adapters still
-// advertise these fields), and the subject for fetchL3 is built via
-// the positional punt agentKeyAsCoord. Slice 3C threads real
-// (Machine, Project, Session) state into the Composer and removes
-// the punt.
+// It is the matcher key against $SRV.INFO metadata: discover() filters
+// advertised services by these fields to find the adapter this shim
+// fronts. It is NOT the source of the L3 card subject — that comes from
+// the Composer's own subject.Coord (set at construction). See
+// docs/plans/2026-05-26-clean-subject-scheme-cutover.md, Slice 3C.
 type AgentKey struct {
 	Agent string
 	Owner string
 	Name  string
-}
-
-// agentKeyAsCoord maps an AgentKey to a subject.Coord positionally so
-// the v0.4 5-token Card/Cardx subjects can be built without yet
-// threading a separate (Machine, Project, Session) tuple through the
-// Composer surface. The mapping is byte-shape continuity only — there
-// is NO claim that the (Agent, Owner, Name) values mean the same
-// thing as (Machine, Project, Session). Slice 3C (per
-// docs/plans/2026-05-26-clean-subject-scheme-cutover.md) replaces
-// this punt by giving the Composer real coordinate state at
-// construction time and dropping the AgentKey-keyed subject build.
-//
-// TODO(slice-3c): remove once Composer holds a subject.Coord directly.
-func agentKeyAsCoord(key AgentKey) subject.Coord {
-	return subject.Coord{
-		Machine: key.Agent,
-		Project: key.Owner,
-		Session: key.Name,
-	}
 }
 
 // L1Defaults are the operator-controlled shim defaults that never vary
@@ -93,33 +70,34 @@ type L1Defaults struct {
 // fetch landed in Slice 5.
 type Composer struct {
 	nc          *nats.Conn
+	coord       subject.Coord // session this composer L3-binds to; empty disables L3
 	l1          L1Defaults
 	queryWindow time.Duration
 	log         *slog.Logger
 }
 
-func NewComposer(nc *nats.Conn, l1 L1Defaults, queryWindow time.Duration, log *slog.Logger) *Composer {
+func NewComposer(nc *nats.Conn, coord subject.Coord, l1 L1Defaults, queryWindow time.Duration, log *slog.Logger) *Composer {
 	if queryWindow <= 0 {
 		queryWindow = 500 * time.Millisecond
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Composer{nc: nc, l1: l1, queryWindow: queryWindow, log: log}
+	return &Composer{nc: nc, coord: coord, l1: l1, queryWindow: queryWindow, log: log}
 }
 
 // Compose builds the L1+L2+L3 merged card. L1 is the operator-controlled
 // skeleton; L2 comes from $SRV.INFO; L3 comes from a window-bounded
-// request to agents.card.<machine>.<project>.<session> (the clean v0.4
-// subject; the AgentKey is positionally mapped through agentKeyAsCoord
-// until Slice 3C threads a real Coord). Returns a card even on full L2
-// and L3 absence — a card is always producible.
+// request to agents.card.<machine>.<project>.<session>, built from the
+// Composer's own subject.Coord (set at construction, Slice 3C). Returns
+// a card even on full L2 and L3 absence — a card is always producible.
 //
-// L3 subject tokens come from the discovered adapter's $SRV.INFO
-// metadata, not from `key` directly. The operator's `--agent` flag
-// (e.g. "claude-code") may differ from the token the adapter
-// advertises (e.g. "cc"). Using `key.Agent` here would aim L3 at a
-// subject no responder owns. See sesh#122.
+// The `key` AgentKey is the $SRV.INFO matcher only: discover() uses it
+// to find the adapter this shim fronts. The L3 subject does NOT derive
+// from `key` — the operator's `--agent` flag (e.g. "claude-code") may
+// differ from the adapter's advertised token, so addressing L3 off
+// `key` would aim at a subject no responder owns (see sesh#122). The
+// Coord is the authoritative session address instead.
 func (c *Composer) Compose(ctx context.Context, key AgentKey) (*a2a.AgentCard, error) {
 	card := c.l1Card()
 	info, found := c.discover(ctx, key)
@@ -129,8 +107,7 @@ func (c *Composer) Compose(ctx context.Context, key AgentKey) (*a2a.AgentCard, e
 		return card, nil
 	}
 	c.applyL2(card, info)
-	resolved := resolveSubjectTokens(info, key)
-	if partial, ok := c.fetchL3(ctx, resolved, false); ok {
+	if partial, ok := c.fetchL3(ctx, false); ok {
 		c.applyL3(card, partial)
 	}
 	return card, nil
@@ -152,58 +129,17 @@ func (c *Composer) ComposeBase(ctx context.Context, key AgentKey) (*a2a.AgentCar
 }
 
 // FetchExtended issues a request against agents.cardx.<machine>.<project>.<session>
-// (the clean v0.4 extended-card subject) and returns the parsed
-// cardPartial on a successful reply. Caller passes the result through
-// ApplyPartial to overlay onto a previously composed base card.
+// (the clean v0.4 extended-card subject, built from the Composer's own
+// subject.Coord) and returns the parsed cardPartial on a successful
+// reply. Caller passes the result through ApplyPartial to overlay onto
+// a previously composed base card.
 //
-// Per sesh#122 the L3 subject must be built from the adapter's
-// advertised tokens, not the operator's `key`. Discover first; if a
-// match is found, use its metadata for the subject. If no $SRV.INFO
-// match, fall back to the caller's key tokens — preserves the legacy
-// path for adapters that haven't been observed via $SRV.INFO yet.
-// Coord derivation still goes through agentKeyAsCoord during the
-// cutover; see Slice 3C in the cutover plan.
-func (c *Composer) FetchExtended(ctx context.Context, key AgentKey) (cardPartial, bool) {
-	resolved := key
-	if info, found := c.discover(ctx, key); found {
-		resolved = resolveSubjectTokens(info, key)
-	}
-	return c.fetchL3(ctx, resolved, true)
-}
-
-// resolveSubjectTokens returns the (Agent, Owner, Name) triple that
-// the L3 subject should be built from. Prefers the adapter's
-// $SRV.INFO metadata so the resulting subject matches whatever the
-// adapter registered its card endpoint under. Falls back to the
-// caller's key when a particular metadata field is absent.
-//
-// For the Agent token specifically, we prefer `metadata.role` over
-// `metadata.agent`. The adapter's L3 card endpoint is positionally
-// keyed on the (Agent, Owner, Name) triple during the v0.4 cutover
-// (see agentKeyAsCoord); pre-cutover this was the subject's third
-// token directly. <subject-token> is the abbreviated form (e.g. "cc"),
-// not the canonical agent ID (e.g. "claude-code"). The canonical ID
-// lives in metadata.agent for L1+L2 composition; the subject token
-// lives in metadata.role. Using metadata.agent for the subject (as
-// #123 did) produces a subject no responder owns. See sesh#124.
-//
-// Preserving the caller's key as the final fallback lets the operator
-// override discovery: if --agent was deliberately set to the right
-// subject token (the rig pattern), it wins when discovery omits role.
-func resolveSubjectTokens(info microInfo, fallback AgentKey) AgentKey {
-	out := fallback
-	if v := info.Metadata["role"]; v != "" {
-		out.Agent = v
-	} else if v := info.Metadata["agent"]; v != "" {
-		out.Agent = v
-	}
-	if v := info.Metadata["owner"]; v != "" {
-		out.Owner = v
-	}
-	if v := info.Metadata["name"]; v != "" {
-		out.Name = v
-	}
-	return out
+// The `key` param is retained for call-site uniformity with Compose
+// (both public fetch methods take the AgentKey the dispatcher holds),
+// but the L3 subject derives from c.coord, not key — see Compose for
+// why addressing off `key` would miss the responder (sesh#122).
+func (c *Composer) FetchExtended(ctx context.Context, _ AgentKey) (cardPartial, bool) {
+	return c.fetchL3(ctx, true)
 }
 
 // ApplyPartial overlays partial onto card per the L3 merge rules
@@ -215,9 +151,15 @@ func (c *Composer) ApplyPartial(card *a2a.AgentCard, partial cardPartial) {
 
 // fetchL3 issues one nats.Request to agents.card.<m>.<p>.<s> (extended=false)
 // or agents.cardx.<m>.<p>.<s> (extended=true) and decodes the reply as
-// a cardPartial. Subject coordinates come from agentKeyAsCoord — the
-// v0.4 cutover positional punt — until Slice 3C threads a real Coord.
-// Wall time is bounded by queryWindow.
+// a cardPartial. Subject coordinates come from the Composer's own
+// subject.Coord (set at construction, Slice 3C). Wall time is bounded
+// by queryWindow.
+//
+// An empty Coord disables L3: a Composer built with subject.Coord{}
+// (or any partially-empty triple) returns (cardPartial{}, false) before
+// touching NATS. This preserves the "card always producible" invariant
+// for unit tests and any future caller that constructs a Composer
+// without a bound session.
 //
 // L3 absence is NOT an error — pre-v0.4 adapters never register the
 // service, so a timeout is the expected steady state. We log INFO
@@ -228,7 +170,11 @@ func (c *Composer) ApplyPartial(card *a2a.AgentCard, partial cardPartial) {
 // timeout; we deliberately use it over RequestWithContext because the
 // caller's ctx may outlive queryWindow (e.g. an HTTP request with a 30s
 // deadline shouldn't block the card fetch for 30s).
-func (c *Composer) fetchL3(ctx context.Context, key AgentKey, extended bool) (cardPartial, bool) {
+func (c *Composer) fetchL3(ctx context.Context, extended bool) (cardPartial, bool) {
+	// No bound session ⇒ no L3 to fetch.
+	if c.coord.Machine == "" || c.coord.Project == "" || c.coord.Session == "" {
+		return cardPartial{}, false
+	}
 	// Honor caller cancellation pre-emptively — saves the round trip
 	// when the HTTP request was already aborted.
 	if err := ctx.Err(); err != nil {
@@ -238,7 +184,7 @@ func (c *Composer) fetchL3(ctx context.Context, key AgentKey, extended bool) (ca
 		subj string
 		err  error
 	)
-	coord := agentKeyAsCoord(key)
+	coord := c.coord
 	if extended {
 		subj, err = subject.Cardx(coord)
 	} else {
@@ -246,7 +192,7 @@ func (c *Composer) fetchL3(ctx context.Context, key AgentKey, extended bool) (ca
 	}
 	if err != nil {
 		c.log.Warn("composer: build card subject failed",
-			"agent", key.Agent, "owner", key.Owner, "name", key.Name,
+			"machine", coord.Machine, "project", coord.Project, "session", coord.Session,
 			"extended", extended, "err", err)
 		return cardPartial{}, false
 	}
