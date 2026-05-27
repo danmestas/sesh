@@ -43,7 +43,7 @@ type CLI struct {
 	ScopeKind     string        `name:"scope-kind" default:"project" env:"SESH_SHIM_SCOPE_KIND" help:"Task scope kind for KV bucket naming"`
 	ScopeID       string        `name:"scope-id" env:"SESH_SHIM_SCOPE_ID" help:"Task scope id for KV bucket naming"`
 	GatewayURL    string        `name:"gateway-url" env:"SESH_SHIM_GATEWAY_URL" help:"Public-facing URL advertised in the AgentCard"`
-	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the first segment of agents.prompt.cc.*; falls back to os.Hostname() if empty"`
+	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the <machine> segment of agents.prompt.<machine>.<project>.<session>.<role>; falls back to os.Hostname() if empty"`
 	Dev           bool          `name:"dev" env:"SESH_SHIM_DEV" help:"Enable dev mode: self-signed TLS + ephemeral signing key permitted"`
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"5s" env:"SESH_SHIM_SHUTDOWN_GRACE" help:"Max drain/shutdown wait"`
 
@@ -127,10 +127,11 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 		return errors.New("--machine resolved empty after sanitization; set SESH_SHIM_MACHINE explicitly")
 	}
 
-	// --name is the third subject token in agents.card.get.<agent>.<owner>.<name>.
-	// Defaults to --agent so existing single-agent shim invocations keep
-	// working (the SDK's registerAgentCard typically uses name == agent
-	// when there's one instance per agent kind).
+	// --name is the adapter instance name advertised in $SRV.INFO
+	// metadata; the composer matches on it when resolving the L3 card
+	// subject. Defaults to --agent so existing single-agent shim
+	// invocations keep working (the SDK's registerAgentCard typically
+	// uses name == agent when there's one instance per agent kind).
 	name := cli.Name
 	if name == "" {
 		name = cli.Agent

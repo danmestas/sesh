@@ -88,7 +88,7 @@ type meshMessage struct {
 // the sesh-channels adapter SDK envelope validator accepts. Differs
 // from ToWireMessage only in Role projection: lowercase "user"|"agent"
 // instead of a2a-go's SCREAMING_SNAKE constants. Callers on the
-// publishPromptV2 path use this; SSE/JSON-RPC outbound paths use
+// publishPrompt path use this; SSE/JSON-RPC outbound paths use
 // ToWireMessage (sesh#137).
 //
 // Like ToWireMessage, this defensively copies Parts before any rewrite

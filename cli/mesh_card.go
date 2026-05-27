@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/danmestas/sesh/internal/coord"
 	"github.com/danmestas/sesh/internal/subject"
 )
 
@@ -28,22 +28,29 @@ type MeshGroup struct {
 	Card MeshCardCmd `cmd:""                    help:"Fetch the L3 AgentCard from one adapter via NATS"`
 }
 
-// MeshCardCmd is `sesh mesh card <agent> [--owner=… --name=…
+// MeshCardCmd is `sesh mesh card <session> [--project=… --machine=…
 // --extended --window=500ms -o json|tree]`.
 //
-// Operator-facing debug surface for the Slice 5 L3 card path: issues
-// a window-bounded nats.Request to agents.card.get.<…> (or
-// agents.card.extended.<…> with --extended) and prints whatever the
-// adapter replied with. Exits 1 on timeout-or-no-reply, 0 on success.
+// Operator-facing debug surface for the L3 card path on the clean v0.4
+// subject scheme: issues a window-bounded nats.Request to
+// agents.card.<machine>.<project>.<session> (or agents.cardx.<…> with
+// --extended) and prints whatever the session's adapter replied with.
+// Exits 1 on timeout-or-no-reply, 0 on success.
+//
+// Coordinate derivation matches the adapter side of the cutover:
+// --machine defaults to the local machine id (coord.Machine(), which
+// honors $SESH_MACHINE), --project defaults to $SESH_PROJECT, and the
+// positional <session> arg is the session token. The old
+// agent/owner/name addressing is gone — cards are session-scoped now.
 //
 // Reuses the same NATS-URL resolution path as MeshCmd (--nats-url
 // flag → ReadHubInfo fallback) so operator habits transfer between
 // `sesh mesh` and `sesh mesh card`.
 type MeshCardCmd struct {
-	Agent    string        `arg:""            help:"Adapter agent token"`
-	Owner    string        `name:"owner"      help:"Adapter owner token; defaults to $USER"`
-	Name     string        `name:"name"       help:"Adapter instance name; defaults to --agent"`
-	Extended bool          `name:"extended"   help:"Fetch the auth-gated extended card via agents.card.extended.* instead of the public agents.card.get.*"`
+	Session  string        `arg:""            help:"Session token (the <session> subject segment)"`
+	Project  string        `name:"project"    env:"SESH_PROJECT" help:"Project token; defaults to $SESH_PROJECT"`
+	Machine  string        `name:"machine"    env:"SESH_MACHINE" help:"Machine token; defaults to the local machine id"`
+	Extended bool          `name:"extended"   help:"Fetch the auth-gated extended card via agents.cardx.* instead of the public agents.card.*"`
 	NATSURL  string        `name:"nats-url"   env:"NATS_URL" help:"NATS URL to query (overrides hub discovery)"`
 	Format   string        `short:"o"         default:"json"  enum:"json,tree" help:"Output format: json | tree"`
 	Window   time.Duration `name:"window"     default:"500ms" help:"Reply timeout window"`
@@ -67,26 +74,25 @@ func (cmd *MeshCardCmd) Run(ctx context.Context) error {
 		cmd.Format = "json"
 	}
 
-	owner := cmd.Owner
-	if owner == "" {
-		owner = defaultOwner()
+	machine := cmd.Machine
+	if machine == "" {
+		machine = coord.Machine()
 	}
-	if owner == "" {
-		return fmt.Errorf("mesh card: --owner is required (no $USER fallback available)")
+	project := cmd.Project
+	if project == "" {
+		return fmt.Errorf("mesh card: --project is required (set --project or $SESH_PROJECT)")
 	}
-	name := cmd.Name
-	if name == "" {
-		name = cmd.Agent
-	}
+
+	c := subject.Coord{Machine: machine, Project: project, Session: cmd.Session}
 
 	var (
 		subj string
 		err  error
 	)
 	if cmd.Extended {
-		subj, err = subject.CardExtended(cmd.Agent, owner, name)
+		subj, err = subject.Cardx(c)
 	} else {
-		subj, err = subject.CardGet(cmd.Agent, owner, name)
+		subj, err = subject.Card(c)
 	}
 	if err != nil {
 		return fmt.Errorf("mesh card: build subject: %w", err)
@@ -121,19 +127,6 @@ func (cmd *MeshCardCmd) Run(ctx context.Context) error {
 	}
 
 	return renderCardReply(cmd.Out, subj, msg.Data, cmd.Format)
-}
-
-// defaultOwner returns $USER (or os/user.Current().Username), falling
-// back to "" if neither is available. Operators who want explicit
-// control can always pass --owner.
-func defaultOwner() string {
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	if u, err := user.Current(); err == nil {
-		return u.Username
-	}
-	return ""
 }
 
 // cardReplyTreeView is the minimal projection of the adapter's

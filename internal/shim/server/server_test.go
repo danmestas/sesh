@@ -314,7 +314,7 @@ func TestA2A_GetTask_BucketMissing(t *testing.T) {
 }
 
 func TestA2A_GetExtendedAgentCard(t *testing.T) {
-	// Slice 1 behavior: no adapter responder on agents.card.extended.*,
+	// Slice 1 behavior: no adapter responder on agents.cardx.*,
 	// so the handler's FetchExtended times out within the composer's
 	// 200ms queryWindow and -32007 surfaces. Slice 5 preserves this
 	// path for the "no adapter" steady state.
@@ -327,12 +327,12 @@ func TestA2A_GetExtendedAgentCard(t *testing.T) {
 }
 
 // TestA2A_GetExtendedAgentCard_HappyPath wires an adapter stub that
-// responds on agents.card.extended.* and asserts the shim returns a
+// responds on agents.cardx.* and asserts the shim returns a
 // signed card whose description was overlaid from the L3 partial.
 func TestA2A_GetExtendedAgentCard_HappyPath(t *testing.T) {
 	url, _, _, _, nc := newTestServer(t)
 	// AgentKey matches the one wired in newTestServer.
-	subj, err := subject.CardExtended("test-agent", "test-owner", "test-agent")
+	subj, err := subject.Cardx(subject.Coord{Machine: "test-agent", Project: "test-owner", Session: "test-agent"})
 	if err != nil {
 		t.Fatalf("subject: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestA2A_GetExtendedAgentCard_NoAdapter_Returns32007(t *testing.T) {
 
 // TestA2A_AgentCard_IncludesL3_OnFreshFetch confirms the public
 // /.well-known/agent-card.json endpoint pulls L3 contributions from
-// the adapter via agents.card.get.*. Uses a unique scope-id to avoid
+// the adapter via agents.card.*. Uses a unique scope-id to avoid
 // cross-test cache contamination through the embedded broker
 // (newTestServer creates a fresh broker per test, so a fresh cache).
 //
@@ -423,7 +423,7 @@ func TestA2A_AgentCard_IncludesL3_OnFreshFetch(t *testing.T) {
 	}
 	defer svc.Stop()
 
-	subj, err := subject.CardGet("test-agent", "test-owner", "test-agent")
+	subj, err := subject.Card(subject.Coord{Machine: "test-agent", Project: "test-owner", Session: "test-agent"})
 	if err != nil {
 		t.Fatalf("subject: %v", err)
 	}
