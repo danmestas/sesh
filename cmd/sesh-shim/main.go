@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -116,7 +115,7 @@ func run(ctx context.Context, cli CLI, log *slog.Logger) error {
 	// no `*`/`>`). macOS hostnames like "Dans-MacBook-Pro.local" would
 	// otherwise silently break SendMessage's prompt publish path. Replace
 	// reserved chars; if the result is still empty, fail fast.
-	machine = sanitizeMachineToken(machine)
+	machine = subject.SanitizeToken(machine)
 	if machine == "" {
 		return errors.New("--machine resolved empty after sanitization; set SESH_SHIM_MACHINE explicitly")
 	}
@@ -254,23 +253,4 @@ func buildPushKey(cli CLI, log *slog.Logger) ([]byte, error) {
 func keyKID(key []byte) string {
 	h := sha256.Sum256(key)
 	return hex.EncodeToString(h[:4])
-}
-
-// sanitizeMachineToken replaces any rune that subject.validateToken
-// rejects (., whitespace, *, >) with `-`. macOS `os.Hostname()` like
-// "Dans-MacBook-Pro.local" otherwise yields a token that silently
-// breaks SendMessage's NATS publish path.
-func sanitizeMachineToken(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r == '.', r == '*', r == '>':
-			b.WriteByte('-')
-		case r == ' ', r == '\t', r == '\n', r == '\r':
-			b.WriteByte('-')
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }
