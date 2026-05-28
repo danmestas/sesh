@@ -34,14 +34,18 @@ func seedProjectID(t *testing.T, root string) string {
 // TestResolveProjectID covers the walk-up + ENOENT-tolerant behavior.
 // Mirrors readSessionNATSURL's contract: file present anywhere up the
 // directory tree → return its content; nowhere → ("", nil).
+//
+// Each case bounds the walk at the temp-tree root (resolveProjectIDFrom's
+// stopDir) so the result is hermetic — t.TempDir lives under $TMPDIR, which
+// on some machines sits inside a real sesh project (e.g. /tmp/.sesh), and an
+// unbounded walk to the filesystem root would pick up that ancestor's pin.
 func TestResolveProjectID(t *testing.T) {
 	t.Run("present in cwd", func(t *testing.T) {
 		root := t.TempDir()
 		want := seedProjectID(t, root)
-		t.Chdir(root)
-		got, err := resolveProjectID()
+		got, err := resolveProjectIDFrom(root, root)
 		if err != nil {
-			t.Fatalf("resolveProjectID: %v", err)
+			t.Fatalf("resolveProjectIDFrom: %v", err)
 		}
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -55,10 +59,9 @@ func TestResolveProjectID(t *testing.T) {
 		if err := os.MkdirAll(nested, 0o755); err != nil {
 			t.Fatalf("mkdir nested: %v", err)
 		}
-		t.Chdir(nested)
-		got, err := resolveProjectID()
+		got, err := resolveProjectIDFrom(nested, root)
 		if err != nil {
-			t.Fatalf("resolveProjectID: %v", err)
+			t.Fatalf("resolveProjectIDFrom: %v", err)
 		}
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -66,10 +69,10 @@ func TestResolveProjectID(t *testing.T) {
 	})
 
 	t.Run("absent → empty string, no error", func(t *testing.T) {
-		t.Chdir(t.TempDir())
-		got, err := resolveProjectID()
+		root := t.TempDir()
+		got, err := resolveProjectIDFrom(root, root)
 		if err != nil {
-			t.Fatalf("resolveProjectID: %v", err)
+			t.Fatalf("resolveProjectIDFrom: %v", err)
 		}
 		if got != "" {
 			t.Errorf("got %q, want empty", got)

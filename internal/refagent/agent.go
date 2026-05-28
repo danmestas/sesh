@@ -681,7 +681,19 @@ func resolveProjectID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := cwd
+	return resolveProjectIDFrom(cwd, "")
+}
+
+// resolveProjectIDFrom walks up from start looking for a .sesh/project-id
+// pin, returning the first one found (trimmed). The search stops after it
+// checks stopDir: reaching stopDir without a hit returns ("", nil) instead
+// of continuing toward the filesystem root. Production passes stopDir=""
+// (which never matches a real directory) to walk all the way up — identical
+// to the original behavior. Tests pass the root of an isolated temp tree so
+// the result can't depend on .sesh pins that happen to exist in shared
+// ancestors (e.g. a real sesh project rooted at /tmp, where t.TempDir lives).
+func resolveProjectIDFrom(start, stopDir string) (string, error) {
+	dir := start
 	for {
 		path := filepath.Join(dir, ".sesh", "project-id")
 		data, err := os.ReadFile(path)
@@ -690,6 +702,9 @@ func resolveProjectID() (string, error) {
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("read %s: %w", path, err)
+		}
+		if dir == stopDir {
+			return "", nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
