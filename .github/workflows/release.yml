@@ -17,6 +17,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: clone sibling repos for go.mod replace directives
+        # go.mod uses `replace ... => ../sesh-ops` and `=> ../EdgeSync`
+        # for local development; goreleaser's `go mod tidy` hook needs
+        # them present. Mirror ci.yml's clone step. sesh-ops has no
+        # tagged release yet; pin HEAD until one lands.
+        run: |
+          cd "${{ runner.workspace }}"
+          git clone --depth=1 https://github.com/danmestas/sesh-ops.git sesh-ops
+          git clone --depth=1 --branch v0.0.20 https://github.com/danmestas/EdgeSync.git EdgeSync
       - uses: actions/setup-go@v5.5.0
         with:
           go-version-file: go.mod
