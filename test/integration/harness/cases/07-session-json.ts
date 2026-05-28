@@ -55,17 +55,32 @@ export async function run(ctx: CaseContext): Promise<CaseResult> {
   const failures: string[] = [];
   if (!cc) failures.push("no claude-code entry");
   if (!op) failures.push("no op entry");
+
+  // Clean v0.4 subject scheme: agents.prompt.<machine>.<project>.<session>.<role>.
+  // Agent identity lives in metadata (the `agent` field, asserted above),
+  // NOT in a class token. The token right after `agents.prompt.` is the
+  // MACHINE — it must NOT be the legacy class token (cc/op/gr) or the owner.
+  const assertCleanSubject = (label: string, subject?: string) => {
+    if (!subject?.startsWith("agents.prompt.")) {
+      failures.push(`${label}.subject=${subject} (want agents.prompt. prefix)`);
+      return;
+    }
+    const machineToken = subject.split(".")[2] ?? "";
+    if (machineToken === "" || machineToken === "cc" || machineToken === "op" ||
+        machineToken === "gr" || machineToken === ctx.owner) {
+      failures.push(`${label}.subject=${subject} (token after agents.prompt. should be machine, got ${machineToken})`);
+    }
+  };
+
   if (cc) {
     if (cc.role !== "implementer") failures.push(`cc.role=${cc.role} want implementer`);
     if (cc.class !== "active") failures.push(`cc.class=${cc.class}`);
-    if (!cc.subject?.startsWith(`agents.prompt.cc.${ctx.owner}.`))
-      failures.push(`cc.subject=${cc.subject}`);
+    assertCleanSubject("cc", cc.subject);
   }
   if (op) {
     if (op.role !== "planner") failures.push(`op.role=${op.role} want planner`);
     if (op.class !== "active") failures.push(`op.class=${op.class}`);
-    if (!op.subject?.startsWith(`agents.prompt.op.${ctx.owner}.`))
-      failures.push(`op.subject=${op.subject}`);
+    assertCleanSubject("op", op.subject);
   }
 
   if (failures.length > 0) {

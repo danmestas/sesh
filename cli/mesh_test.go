@@ -9,7 +9,73 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/micro"
 )
+
+// registerCleanOpts describes a synthetic v0.4 agent: machine-rooted clean
+// prompt subject (agents.prompt.<machine>.<project>.<session>.<role>) plus
+// the metadata adapters now advertise (agent, owner, machine, project_id,
+// session, role, capabilities).
+type registerCleanOpts struct {
+	agent    string
+	owner    string
+	machine  string
+	project  string
+	session  string
+	role     string
+	caps     string // sesh.v04_capabilities, e.g. "messages,artifacts,cards"
+	class    string
+	protoVer string
+}
+
+// registerTestAgentClean registers a synthetic "agents" micro service that
+// advertises the clean v0.4 scheme — a machine-rooted prompt subject and
+// the matching service metadata. Mirrors what a post-cutover adapter
+// publishes. Returns the live service (stopped on test cleanup).
+func registerTestAgentClean(t *testing.T, nc *nats.Conn, o registerCleanOpts) micro.Service {
+	t.Helper()
+	subj := "agents.prompt." + o.machine + "." + o.project + "." + o.session + "." + o.role
+	meta := map[string]string{
+		"agent":      o.agent,
+		"owner":      o.owner,
+		"machine":    o.machine,
+		"project_id": o.project,
+		"session":    o.session,
+		"role":       o.role,
+	}
+	if o.caps != "" {
+		meta["sesh.v04_capabilities"] = o.caps
+	}
+	if o.class != "" {
+		meta["class"] = o.class
+	}
+	if o.protoVer != "" {
+		meta["protocol_version"] = o.protoVer
+	} else {
+		meta["protocol_version"] = "0.4"
+	}
+	svc, err := micro.AddService(nc, micro.Config{
+		Name:        "agents",
+		Version:     "0.1.0",
+		Description: o.agent + " clean-scheme test agent",
+		Metadata:    meta,
+	})
+	if err != nil {
+		t.Fatalf("register clean micro service %q: %v", o.agent, err)
+	}
+	// Named "prompt" endpoint: QueryMesh keys on the endpoint named
+	// "prompt" to capture the clean prompt subject.
+	if err := svc.AddEndpoint("prompt",
+		micro.HandlerFunc(func(req micro.Request) { _ = req.Respond([]byte("ok")) }),
+		micro.WithEndpointSubject(subj)); err != nil {
+		t.Fatalf("add prompt endpoint: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush after register: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop() })
+	return svc
+}
 
 func TestQueryMesh_ReturnsAllRegisteredAgents(t *testing.T) {
 	_, url := startTestNATSServer(t)
@@ -48,15 +114,19 @@ func TestQueryMesh_PopulatesProtocolFields(t *testing.T) {
 	_, url := startTestNATSServer(t)
 	nc, _ := nats.Connect(url)
 	defer nc.Close()
-	registerTestAgent(t, nc, "cc", "dmestas", "alpha")
+	// Clean v0.4 subject: agents.prompt.<machine>.<project>.<session>.<role>.
+	registerTestAgentClean(t, nc, registerCleanOpts{
+		agent: "claude-code", owner: "dmestas",
+		machine: "m4-host", project: "sesh", session: "alpha", role: "worker",
+	})
 
 	got := QueryMesh(nc, 500*time.Millisecond)
 	if len(got) != 1 {
 		t.Fatalf("want 1 agent, got %d", len(got))
 	}
 	a := got[0]
-	if a.Agent != "cc" {
-		t.Errorf("Agent=%q, want cc", a.Agent)
+	if a.Agent != "claude-code" {
+		t.Errorf("Agent=%q, want claude-code", a.Agent)
 	}
 	if a.Owner != "dmestas" {
 		t.Errorf("Owner=%q, want dmestas", a.Owner)
@@ -64,14 +134,23 @@ func TestQueryMesh_PopulatesProtocolFields(t *testing.T) {
 	if a.Session != "alpha" {
 		t.Errorf("Session=%q, want alpha", a.Session)
 	}
-	if a.ProtocolVersion != "0.3" {
-		t.Errorf("ProtocolVersion=%q, want 0.3", a.ProtocolVersion)
+	if a.Machine != "m4-host" {
+		t.Errorf("Machine=%q, want m4-host", a.Machine)
+	}
+	if a.ProjectID != "sesh" {
+		t.Errorf("ProjectID=%q, want sesh", a.ProjectID)
+	}
+	if a.Role != "worker" {
+		t.Errorf("Role=%q, want worker", a.Role)
+	}
+	if a.ProtocolVersion != "0.4" {
+		t.Errorf("ProtocolVersion=%q, want 0.4", a.ProtocolVersion)
 	}
 	if a.InstanceID == "" {
 		t.Errorf("InstanceID empty; want non-empty")
 	}
-	if a.Subject != "agents.prompt.cc.dmestas.alpha" {
-		t.Errorf("Subject=%q, want agents.prompt.cc.dmestas.alpha", a.Subject)
+	if a.Subject != "agents.prompt.m4-host.sesh.alpha.worker" {
+		t.Errorf("Subject=%q, want agents.prompt.m4-host.sesh.alpha.worker", a.Subject)
 	}
 }
 
@@ -156,19 +235,41 @@ func TestApplyFilter_EmptyFilterReturnsAll(t *testing.T) {
 
 func TestRenderTable_ContainsHeadersAndAgentRows(t *testing.T) {
 	agents := []MeshAgent{
-		{Agent: "cc", Owner: "dmestas", Session: "smoke-test", Role: "implementer", Class: "active", InstanceID: "ABC123456789", Machine: "f9a1b2c3"},
-		{Agent: "op", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active", InstanceID: "XYZ987654321", Machine: "f9a1b2c3"},
+		{Agent: "claude-code", Owner: "dmestas", Session: "smoke-test", Role: "implementer", Class: "active",
+			InstanceID: "ABC123456789", Machine: "f9a1b2c3", ProjectID: "sesh", Capabilities: "messages,artifacts,cards"},
+		{Agent: "op", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active",
+			InstanceID: "XYZ987654321", Machine: "f9a1b2c3", ProjectID: "sesh", Capabilities: "messages"},
 	}
 	out := renderTable(agents)
 
 	for _, want := range []string{
-		"AGENT", "OWNER", "SESSION", "ROLE", "CLASS", "MACHINE", "INSTANCE",
-		"cc", "op", "implementer", "planner", "active", "smoke-test",
-		"ABC12345", // ID is truncated to first 8 chars for readability
+		// New v0.4 columns: AGENT MACHINE PROJECT SESSION ROLE CAPS.
+		"AGENT", "MACHINE", "PROJECT", "SESSION", "ROLE", "CAPS",
+		"claude-code", "op", "implementer", "planner", "smoke-test",
+		"f9a1b2c3", "sesh",
+		"msg,art,cards", // abbreviated capability list
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderTable output missing %q\nfull:\n%s", want, out)
 		}
+	}
+
+	// Owner, class, and the full instance id were moved OUT of the default
+	// table (they remain in the struct + JSON output).
+	for _, absent := range []string{"OWNER", "CLASS", "INSTANCE", "active", "ABC123456789"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("renderTable output should not contain %q (moved to JSON)\nfull:\n%s", absent, out)
+		}
+	}
+}
+
+func TestRenderTable_EmptyCapsRendersDash(t *testing.T) {
+	agents := []MeshAgent{
+		{Agent: "claude-code", Machine: "m1", ProjectID: "p1", Session: "s1", Role: "worker"},
+	}
+	out := renderTable(agents)
+	if !strings.Contains(out, "-") {
+		t.Errorf("empty caps should render as '-'\nfull:\n%s", out)
 	}
 }
 
