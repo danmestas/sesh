@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -32,7 +33,48 @@ type MeshAgent struct {
 	Class           agentmeta.AgentClass `json:"class"`
 	Machine         string               `json:"machine,omitempty"`
 	ProjectID       string               `json:"project_id,omitempty"`
+	Capabilities    string               `json:"capabilities,omitempty"`
 	ProtocolVersion string               `json:"protocol_version,omitempty"`
+}
+
+// promptSubjectParts holds the tokens parsed out of a clean v0.4 prompt
+// subject `agents.prompt.<machine>.<project>.<session>.<role>`. Any token
+// the subject doesn't carry is left empty so callers can fall back to
+// metadata.
+type promptSubjectParts struct {
+	Machine string
+	Project string
+	Session string
+	Role    string
+}
+
+// parsePromptSubject extracts machine/project/session/role from a clean
+// v0.4 prompt subject of the form
+// `agents.prompt.<machine>.<project>.<session>.<role>`.
+//
+// The legacy v0.3 scheme (`agents.prompt.<class>.<owner>.<name>`) and any
+// other non-matching subject return a zero-value promptSubjectParts so the
+// caller fills every field from metadata instead. We require the
+// `agents.prompt.` prefix and exactly six dot-separated tokens; anything
+// shorter or longer is treated as non-matching (returns ok=false) rather
+// than guessing at partial tokens, which would mis-attribute the legacy
+// 5-token shape.
+func parsePromptSubject(subj string) (promptSubjectParts, bool) {
+	const prefix = "agents.prompt."
+	if !strings.HasPrefix(subj, prefix) {
+		return promptSubjectParts{}, false
+	}
+	tokens := strings.Split(subj, ".")
+	// agents . prompt . machine . project . session . role == 6 tokens.
+	if len(tokens) != 6 {
+		return promptSubjectParts{}, false
+	}
+	return promptSubjectParts{
+		Machine: tokens[2],
+		Project: tokens[3],
+		Session: tokens[4],
+		Role:    tokens[5],
+	}, true
 }
 
 // QueryMesh issues one `$SRV.INFO.agents` discovery request and returns
@@ -48,14 +90,13 @@ func QueryMesh(nc *nats.Conn, window time.Duration) []MeshAgent {
 		a := MeshAgent{
 			Agent:           info.Metadata["agent"],
 			Owner:           info.Metadata["owner"],
-			Session:         info.Metadata["session"],
 			InstanceID:      info.ID,
-			Role:            agentmeta.DefaultedRole(info.Metadata["role"]),
 			Class:           agentmeta.DefaultedClass(info.Metadata["class"]),
-			Machine:         info.Metadata["machine"],
-			ProjectID:       info.Metadata["project_id"],
+			Capabilities:    info.Metadata["sesh.v04_capabilities"],
 			ProtocolVersion: info.Metadata["protocol_version"],
 		}
+		// Subject: prefer the clean prompt endpoint; fall back to the
+		// first advertised endpoint so older adapters still show a subject.
 		for _, ep := range info.Endpoints {
 			if ep.Name == "prompt" {
 				a.Subject = ep.Subject
@@ -65,6 +106,30 @@ func QueryMesh(nc *nats.Conn, window time.Duration) []MeshAgent {
 		if a.Subject == "" && len(info.Endpoints) > 0 {
 			a.Subject = info.Endpoints[0].Subject
 		}
+
+		// The clean v0.4 prompt subject is machine-rooted
+		// (agents.prompt.<machine>.<project>.<session>.<role>) — agent
+		// identity lives in metadata, not the subject. Parse it so we can
+		// fill machine/project/session/role when metadata is sparse.
+		parts, _ := parsePromptSubject(a.Subject)
+
+		// MACHINE: metadata.machine (adapters set it now) → subject token.
+		a.Machine = firstNonEmpty(info.Metadata["machine"], parts.Machine)
+		// PROJECT: subject token → metadata.project_id.
+		a.ProjectID = firstNonEmpty(parts.Project, info.Metadata["project_id"])
+		// SESSION: metadata.session → subject token.
+		a.Session = firstNonEmpty(info.Metadata["session"], parts.Session)
+		// ROLE: metadata.role (defaulted) → subject's last token. The
+		// metadata default ("worker") only wins when neither metadata nor
+		// the subject carries an explicit role.
+		if r := strings.TrimSpace(info.Metadata["role"]); r != "" {
+			a.Role = r
+		} else if parts.Role != "" {
+			a.Role = parts.Role
+		} else {
+			a.Role = agentmeta.DefaultedRole("")
+		}
+
 		agents = append(agents, a)
 	}
 	return agents
@@ -115,24 +180,82 @@ func ApplyFilter(agents []MeshAgent, f MeshFilter) []MeshAgent {
 	return out
 }
 
-// renderTable formats agents as a tab-aligned table. Instance IDs are
-// truncated to 8 chars to keep rows readable; full ID is available via
-// `sesh mesh --id <id>` or the JSON output.
+// firstNonEmpty returns the first of vs that is non-empty, or "" if all
+// are empty. Used by QueryMesh to pick between a metadata value and the
+// subject-derived fallback.
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// capAbbrev maps the long capability names adapters advertise in
+// `sesh.v04_capabilities` to the tidy abbreviations the mesh table shows.
+// Unknown capabilities pass through verbatim so a new capability still
+// renders (just unabbreviated) rather than being dropped.
+var capAbbrev = map[string]string{
+	"messages":  "msg",
+	"artifacts": "art",
+	"cards":     "cards",
+}
+
+// abbreviateCaps renders a comma-separated capability list (e.g.
+// "messages,artifacts,cards") as a tidy abbreviated form ("msg,art,cards").
+// Empty input renders as "-". Whitespace around tokens is trimmed; empty
+// tokens (from a trailing/double comma) are skipped.
+func abbreviateCaps(caps string) string {
+	caps = strings.TrimSpace(caps)
+	if caps == "" {
+		return "-"
+	}
+	var out []string
+	for _, c := range strings.Split(caps, ",") {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if ab, ok := capAbbrev[c]; ok {
+			out = append(out, ab)
+		} else {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return "-"
+	}
+	return strings.Join(out, ",")
+}
+
+// dashIfEmpty returns s, or "-" when s is empty — so the table never shows
+// a blank cell for a missing field.
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// renderTable formats agents as a tab-aligned table keyed on the clean
+// v0.4 mesh shape: AGENT MACHINE PROJECT SESSION ROLE CAPS. Owner, class,
+// and the full instance id are intentionally NOT in the default table —
+// they remain on MeshAgent and in `--format json` output for callers that
+// need them.
 func renderTable(agents []MeshAgent) string {
 	var buf bytes.Buffer
 	w := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "AGENT\tOWNER\tSESSION\tROLE\tCLASS\tMACHINE\tINSTANCE")
+	fmt.Fprintln(w, "AGENT\tMACHINE\tPROJECT\tSESSION\tROLE\tCAPS")
 	for _, a := range agents {
-		id := a.InstanceID
-		if len(id) > 8 {
-			id = id[:8]
-		}
-		machine := a.Machine
-		if machine == "" {
-			machine = "-"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			a.Agent, a.Owner, a.Session, a.Role, a.Class, machine, id)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			dashIfEmpty(a.Agent),
+			dashIfEmpty(a.Machine),
+			dashIfEmpty(a.ProjectID),
+			dashIfEmpty(a.Session),
+			dashIfEmpty(a.Role),
+			abbreviateCaps(a.Capabilities),
+		)
 	}
 	_ = w.Flush()
 	return buf.String()

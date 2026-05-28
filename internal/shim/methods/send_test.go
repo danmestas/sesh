@@ -348,35 +348,33 @@ func TestSendMessage_DottedScopeID_PublishesPrompt(t *testing.T) {
 
 // TestSendMessage_RoleTokenFromDiscovery covers the sesh#124 matches()
 // overload + role-derivation fix end to end. Mirrors the sesh-channels
-// integration rig: shim has --agent=cc (the abbreviated subject token,
+// integration rig: shim has --agent=demo (an abbreviated subject token,
 // per the rig's entrypoint), the adapter advertises
-// metadata.agent="claude-code" (canonical) AND metadata.role="cc"
+// metadata.agent="demo" AND metadata.role="worker-discovered"
 // (subject token). Two things must hold:
 //
 //  1. The composer's matches() must accept the loose form —
-//     key.Agent="cc" matches metadata.role="cc" even though it doesn't
-//     match metadata.agent="claude-code". Without this, discover()
+//     key.Agent="demo" matches metadata.agent="demo" even when the role
+//     metadata is a distinct token. Without the loose match, discover()
 //     returns no match and the role falls back to --agent verbatim
 //     (which happens to work in the rig because --agent IS the token,
 //     but masks the real flow).
 //
 //  2. publishPrompt must build the subject from the DISCOVERED role
 //     token (metadata.role), not the operator's --agent flag — so a
-//     real production deployment with --agent="claude-code" and
-//     metadata.role="cc" routes to the right adapter subscription.
+//     real production deployment with --agent="claude-code" and a
+//     distinct metadata.role routes to the right adapter subscription.
 //
-// To assert #2 cleanly, the test uses metadata.role="cc-discovered"
-// (deliberately distinct from key.Agent="cc") and asserts the publish
-// lands on the cc-discovered subject. The composer match path that
-// allows this requires the canonical-fallback half of #1: key.Agent
-// "cc" matches metadata.agent "cc"... no — we have metadata.agent set
-// to "cc" here so the loose match holds AND the discovered role is
-// the distinct token, proving the publish uses discovery not --agent.
+// To assert #2 cleanly, the test uses metadata.role="worker-discovered"
+// (deliberately distinct from key.Agent="demo") and asserts the publish
+// lands on the worker-discovered subject. The loose match holds because
+// metadata.agent="demo" equals key.Agent, AND the discovered role is the
+// distinct token, proving the publish uses discovery not --agent.
 func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
 	deps, nc, _ := testDeps(t)
-	deps.AgentKey = card.AgentKey{Agent: "cc", Owner: "integ", Name: "cc"}
+	deps.AgentKey = card.AgentKey{Agent: "demo", Owner: "integ", Name: "demo"}
 	deps.ScopeKind = "session"
-	deps.ScopeID = "integ.cc"
+	deps.ScopeID = "integ.demo"
 
 	// Stub adapter $SRV.INFO: agent matches key (so discover() finds it)
 	// but metadata.role is a deliberately distinct token so we can prove
@@ -386,9 +384,9 @@ func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
 		Version:     "0.0.0",
 		Description: "stub adapter for role-discovery test",
 		Metadata: map[string]string{
-			"agent": "cc",
+			"agent": "demo",
 			"owner": "integ",
-			"role":  "cc-discovered",
+			"role":  "worker-discovered",
 		},
 	})
 	if err != nil {
@@ -410,7 +408,7 @@ func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
 	ctx, cancel := mustCtx(t)
 	defer cancel()
 
-	wantSubj := "agents.prompt.test-machine.integ.cc.cc-discovered"
+	wantSubj := "agents.prompt.test-machine.integ.demo.worker-discovered"
 	got := make(chan *nats.Msg, 1)
 	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
 		select {
@@ -439,25 +437,25 @@ func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
 }
 
 // TestSendMessage_LooseMatch_AbbreviatedAgent covers the composer's
-// matches() loosening directly: shim --agent=cc with adapter
-// metadata.agent="claude-code", metadata.role="cc". Pre-#124 the
+// matches() loosening directly: shim --agent=worker with adapter
+// metadata.agent="claude-code", metadata.role="worker". Pre-#124 the
 // strict canonical-only check rejected this pairing and discover()
 // returned no match, starving both L3 card fetch and prompt routing.
 func TestSendMessage_LooseMatch_AbbreviatedAgent(t *testing.T) {
 	deps, nc, _ := testDeps(t)
-	deps.AgentKey = card.AgentKey{Agent: "cc", Owner: "integ", Name: "cc"}
+	deps.AgentKey = card.AgentKey{Agent: "worker", Owner: "integ", Name: "worker"}
 	deps.ScopeKind = "session"
-	deps.ScopeID = "integ.cc"
+	deps.ScopeID = "integ.demo"
 
 	// Rig-style: canonical agent + abbreviated role (the rig sets
-	// SESH_ROLE=AGENT_TOKEN=cc so metadata.role ends up "cc").
+	// SESH_ROLE=AGENT_TOKEN so metadata.role ends up the short token).
 	svc, err := micro.AddService(nc, micro.Config{
 		Name:    "agents",
 		Version: "0.0.0",
 		Metadata: map[string]string{
 			"agent": "claude-code",
 			"owner": "integ",
-			"role":  "cc",
+			"role":  "worker",
 		},
 	})
 	if err != nil {
@@ -475,7 +473,7 @@ func TestSendMessage_LooseMatch_AbbreviatedAgent(t *testing.T) {
 	ctx, cancel := mustCtx(t)
 	defer cancel()
 
-	wantSubj := "agents.prompt.test-machine.integ.cc.cc"
+	wantSubj := "agents.prompt.test-machine.integ.demo.worker"
 	got := make(chan *nats.Msg, 1)
 	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
 		select {

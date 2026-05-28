@@ -321,15 +321,16 @@ func (c *Composer) discover(ctx context.Context, key AgentKey) (microInfo, bool)
 // shim's `--agent` flag is overloaded across the v0.4 deployment: some
 // operators pass the canonical agent ID (e.g. "claude-code", matching
 // `metadata.agent`) while integration rigs and short-form invocations
-// pass the abbreviated subject token (e.g. "cc", matching the role
+// pass the abbreviated role token (e.g. "worker", matching the role
 // token the adapter publishes as `metadata.role`). One flag cannot be
 // two things at once, so we accept either form as a match. The owner
 // check stays exact — owners are not abbreviated.
 //
-// See sesh#124 for the motivating rig failure: shim has --agent=cc but
-// the adapter advertises metadata.agent="claude-code", metadata.role="cc".
-// The strict canonical-only match left discover() returning "no match"
-// and L3 + prompt routing both starved.
+// See sesh#124 for the motivating rig failure: the shim's --agent was
+// the abbreviated token while the adapter advertised metadata.agent the
+// canonical ID with a distinct metadata.role. The strict canonical-only
+// match left discover() returning "no match" and L3 + prompt routing
+// both starved.
 func matches(info microInfo, key AgentKey) bool {
 	if key.Agent != "" {
 		if info.Metadata["agent"] != key.Agent && info.Metadata["role"] != key.Agent {
@@ -342,7 +343,7 @@ func matches(info microInfo, key AgentKey) bool {
 	return true
 }
 
-// DiscoverRoleToken returns the abbreviated subject token the adapter
+// DiscoverRoleToken returns the role subject token the adapter
 // publishes as `metadata.role` in $SRV.INFO. The shim uses this to
 // build the prompt subject's role token, which adapters subscribe with
 // on agents.prompt.<machine>.<project>.<session>.<role>. Returns
@@ -350,9 +351,9 @@ func matches(info microInfo, key AgentKey) bool {
 // the role metadata — callers fall back to the operator's --agent flag.
 //
 // Decoupling the role token from --agent is required because --agent
-// carries the canonical agent ID (e.g. "claude-code") whereas the v2
-// prompt subject expects the adapter-defined abbreviation (e.g. "cc").
-// See sesh#124.
+// carries the canonical agent ID (e.g. "claude-code") whereas the
+// prompt subject's last token is the adapter-defined role (e.g.
+// "worker", "implementer", "planner"). See sesh#124.
 func (c *Composer) DiscoverRoleToken(ctx context.Context, key AgentKey) (string, bool) {
 	info, found := c.discover(ctx, key)
 	if !found {
