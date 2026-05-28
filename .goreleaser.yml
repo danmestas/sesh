@@ -21,6 +21,38 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
+  - id: sesh
+    main: ./cmd/sesh
+    binary: sesh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # cmd/sesh/main.go does not declare version/commit/date vars in
+    # package main, so no -X ldflags are injected (they would be no-ops).
+    ldflags:
+      - -s -w
+
+  - id: sesh-ref-agent
+    main: ./cmd/sesh-ref-agent
+    binary: sesh-ref-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # cmd/sesh-ref-agent/main.go does not declare version/commit/date vars
+    # in package main, so no -X ldflags are injected.
+    ldflags:
+      - -s -w
+
 archives:
   - id: sesh-shim
     ids: [sesh-shim]
@@ -30,6 +62,22 @@ archives:
       - LICENSE*
       - README.md
       - cmd/sesh-shim/README.md
+
+  - id: sesh
+    ids: [sesh]
+    name_template: "sesh_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE*
+      - README.md
+
+  - id: sesh-ref-agent
+    ids: [sesh-ref-agent]
+    name_template: "sesh-ref-agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE*
+      - README.md
 
 checksum:
   name_template: "checksums.txt"
