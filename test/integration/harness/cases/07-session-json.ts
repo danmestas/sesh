@@ -51,7 +51,7 @@ export async function run(ctx: CaseContext): Promise<CaseResult> {
   }
 
   const cc = agents.find(a => a.agent === "claude-code");
-  const op = agents.find(a => a.agent === "op");
+  const op = agents.find(a => a.agent === "oh-my-pi");
   const failures: string[] = [];
   if (!cc) failures.push("no claude-code entry");
   if (!op) failures.push("no op entry");
@@ -80,7 +80,7 @@ export async function run(ctx: CaseContext): Promise<CaseResult> {
   if (op) {
     if (op.role !== "planner") failures.push(`op.role=${op.role} want planner`);
     if (op.class !== "active") failures.push(`op.class=${op.class}`);
-    assertCleanSubject("op", op.subject);
+    assertCleanSubject("oh-my-pi", op.subject);
   }
 
   if (failures.length > 0) {

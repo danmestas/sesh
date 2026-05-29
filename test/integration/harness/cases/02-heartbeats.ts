@@ -49,7 +49,7 @@ export async function run(ctx: CaseContext): Promise<CaseResult> {
   sub.unsubscribe();
 
   const cc = counts.get("cc") ?? 0;
-  const op = counts.get("op") ?? 0;
+  const op = counts.get("oh-my-pi") ?? 0;
   const failures: string[] = [];
   if (cc < 2) failures.push(`cc heartbeats=${cc} (want ≥2)`);
   if (op < 2) failures.push(`op heartbeats=${op} (want ≥2)`);

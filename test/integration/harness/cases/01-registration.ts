@@ -3,7 +3,7 @@
 // Sends $SRV.INFO.agents, collects all replies for ~3s, and asserts that
 // exactly two services responded with the expected metadata shape:
 //   - one with metadata.agent === "claude-code"
-//   - one with metadata.agent === "op"
+//   - one with metadata.agent === "oh-my-pi"
 // Both must carry the session, role, class, and protocol_version we set
 // via `sesh up --exec`.
 //
@@ -60,12 +60,12 @@ export async function run(ctx: CaseContext): Promise<CaseResult> {
   }
 
   const cc = ours.find(i => i.metadata?.agent === "claude-code");
-  const op = ours.find(i => i.metadata?.agent === "op");
+  const op = ours.find(i => i.metadata?.agent === "oh-my-pi");
   if (!cc) return { name: "01-registration", ok: false, reason: "no claude-code service", detail: ours };
   if (!op) return { name: "01-registration", ok: false, reason: "no op (omp) service", detail: ours };
 
   const failures: string[] = [];
-  for (const [tag, info] of [["claude-code", cc], ["op", op]] as const) {
+  for (const [tag, info] of [["claude-code", cc], ["oh-my-pi", op]] as const) {
     const m = info.metadata ?? {};
     if (m.session !== ctx.session) failures.push(`${tag}.session=${m.session}`);
     if (m.owner !== ctx.owner) failures.push(`${tag}.owner=${m.owner}`);

@@ -86,7 +86,7 @@ func TestQueryMesh_ReturnsAllRegisteredAgents(t *testing.T) {
 	defer nc.Close()
 
 	registerTestAgent(t, nc, "cc", "dmestas", "alpha")
-	registerTestAgent(t, nc, "op", "dmestas", "alpha")
+	registerTestAgent(t, nc, "oh-my-pi", "dmestas", "alpha")
 	registerTestAgent(t, nc, "cc", "dmestas", "beta") // different session — must still show up
 
 	got := QueryMesh(nc, 500*time.Millisecond)
@@ -102,8 +102,8 @@ func TestQueryMesh_ReturnsAllRegisteredAgents(t *testing.T) {
 	if _, ok := byKey["cc/alpha"]; !ok {
 		t.Errorf("missing cc/alpha in result: %+v", got)
 	}
-	if _, ok := byKey["op/alpha"]; !ok {
-		t.Errorf("missing op/alpha in result: %+v", got)
+	if _, ok := byKey["oh-my-pi/alpha"]; !ok {
+		t.Errorf("missing oh-my-pi/alpha in result: %+v", got)
 	}
 	if _, ok := byKey["cc/beta"]; !ok {
 		t.Errorf("missing cc/beta in result: %+v", got)
@@ -190,7 +190,7 @@ func TestQueryMesh_MalformedReplyIsSkipped(t *testing.T) {
 func TestApplyFilter_BySession(t *testing.T) {
 	all := []MeshAgent{
 		{Agent: "cc", Session: "alpha", InstanceID: "1"},
-		{Agent: "op", Session: "alpha", InstanceID: "2"},
+		{Agent: "oh-my-pi", Session: "alpha", InstanceID: "2"},
 		{Agent: "cc", Session: "beta", InstanceID: "3"},
 	}
 	got := ApplyFilter(all, MeshFilter{Session: "alpha"})
@@ -237,7 +237,7 @@ func TestRenderTable_ContainsHeadersAndAgentRows(t *testing.T) {
 	agents := []MeshAgent{
 		{Agent: "claude-code", Owner: "dmestas", Session: "smoke-test", Role: "implementer", Class: "active",
 			InstanceID: "ABC123456789", Machine: "f9a1b2c3", ProjectID: "sesh", Capabilities: "messages,artifacts,cards"},
-		{Agent: "op", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active",
+		{Agent: "oh-my-pi", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active",
 			InstanceID: "XYZ987654321", Machine: "f9a1b2c3", ProjectID: "sesh", Capabilities: "messages"},
 	}
 	out := renderTable(agents)
@@ -245,7 +245,7 @@ func TestRenderTable_ContainsHeadersAndAgentRows(t *testing.T) {
 	for _, want := range []string{
 		// New v0.4 columns: AGENT MACHINE PROJECT SESSION ROLE CAPS.
 		"AGENT", "MACHINE", "PROJECT", "SESSION", "ROLE", "CAPS",
-		"claude-code", "op", "implementer", "planner", "smoke-test",
+		"claude-code", "oh-my-pi", "implementer", "planner", "smoke-test",
 		"f9a1b2c3", "sesh",
 		"msg,art,cards", // abbreviated capability list
 	} {
@@ -310,7 +310,7 @@ func TestRenderTree_GroupsByHierarchy(t *testing.T) {
 	agents := []MeshAgent{
 		{Agent: "cc", Owner: "dmestas", Session: "smoke-test", Role: "implementer", Class: "active",
 			Machine: "f9a1b2c3", ProjectID: "abcdef0123", InstanceID: "ID1"},
-		{Agent: "op", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active",
+		{Agent: "oh-my-pi", Owner: "dmestas", Session: "smoke-test", Role: "planner", Class: "active",
 			Machine: "f9a1b2c3", ProjectID: "abcdef0123", InstanceID: "ID2"},
 		{Agent: "cc", Owner: "dmestas", Session: "other", Role: "worker", Class: "active",
 			Machine: "f9a1b2c3", ProjectID: "abcdef0123", InstanceID: "ID3"},
@@ -327,7 +327,7 @@ func TestRenderTree_GroupsByHierarchy(t *testing.T) {
 		"role planner",
 		"role worker",
 		"cc/dmestas",
-		"op/dmestas",
+		"oh-my-pi/dmestas",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("tree output missing %q\nfull:\n%s", want, out)

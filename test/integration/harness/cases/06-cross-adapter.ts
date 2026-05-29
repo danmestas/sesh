@@ -24,7 +24,7 @@ const INACTIVITY_TIMEOUT_MS = 60_000;
 
 async function promptOne(
   ctx: CaseContext,
-  kind: "claude-code" | "op",
+  kind: "claude-code" | "oh-my-pi",
   text: string,
   inactivityTimeoutMs = INACTIVITY_TIMEOUT_MS,
 ): Promise<string> {
@@ -43,7 +43,7 @@ async function promptOne(
 
 interface Round {
   n: number;
-  target: "claude-code" | "op";
+  target: "claude-code" | "oh-my-pi";
   prompt: string;
   expect: string;          // case-insensitive substring the reply must contain
   reply?: string;
@@ -86,7 +86,7 @@ export async function run(ctx: CaseContext): Promise<CaseResult> {
     },
     {
       n: 2,
-      target: "op",
+      target: "oh-my-pi",
       prompt: "You're agent B. Agent A computed the answer 12 for 7+5. Step 2 of 3: square that number. Reply with just the resulting number.",
       expect: "144",
     },
