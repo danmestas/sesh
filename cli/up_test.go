@@ -268,6 +268,50 @@ func TestHarnessSysProcAttr_NilStdinFallsBack(t *testing.T) {
 	}
 }
 
+// TestHarnessEnvVars_CarriesProject pins the wire contract that the harness
+// child receives SESH_PROJECT (the peer-discoverability fix) alongside the
+// pre-existing SESH_SESSION / SESH_ROLE. harnessEnvVars is the single source
+// of truth for the spawned agent's env, so asserting its output is equivalent
+// to asserting cmd.Env without spawning a subprocess.
+func TestHarnessEnvVars_CarriesProject(t *testing.T) {
+	env := harnessEnv{
+		Session:   "sesh-talk-2",
+		Project:   "sesh",
+		NATSURL:   "nats://127.0.0.1:4222",
+		NATSWSURL: "ws://127.0.0.1:8080",
+		FossilURL: "http://127.0.0.1:8081/",
+		LeafURL:   "nats://127.0.0.1:7422",
+		Role:      "orch",
+		Class:     "active",
+	}
+	got := harnessEnvVars(env)
+
+	has := func(want string) bool {
+		for _, kv := range got {
+			if kv == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	// The fix: project is exported and is the stable token, NOT the
+	// de-duped session label.
+	if !has("SESH_PROJECT=sesh") {
+		t.Errorf("harnessEnvVars missing SESH_PROJECT=sesh; got %v", got)
+	}
+	if has("SESH_PROJECT=sesh-talk-2") {
+		t.Error("SESH_PROJECT must not equal the de-duped session label")
+	}
+	// Pre-existing vars must still be present.
+	if !has("SESH_SESSION=sesh-talk-2") {
+		t.Errorf("harnessEnvVars missing SESH_SESSION; got %v", got)
+	}
+	if !has("SESH_ROLE=orch") {
+		t.Errorf("harnessEnvVars missing SESH_ROLE; got %v", got)
+	}
+}
+
 // TestSanitizeLabelFromBasename covers the stripping rules applied to cwd
 // basenames before they're used as session labels.
 func TestSanitizeLabelFromBasename(t *testing.T) {
