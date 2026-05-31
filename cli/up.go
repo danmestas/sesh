@@ -25,12 +25,31 @@ import (
 // amplification elsewhere).
 type harnessEnv struct {
 	Session   string
+	Project   string
 	NATSURL   string
 	NATSWSURL string
 	FossilURL string
 	LeafURL   string
 	Role      string
 	Class     string
+}
+
+// harnessEnvVars renders the canonical SESH_* + NATS_* environment a spawned
+// harness child receives, as a slice of "KEY=value" strings ready to append
+// to os.Environ(). Pure (no globals, no I/O) so the exact wire env can be
+// asserted in a unit test without spawning a subprocess — the single source
+// of truth for which variables the agent harness sees.
+func harnessEnvVars(env harnessEnv) []string {
+	return []string{
+		"SESH_SESSION=" + env.Session,
+		"SESH_PROJECT=" + env.Project,
+		"NATS_URL=" + env.NATSURL,
+		"SESH_NATS_WS_URL=" + env.NATSWSURL,
+		"SESH_FOSSIL_URL=" + env.FossilURL,
+		"SESH_LEAF_URL=" + env.LeafURL,
+		"SESH_ROLE=" + env.Role,
+		"SESH_CLASS=" + env.Class,
+	}
 }
 
 // Harness is the (initially thin) owner of one child coding-agent harness
@@ -451,7 +470,12 @@ func (s *Starter) maybeSpawnHarness(ctx context.Context) <-chan error {
 		return nil
 	}
 	env := harnessEnv{
-		Session:   s.cmd.Session,
+		Session: s.cmd.Session,
+		// Project is the stable, human-readable repo token — the cwd
+		// basename, sanitized with the adapter's exact transform so the
+		// claude-nats-channel <project> subject segment is reconstructable
+		// by peers (it must NOT inherit the session de-dup suffix).
+		Project:   sanitizeProjectToken(filepath.Base(s.cwd)),
 		NATSURL:   s.h.NATSURL(),
 		NATSWSURL: s.h.NATSWebSocketURL(),
 		FossilURL: "http://" + s.h.HTTPAddr() + "/",
@@ -656,15 +680,7 @@ func spawnHarness(ctx context.Context, cmdStr string, env harnessEnv) <-chan err
 	// per decision A). Parent env is preserved (PATH, USER, TERM, etc.).
 	// Later callers (role Phase 4, etc.) only edit this list.
 	base := os.Environ()
-	cmd.Env = append(base,
-		"SESH_SESSION="+env.Session,
-		"NATS_URL="+env.NATSURL,
-		"SESH_NATS_WS_URL="+env.NATSWSURL,
-		"SESH_FOSSIL_URL="+env.FossilURL,
-		"SESH_LEAF_URL="+env.LeafURL,
-		"SESH_ROLE="+env.Role,
-		"SESH_CLASS="+env.Class,
-	)
+	cmd.Env = append(base, harnessEnvVars(env)...)
 
 	// Setpgid for process-group signal forwarding (wrapper path of Hybrid C).
 	// The parent (sesh up) can later syscall.Kill(-pgid, sig) to deliver to

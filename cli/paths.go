@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -315,6 +316,25 @@ func defaultProject() (string, error) {
 		return "", fmt.Errorf("cannot derive project name from cwd %q", cwd)
 	}
 	return base, nil
+}
+
+// projectTokenRe matches every character that is NOT allowed in a NATS
+// project subject token. The single-char class (no '+') is deliberate: each
+// disallowed char is replaced by its own '-' so multi-separator runs survive
+// as one dash each — matching the JS regex byte-for-byte.
+var projectTokenRe = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+
+// sanitizeProjectToken mirrors the claude-nats-channel adapter's
+// sanitizeSessionName (server.ts) byte-for-byte so the Go-exported
+// SESH_PROJECT and the TS-sanitized subject segment always agree:
+// (1) replace every char not in [A-Za-z0-9_-] with a single '-',
+// (2) lowercase, (3) trim leading/trailing '-'. Order matters: replace
+// before lowercasing before trimming. The transform is idempotent on
+// already-sanitized input.
+func sanitizeProjectToken(s string) string {
+	s = projectTokenRe.ReplaceAllString(s, "-")
+	s = strings.ToLower(s)
+	return strings.Trim(s, "-")
 }
 
 // deriveProjectID produces a deterministic 40-char lowercase hex project-id

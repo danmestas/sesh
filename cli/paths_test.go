@@ -80,3 +80,34 @@ func TestProjectID_RejectsMangled(t *testing.T) {
 		t.Error("expected error on mangled project-id, got nil")
 	}
 }
+
+// TestSanitizeProjectToken pins the cross-language sanitization contract:
+// sanitizeProjectToken MUST mirror claude-nats-channel server.ts
+// sanitizeSessionName byte-for-byte — (1) every char NOT in [A-Za-z0-9_-]
+// becomes a single '-' (no '+' run-collapsing), (2) lowercase, (3) trim
+// leading/trailing '-'. These cases are copied from the TS adapter test and
+// are the wire contract; both languages must agree.
+func TestSanitizeProjectToken(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"Sesh", "sesh"},
+		{"my repo!", "my-repo"},    // space->-, !->-, trailing - trimmed
+		{"-x-", "x"},               // leading/trailing dashes trimmed
+		{"a  b", "a--b"},           // two spaces -> two dashes, NOT collapsed
+		{"a..b", "a--b"},           // two dots -> two dashes, NOT collapsed (single-char class, no '+')
+		{"sesh-talk", "sesh-talk"}, // already clean, unchanged
+		{"", ""},                   // empty stays empty
+	}
+	for _, tc := range cases {
+		got := sanitizeProjectToken(tc.in)
+		if got != tc.want {
+			t.Errorf("sanitizeProjectToken(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		// Idempotency: re-sanitizing a sanitized value is a no-op.
+		if again := sanitizeProjectToken(got); again != got {
+			t.Errorf("sanitizeProjectToken not idempotent: f(f(%q)) = %q, want %q", tc.in, again, got)
+		}
+	}
+}
