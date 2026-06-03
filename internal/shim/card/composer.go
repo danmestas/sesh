@@ -343,29 +343,6 @@ func matches(info microInfo, key AgentKey) bool {
 	return true
 }
 
-// DiscoverRoleToken returns the role subject token the adapter
-// publishes as `metadata.role` in $SRV.INFO. The shim uses this to
-// build the prompt subject's role token, which adapters subscribe with
-// on agents.prompt.<machine>.<project>.<session>.<role>. Returns
-// ("", false) when discovery times out or the matched adapter omits
-// the role metadata — callers fall back to the operator's --agent flag.
-//
-// Decoupling the role token from --agent is required because --agent
-// carries the canonical agent ID (e.g. "claude-code") whereas the
-// prompt subject's last token is the adapter-defined role (e.g.
-// "worker", "implementer", "planner"). See sesh#124.
-func (c *Composer) DiscoverRoleToken(ctx context.Context, key AgentKey) (string, bool) {
-	info, found := c.discover(ctx, key)
-	if !found {
-		return "", false
-	}
-	role := strings.TrimSpace(info.Metadata["role"])
-	if role == "" {
-		return "", false
-	}
-	return role, true
-}
-
 func (c *Composer) applyL2(card *a2a.AgentCard, info microInfo) {
 	if name := strings.TrimSpace(info.Metadata["agent"]); name != "" {
 		card.Name = name

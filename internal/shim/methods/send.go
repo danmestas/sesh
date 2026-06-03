@@ -164,9 +164,9 @@ func (d *Dispatcher) openOrCreateKV(ctx context.Context, bucket string) (jetstre
 	return kv, nil
 }
 
-// publishPrompt emits the translated Message bytes on the clean v0.4
-// agents.prompt.<machine>.<project>.<session>.<role> subject so an
-// adapter subscribed via the queue group wakes up. The bytes are
+// publishPrompt emits the translated Message bytes on the 5-token
+// agents.prompt.<machine>.<project>.<session> subject so an adapter
+// subscribed under the prompt queue group wakes up. The bytes are
 // re-serialized via a2a.ToMeshMessage so the published payload carries
 // the v0.4 mesh-canonical lowercase Role ("user"|"agent") expected by
 // the sesh-channels SDK envelope validator — NOT the a2a-go
@@ -179,37 +179,22 @@ func (d *Dispatcher) openOrCreateKV(ctx context.Context, bucket string) (jetstre
 //
 // Subject construction matches sesh-channels SDK prompt():
 //
-//	agents.prompt.<machine>.<project>.<session>.<role>
+//	agents.prompt.<machine>.<project>.<session>
 //
-// Three contract details, all gotchas surfaced by sesh#124:
+// Project and session are SEPARATE tokens (sesh#124). Session-scoped
+// shims carry a dotted ScopeID ("<project>.<session>") — we split on
+// the first '.' so the subject's project + session tokens match the
+// adapter's SESH_PROJECT / SESH_SESSION env split. ScopeIDs with no dot
+// fall back to project=session=scopeid (back-compat with project-scoped
+// shims that only have a single token).
 //
-//  1. Project and session are SEPARATE tokens. Session-scoped shims
-//     carry a dotted ScopeID ("<project>.<session>") — we split on the
-//     first '.' so the subject's project + session tokens match the
-//     adapter's SESH_PROJECT / SESH_SESSION env split. ScopeIDs with no
-//     dot fall back to project=session=scopeid (back-compat with
-//     project-scoped shims that only have a single token).
-//
-//  2. Role is the abbreviated subject token (e.g. "cc"), discovered
-//     from the adapter's $SRV.INFO `metadata.role`. The shim's --agent
-//     flag carries the canonical agent ID ("claude-code") which is
-//     unsuitable as a subject token; the canonical ID stays in
-//     metadata.agent for L1+L2 card composition.
-//
-//  3. When discovery fails (no adapter responding within the composer
-//     query window), we fall back to the --agent flag value so the
-//     legacy single-token form still works for adapters that haven't
-//     populated metadata.role yet.
+// There is no role token in the subject: the prompt subject collapsed
+// to a single session-scoped tier (smol scope-cut slice D1). Adapters
+// QueueSubscribe this subject under subject.PromptQueueGroup, so work-
+// stealing among same-session subscribers is handled by the queue group,
+// not by a role-keyed subject.
 func (d *Dispatcher) publishPrompt(m *messages.Message) {
 	if d.deps.NC == nil || d.deps.Machine == "" {
-		return
-	}
-
-	role := d.discoverRoleToken()
-	if role == "" {
-		role = d.deps.AgentKey.Agent
-	}
-	if role == "" {
 		return
 	}
 	if m == nil {
@@ -226,7 +211,6 @@ func (d *Dispatcher) publishPrompt(m *messages.Message) {
 		Machine: d.deps.Machine,
 		Project: project,
 		Session: session,
-		Role:    role,
 	})
 	if err != nil {
 		d.deps.Log.Warn("sendMessage: build prompt subject", "err", err)
@@ -235,25 +219,6 @@ func (d *Dispatcher) publishPrompt(m *messages.Message) {
 	if err := d.deps.NC.Publish(subj, raw); err != nil {
 		d.deps.Log.Warn("sendMessage: publish prompt", "subj", subj, "err", err)
 	}
-}
-
-// discoverRoleToken asks the Composer for the adapter's
-// `metadata.role` via $SRV.INFO. Best-effort: returns "" when the
-// composer isn't wired (older test deps), when discovery times out, or
-// when the matched adapter omits the role field — callers fall back
-// to the --agent flag. The window is bounded by the composer's own
-// queryWindow so a missing adapter doesn't stall the publish path.
-func (d *Dispatcher) discoverRoleToken() string {
-	if d.deps.Composer == nil {
-		return ""
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	role, ok := d.deps.Composer.DiscoverRoleToken(ctx, d.deps.AgentKey)
-	if !ok {
-		return ""
-	}
-	return role
 }
 
 // SplitScopeIDForSubject splits a (possibly dotted) scope-id into the

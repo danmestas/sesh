@@ -44,7 +44,7 @@ type CLI struct {
 	ScopeKind     string        `name:"scope-kind" default:"project" env:"SESH_SHIM_SCOPE_KIND" help:"Task scope kind for KV bucket naming"`
 	ScopeID       string        `name:"scope-id" env:"SESH_SHIM_SCOPE_ID" help:"Task scope id for KV bucket naming"`
 	GatewayURL    string        `name:"gateway-url" env:"SESH_SHIM_GATEWAY_URL" help:"Public-facing URL advertised in the AgentCard"`
-	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the <machine> segment of agents.prompt.<machine>.<project>.<session>.<role>; falls back to os.Hostname() if empty"`
+	Machine       string        `name:"machine" env:"SESH_SHIM_MACHINE" help:"Machine token used as the <machine> segment of agents.prompt.<machine>.<project>.<session>; falls back to os.Hostname() if empty"`
 	Dev           bool          `name:"dev" env:"SESH_SHIM_DEV" help:"Enable dev mode: self-signed TLS + ephemeral signing key permitted"`
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"5s" env:"SESH_SHIM_SHUTDOWN_GRACE" help:"Max drain/shutdown wait"`
 

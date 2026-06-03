@@ -4,11 +4,12 @@
 // The machine identifier from Machine() occupies the third position
 // (after `agents.<verb>`) of every coordination subject:
 //
-//	agents.<verb>.<machine>.<project>.<session>[.<role>[.<worker_id>]]
+//	agents.<verb>.<machine>.<project>.<session>
 //
-// Token count selects the addressing tier: 5 = session orch, 6 = role
-// pool (queue group on role), 7 = direct address by instance_id. See
-// docs/synadia-agents-on-sesh.md § 8.1 for the full contract.
+// Every verb is a single 5-token, session-scoped subject; there is no
+// role/instance addressing tier. Work-stealing among same-session prompt
+// subscribers rides a NATS queue group on the subscribe side, not the
+// subject. See docs/synadia-agents-on-sesh.md § 8.1 for the full contract.
 //
 // Resolution order for Machine():
 //  1. $SESH_MACHINE environment variable — explicit operator override.

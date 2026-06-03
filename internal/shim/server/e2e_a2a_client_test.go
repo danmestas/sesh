@@ -140,7 +140,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 //     composer.discover() finds an adapter for this AgentKey
 //   - agents.card.<machine>.<project>.<session> — L3 AgentCard partial
 //   - agents.cardx.<machine>.<project>.<session> — L3 extended overlay
-//   - agents.prompt.<machine>.<project>.<session>.<role> — captures the
+//   - agents.prompt.<machine>.<project>.<session> — captures the
 //     inbound prompt so subtests can assert publish happened
 //
 // The card/cardx subjects use the v0.4 positional mapping

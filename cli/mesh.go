@@ -37,43 +37,38 @@ type MeshAgent struct {
 	ProtocolVersion string               `json:"protocol_version,omitempty"`
 }
 
-// promptSubjectParts holds the tokens parsed out of a clean v0.4 prompt
-// subject `agents.prompt.<machine>.<project>.<session>.<role>`. Any token
-// the subject doesn't carry is left empty so callers can fall back to
-// metadata.
+// promptSubjectParts holds the tokens parsed out of a prompt subject
+// `agents.prompt.<machine>.<project>.<session>`. Any token the subject
+// doesn't carry is left empty so callers can fall back to metadata. The
+// role is no longer carried in the subject — it lives in metadata.role.
 type promptSubjectParts struct {
 	Machine string
 	Project string
 	Session string
-	Role    string
 }
 
-// parsePromptSubject extracts machine/project/session/role from a clean
-// v0.4 prompt subject of the form
-// `agents.prompt.<machine>.<project>.<session>.<role>`.
+// parsePromptSubject extracts machine/project/session from a prompt
+// subject of the form `agents.prompt.<machine>.<project>.<session>`.
 //
-// The legacy v0.3 scheme (`agents.prompt.<class>.<owner>.<name>`) and any
-// other non-matching subject return a zero-value promptSubjectParts so the
+// Any non-matching subject returns a zero-value promptSubjectParts so the
 // caller fills every field from metadata instead. We require the
-// `agents.prompt.` prefix and exactly six dot-separated tokens; anything
+// `agents.prompt.` prefix and exactly five dot-separated tokens; anything
 // shorter or longer is treated as non-matching (returns ok=false) rather
-// than guessing at partial tokens, which would mis-attribute the legacy
-// 5-token shape.
+// than guessing at partial tokens.
 func parsePromptSubject(subj string) (promptSubjectParts, bool) {
 	const prefix = "agents.prompt."
 	if !strings.HasPrefix(subj, prefix) {
 		return promptSubjectParts{}, false
 	}
 	tokens := strings.Split(subj, ".")
-	// agents . prompt . machine . project . session . role == 6 tokens.
-	if len(tokens) != 6 {
+	// agents . prompt . machine . project . session == 5 tokens.
+	if len(tokens) != 5 {
 		return promptSubjectParts{}, false
 	}
 	return promptSubjectParts{
 		Machine: tokens[2],
 		Project: tokens[3],
 		Session: tokens[4],
-		Role:    tokens[5],
 	}, true
 }
 
@@ -107,10 +102,10 @@ func QueryMesh(nc *nats.Conn, window time.Duration) []MeshAgent {
 			a.Subject = info.Endpoints[0].Subject
 		}
 
-		// The clean v0.4 prompt subject is machine-rooted
-		// (agents.prompt.<machine>.<project>.<session>.<role>) — agent
-		// identity lives in metadata, not the subject. Parse it so we can
-		// fill machine/project/session/role when metadata is sparse.
+		// The prompt subject is machine-rooted
+		// (agents.prompt.<machine>.<project>.<session>) — agent identity
+		// and role live in metadata, not the subject. Parse it so we can
+		// fill machine/project/session when metadata is sparse.
 		parts, _ := parsePromptSubject(a.Subject)
 
 		// MACHINE: metadata.machine (adapters set it now) → subject token.
@@ -119,13 +114,10 @@ func QueryMesh(nc *nats.Conn, window time.Duration) []MeshAgent {
 		a.ProjectID = firstNonEmpty(parts.Project, info.Metadata["project_id"])
 		// SESSION: metadata.session → subject token.
 		a.Session = firstNonEmpty(info.Metadata["session"], parts.Session)
-		// ROLE: metadata.role (defaulted) → subject's last token. The
-		// metadata default ("worker") only wins when neither metadata nor
-		// the subject carries an explicit role.
+		// ROLE: from metadata.role only (no longer carried in the subject);
+		// the metadata default ("worker") wins when metadata is absent.
 		if r := strings.TrimSpace(info.Metadata["role"]); r != "" {
 			a.Role = r
-		} else if parts.Role != "" {
-			a.Role = parts.Role
 		} else {
 			a.Role = agentmeta.DefaultedRole("")
 		}

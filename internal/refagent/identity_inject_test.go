@@ -43,22 +43,23 @@ func TestRun_ReadsInjectedProjectID(t *testing.T) {
 
 	nc := testConn(t, url)
 
-	// The 6-token role pool subject the active implementer subscribes to.
-	// Its 4th token (index 3) is the projectID. We request/reply to it and
-	// expect an ack — only possible if the loop subscribed under injectedID.
-	poolSubj := fmt.Sprintf("agents.prompt.%s.%s.s1.implementer",
+	// The 5-token prompt subject the active agent subscribes to (under the
+	// prompt queue group). Its 4th token (index 3) is the projectID. We
+	// request/reply to it and expect an ack — only possible if the loop
+	// subscribed under injectedID.
+	promptSubj := fmt.Sprintf("agents.prompt.%s.%s.s1",
 		coord.MachineLocal, injectedID)
 
 	// Assert the 4th token equals the injected id (defensive: catches a
 	// builder regression that reorders subject tokens).
-	if tok := strings.Split(poolSubj, ".")[3]; tok != injectedID {
+	if tok := strings.Split(promptSubj, ".")[3]; tok != injectedID {
 		t.Fatalf("4th subject token = %q, want injected id %q", tok, injectedID)
 	}
 
 	var lastErr error
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		msg, err := nc.Request(poolSubj, []byte("dispatch"), 200*time.Millisecond)
+		msg, err := nc.Request(promptSubj, []byte("dispatch"), 200*time.Millisecond)
 		if err == nil {
 			if !strings.Contains(string(msg.Data), `"role":"implementer"`) {
 				t.Fatalf("ack body = %s, want role=implementer", msg.Data)
@@ -68,7 +69,7 @@ func TestRun_ReadsInjectedProjectID(t *testing.T) {
 		lastErr = err
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("no ack on injected-id subject %s within 3s (last err: %v)", poolSubj, lastErr)
+	t.Fatalf("no ack on injected-id subject %s within 3s (last err: %v)", promptSubj, lastErr)
 }
 
 // TestRun_MissingProjectIDFailsLoud asserts that an absent identity env
