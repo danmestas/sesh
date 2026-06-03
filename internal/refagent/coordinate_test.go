@@ -3,8 +3,6 @@ package refagent
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,70 +13,11 @@ import (
 	"github.com/danmestas/sesh/internal/coord"
 )
 
-// seedProjectID writes a .sesh/project-id pin under root so resolveProjectID
-// (used implicitly by Run, called directly in some tests) can find it.
-// Returns the absolute id value.
-func seedProjectID(t *testing.T, root string) string {
-	t.Helper()
-	const id = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-	seshDir := filepath.Join(root, ".sesh")
-	if err := os.MkdirAll(seshDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(seshDir, "project-id"), []byte(id+"\n"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	return id
-}
-
-// TestResolveProjectID covers the walk-up + ENOENT-tolerant behavior.
-// Mirrors readSessionNATSURL's contract: file present anywhere up the
-// directory tree → return its content; nowhere → ("", nil).
-//
-// Each case bounds the walk at the temp-tree root (resolveProjectIDFrom's
-// stopDir) so the result is hermetic — t.TempDir lives under $TMPDIR, which
-// on some machines sits inside a real sesh project (e.g. /tmp/.sesh), and an
-// unbounded walk to the filesystem root would pick up that ancestor's pin.
-func TestResolveProjectID(t *testing.T) {
-	t.Run("present in cwd", func(t *testing.T) {
-		root := t.TempDir()
-		want := seedProjectID(t, root)
-		got, err := resolveProjectIDFrom(root, root)
-		if err != nil {
-			t.Fatalf("resolveProjectIDFrom: %v", err)
-		}
-		if got != want {
-			t.Errorf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("present in ancestor — walk-up finds it", func(t *testing.T) {
-		root := t.TempDir()
-		want := seedProjectID(t, root)
-		nested := filepath.Join(root, "a", "b", "c")
-		if err := os.MkdirAll(nested, 0o755); err != nil {
-			t.Fatalf("mkdir nested: %v", err)
-		}
-		got, err := resolveProjectIDFrom(nested, root)
-		if err != nil {
-			t.Fatalf("resolveProjectIDFrom: %v", err)
-		}
-		if got != want {
-			t.Errorf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("absent → empty string, no error", func(t *testing.T) {
-		root := t.TempDir()
-		got, err := resolveProjectIDFrom(root, root)
-		if err != nil {
-			t.Fatalf("resolveProjectIDFrom: %v", err)
-		}
-		if got != "" {
-			t.Errorf("got %q, want empty", got)
-		}
-	})
-}
+// testProjectID is the injected pinned 40-hex routing key used across the
+// coordination tests. Identity is injected, not derived: coordinateLoop takes
+// the projectID as a parameter (cfg.ProjectID at boot), so tests pass this
+// value directly rather than seeding a .sesh/project-id pin on disk.
+const testProjectID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 // TestCoordinateLoop_TierRouting is the load-bearing test: each tier
 // (5-token orch front door, 6-token role pool with queue group, 7-token
@@ -90,9 +29,7 @@ func TestResolveProjectID(t *testing.T) {
 // receives) are both verified.
 func TestCoordinateLoop_TierRouting(t *testing.T) {
 	url := startBroker(t)
-	root := t.TempDir()
-	pid := seedProjectID(t, root)
-	t.Chdir(root)
+	pid := testProjectID
 	t.Setenv("SESH_MACHINE", coord.MachineLocal)
 	machine := coord.MachineLocal
 	session := "s1"
@@ -179,9 +116,7 @@ func TestCoordinateLoop_TierRouting(t *testing.T) {
 // project/session triple.
 func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
 	url := startBroker(t)
-	root := t.TempDir()
-	pid := seedProjectID(t, root)
-	t.Chdir(root)
+	pid := testProjectID
 	t.Setenv("SESH_MACHINE", coord.MachineLocal)
 
 	cfg := Config{
@@ -253,37 +188,6 @@ func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
 		t.Fatal("coordinateLoop did not exit within 1s of ctx cancel")
 	}
 	_ = reportSubj // silence unused-var if test logic shifts
-}
-
-// TestCoordinateLoop_NoProjectIDIsNoSubs verifies the degradation path:
-// when resolveProjectID returns "", the loop installs zero subscriptions
-// and waits on ctx. The agent is still useful for direct Synadia prompts
-// via the micro framework but doesn't participate in tier coordination.
-func TestCoordinateLoop_NoProjectIDIsNoSubs(t *testing.T) {
-	url := startBroker(t)
-	nc := mustConnect(t, url)
-	defer nc.Close()
-
-	cfg := Config{
-		Agent: "echo", Owner: "u", Session: "s",
-		Role: "worker", Class: agentmeta.ClassActive,
-		Interval: 1 * time.Second,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- coordinateLoop(ctx, nc, cfg, "", "inst-1") }()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("coordinateLoop returned err = %v, want nil", err)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("coordinateLoop did not exit within 1s of ctx cancel")
-	}
 }
 
 // ---- helpers ----

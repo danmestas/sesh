@@ -24,8 +24,14 @@ import (
 // mentions the SESH_* names (ready for role/class Phase 4 without edit
 // amplification elsewhere).
 type harnessEnv struct {
-	Session   string
-	Project   string
+	Session string
+	Project string
+	// ProjectID is the pinned 40-hex SHA1 project-id (hostname-free routing
+	// key, distinct from the human-readable Project slug). Exported as
+	// SESH_PROJECT_ID so the refagent reads its coordination-subject routing
+	// key from injected env rather than re-deriving it by walking the
+	// filesystem for a .sesh/project-id pin.
+	ProjectID string
 	NATSURL   string
 	NATSWSURL string
 	FossilURL string
@@ -43,6 +49,7 @@ func harnessEnvVars(env harnessEnv) []string {
 	return []string{
 		"SESH_SESSION=" + env.Session,
 		"SESH_PROJECT=" + env.Project,
+		"SESH_PROJECT_ID=" + env.ProjectID,
 		"NATS_URL=" + env.NATSURL,
 		"SESH_NATS_WS_URL=" + env.NATSWSURL,
 		"SESH_FOSSIL_URL=" + env.FossilURL,
@@ -475,7 +482,11 @@ func (s *Starter) maybeSpawnHarness(ctx context.Context) <-chan error {
 		// basename, sanitized with the adapter's exact transform so the
 		// claude-nats-channel <project> subject segment is reconstructable
 		// by peers (it must NOT inherit the session de-dup suffix).
-		Project:   sanitizeProjectToken(filepath.Base(s.cwd)),
+		Project: sanitizeProjectToken(filepath.Base(s.cwd)),
+		// ProjectID is the pinned 40-hex routing key derived host-side at
+		// first `sesh up` (loadOrCreateProjectID in NewStarter). Injecting it
+		// here lets the refagent skip its own filesystem walk for the pin.
+		ProjectID: s.projectID,
 		NATSURL:   s.h.NATSURL(),
 		NATSWSURL: s.h.NATSWebSocketURL(),
 		FossilURL: "http://" + s.h.HTTPAddr() + "/",
