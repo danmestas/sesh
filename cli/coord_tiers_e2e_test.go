@@ -62,7 +62,8 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 	const sessionLabel = "coord-e2e"
 
 	// Bring up the sesh session — gives us a hub, NATS server, and the
-	// .sesh/project-id pin that refagent's resolveProjectID looks for.
+	// .sesh/project-id pin we read host-side and inject into each refagent
+	// as SESH_PROJECT_ID (the refagent no longer walks the filesystem for it).
 	seshCmd, seshStderr := startSeshArgs(t, seshBin, home, project, sessionLabel)
 	defer killAndWait(t, seshCmd, seshStderr)
 	sess := waitForURLs(t, filepath.Join(project, ".sesh", "sessions", sessionLabel+".json"), 15*time.Second)
@@ -112,7 +113,7 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 	procs := make([]*exec.Cmd, len(specs))
 	stderrs := make([]*syncBuf, len(specs))
 	for i, sp := range specs {
-		cmd, sb := startRefAgent(t, refagentBin, sess.NATSURL, project, sessionLabel, sp.agent, sp.role, sp.class)
+		cmd, sb := startRefAgent(t, refagentBin, sess.NATSURL, project, pid, sessionLabel, sp.agent, sp.role, sp.class)
 		procs[i] = cmd
 		stderrs[i] = sb
 	}
@@ -310,14 +311,15 @@ func buildRefAgent(t *testing.T) string {
 	return bin
 }
 
-func startRefAgent(t *testing.T, bin, natsURL, project, session, agent, role, class string) (*exec.Cmd, *syncBuf) {
+func startRefAgent(t *testing.T, bin, natsURL, project, projectID, session, agent, role, class string) (*exec.Cmd, *syncBuf) {
 	t.Helper()
 	cmd := exec.Command(bin, "--agent="+agent)
-	cmd.Dir = project // so resolveProjectID walks up from here and finds .sesh/project-id
+	cmd.Dir = project // inherits cwd; identity is injected via SESH_PROJECT_ID below
 	cmd.Env = append(os.Environ(),
 		"NATS_URL="+natsURL,
 		"SESH_OWNER="+currentUser(t),
 		"SESH_SESSION="+session,
+		"SESH_PROJECT_ID="+projectID,
 		"SESH_ROLE="+role,
 		"SESH_CLASS="+class,
 		"SESH_MACHINE=_local",

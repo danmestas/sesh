@@ -312,6 +312,39 @@ func TestHarnessEnvVars_CarriesProject(t *testing.T) {
 	}
 }
 
+// TestHarnessEnvVars_CarriesProjectID pins the C1 wire contract: the harness
+// child receives the pinned 40-hex projectID under SESH_PROJECT_ID, distinct
+// from the human-readable SESH_PROJECT slug. This is the routing key the
+// refagent uses for the 4th token of its coordination subjects; without it the
+// refagent would have to re-derive it by walking the filesystem.
+func TestHarnessEnvVars_CarriesProjectID(t *testing.T) {
+	const pinnedID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	env := harnessEnv{
+		Session:   "sesh-talk-2",
+		Project:   "sesh",
+		ProjectID: pinnedID,
+		NATSURL:   "nats://127.0.0.1:4222",
+	}
+	got := harnessEnvVars(env)
+
+	has := func(want string) bool {
+		for _, kv := range got {
+			if kv == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !has("SESH_PROJECT_ID=" + pinnedID) {
+		t.Errorf("harnessEnvVars missing SESH_PROJECT_ID=%s; got %v", pinnedID, got)
+	}
+	// The pinned 40-hex id must be distinct from the human-readable slug.
+	if has("SESH_PROJECT_ID=sesh") {
+		t.Error("SESH_PROJECT_ID must carry the 40-hex id, not the human slug")
+	}
+}
+
 // TestSanitizeLabelFromBasename covers the stripping rules applied to cwd
 // basenames before they're used as session labels.
 func TestSanitizeLabelFromBasename(t *testing.T) {

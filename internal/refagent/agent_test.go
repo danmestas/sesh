@@ -417,6 +417,15 @@ func startBroker(t *testing.T) string {
 // runAgent starts Run in a goroutine and returns a cancel + done.
 func runAgent(t *testing.T, cfg Config) (cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
+	// Identity is injected, never derived. Run now requires a project-id at
+	// boot, so supply a default for the Synadia-behavior tests (prompt,
+	// heartbeat, status, registration) that don't care about the specific
+	// coordination subject. Tests that assert on the projectID set it
+	// explicitly (cfg.ProjectID) or via SESH_PROJECT_ID and reach this with a
+	// non-empty value already.
+	if cfg.ProjectID == "" && os.Getenv("SESH_PROJECT_ID") == "" {
+		cfg.ProjectID = "0000000000000000000000000000000000000000"
+	}
 	ctx, cancelFn := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- Run(ctx, cfg) }()

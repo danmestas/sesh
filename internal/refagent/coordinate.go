@@ -39,21 +39,14 @@ import (
 //   - class=active, role=<worker>: subscribes to the 6-token role pool
 //     (queue group on role, work-stealing) AND the 7-token direct-address.
 //
-// projectID is empty when the agent is not running inside a sesh project
-// (resolveProjectID returned ""); the loop registers no subscriptions
-// and waits on ctx. The agent still serves Synadia direct prompts via
-// the micro framework registered in register().
+// projectID is the injected, pinned 40-hex routing key (cfg.ProjectID,
+// validated non-empty at boot in Run). identity is injected, never derived
+// here: callers that reach coordinateLoop already passed the boot guard, so
+// there is no empty-projectID degradation path.
 //
 // Returns when ctx is cancelled. All subscriptions are unsubscribed
 // before the function returns; Run relies on this via coordDone.
 func coordinateLoop(ctx context.Context, nc *nats.Conn, cfg Config, projectID, instanceID string) error {
-	if projectID == "" {
-		slog.Info("coordinate: no project-id pinned; skipping coordination subscriptions",
-			"agent", cfg.Agent, "role", cfg.Role, "class", cfg.Class)
-		<-ctx.Done()
-		return nil
-	}
-
 	machine := coord.Machine()
 	session := cfg.Session
 

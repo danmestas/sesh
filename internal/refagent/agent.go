@@ -50,17 +50,25 @@ import (
 //   - Session:  $SESH_SESSION (may be empty for session-less harnesses)
 //   - Role:     $SESH_ROLE, else agentmeta.DefaultRole ("worker").
 //   - Class:    $SESH_CLASS, else agentmeta.DefaultClass ("active").
+//   - ProjectID: $SESH_PROJECT_ID (the pinned 40-hex coordination routing
+//     key, injected by `sesh up`). REQUIRED — Run fails loud at boot when
+//     unset rather than deriving it; identity is injected, never walked.
 //   - NATSURL:  $NATS_URL, else .sesh/sessions/<Session>.json#nats_url,
 //     else ~/.sesh/hub.url
 //   - Interval: 30s (Synadia §8.2 recommended cadence)
 type Config struct {
-	Agent    string
-	Owner    string
-	Session  string
-	Role     string
-	Class    agentmeta.AgentClass
-	NATSURL  string
-	Interval time.Duration
+	Agent string
+	Owner string
+	// ProjectID is the pinned 40-hex project-id — the 4th token of every
+	// sesh coordination subject. It is INJECTED (via SESH_PROJECT_ID or an
+	// explicit field), never derived by the agent. Host-side pinning lives
+	// in cli/paths.go::loadOrCreateProjectID at first `sesh up`.
+	ProjectID string
+	Session   string
+	Role      string
+	Class     agentmeta.AgentClass
+	NATSURL   string
+	Interval  time.Duration
 }
 
 // Service constants from Synadia §3 / §4.
@@ -99,6 +107,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := agentmeta.ValidateClass(cfg.Class); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	// Identity is injected, never derived. A missing project-id is a boot
+	// error — the agent must not silently skip coordination or fall back to
+	// walking the filesystem for a .sesh/project-id pin.
+	if cfg.ProjectID == "" {
+		return errors.New("config: missing project-id: set SESH_PROJECT_ID (injected by `sesh up`)")
+	}
 
 	url, err := resolveNATSURL(cfg.NATSURL, cfg.Session)
 	if err != nil {
@@ -134,15 +148,10 @@ func Run(ctx context.Context, cfg Config) error {
 	// so Run's `defer nc.Drain()` does not race the goroutine. Without this
 	// synchronization, $SRV.INFO can linger past the operator's observable
 	// shutdown boundary.
-	projectID, err := resolveProjectID()
-	if err != nil {
-		slog.Warn("coordinate: resolveProjectID failed; coordination subscriptions disabled", "err", err)
-		projectID = ""
-	}
 	coordDone := make(chan struct{})
 	go func() {
 		defer close(coordDone)
-		if err := coordinateLoop(ctx, a.nc, cfg, projectID, a.instanceID()); err != nil {
+		if err := coordinateLoop(ctx, a.nc, cfg, cfg.ProjectID, a.instanceID()); err != nil {
 			slog.Warn("coordinate: loop exited with error", "err", err)
 		}
 	}()
@@ -180,6 +189,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Class == "" {
 		c.Class = agentmeta.DefaultedClass(os.Getenv("SESH_CLASS"))
+	}
+	if c.ProjectID == "" {
+		c.ProjectID = os.Getenv("SESH_PROJECT_ID")
 	}
 	if c.Interval == 0 {
 		c.Interval = defaultInterval
@@ -665,53 +677,6 @@ func readHubURL() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
-}
-
-// resolveProjectID walks from CWD up to root looking for
-// .sesh/project-id and returns the pinned id (hostname-FREE routing
-// key written by `sesh up` per cli/paths.go::loadOrCreateProjectID).
-// Returns ("", nil) when no such file exists — the agent is running
-// outside a sesh project; coordinateLoop will skip subscriptions in
-// that case rather than refuse startup.
-//
-// Mirrors readSessionNATSURL's walk: same up-to-root traversal, same
-// ENOENT-tolerant policy, same plain-text file shape.
-func resolveProjectID() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return resolveProjectIDFrom(cwd, "")
-}
-
-// resolveProjectIDFrom walks up from start looking for a .sesh/project-id
-// pin, returning the first one found (trimmed). The search stops after it
-// checks stopDir: reaching stopDir without a hit returns ("", nil) instead
-// of continuing toward the filesystem root. Production passes stopDir=""
-// (which never matches a real directory) to walk all the way up — identical
-// to the original behavior. Tests pass the root of an isolated temp tree so
-// the result can't depend on .sesh pins that happen to exist in shared
-// ancestors (e.g. a real sesh project rooted at /tmp, where t.TempDir lives).
-func resolveProjectIDFrom(start, stopDir string) (string, error) {
-	dir := start
-	for {
-		path := filepath.Join(dir, ".sesh", "project-id")
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return strings.TrimSpace(string(data)), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("read %s: %w", path, err)
-		}
-		if dir == stopDir {
-			return "", nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", nil
-		}
-		dir = parent
-	}
 }
 
 // ---------- misc helpers -------------------------------------------

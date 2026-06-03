@@ -33,9 +33,10 @@ Usage:
   sesh-ref-agent [--agent=<name>]
 
 All identity beyond --agent comes from the environment:
-  SESH_OWNER    — owner metadata token (else $USER, else os user)
-  SESH_SESSION  — session metadata token (omitted if empty)
-  NATS_URL      — bus URL (else .sesh/sessions/<label>.json, else ~/.sesh/hub.url)
+  SESH_OWNER       — owner metadata token (else $USER, else os user)
+  SESH_SESSION     — session metadata token (omitted if empty)
+  SESH_PROJECT_ID  — pinned 40-hex coordination routing key (REQUIRED; injected by sesh up)
+  NATS_URL         — bus URL (else .sesh/sessions/<label>.json, else ~/.sesh/hub.url)
 
 See docs/sesh-ref-agent.md.
 `)
