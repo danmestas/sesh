@@ -21,7 +21,7 @@ func TestNewStarter_ResolvesProjectIdentityWithoutHub(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Chdir(cwd)
 
-	c := &UpCmd{Session: "alpha", Seed: "all", Scope: "session"}
+	c := &UpCmd{Session: "alpha", Scope: "session"}
 	s, err := NewStarter(c)
 	if err != nil {
 		t.Fatalf("NewStarter: %v", err)
@@ -74,6 +74,33 @@ func TestUpCmd_FlagsAccepted(t *testing.T) {
 	}
 }
 
+// TestUpCmd_DeadEmbeddedHubFlagsRejected pins the F1 scope-cut: the inert
+// embedded-NATS-server / fossil-seed flags were removed when sesh became a
+// pure NATS client. Each must now be an unknown flag (parse error), proving
+// the dead surface is gone rather than silently accepted-and-ignored.
+func TestUpCmd_DeadEmbeddedHubFlagsRejected(t *testing.T) {
+	dead := []string{
+		"--http-port=8080",
+		"--nats-client-port=4222",
+		"--nats-leaf-port=7422",
+		"--nats-ws-port=8081",
+		"--disable-ws",
+		"--seed=all",
+	}
+	for _, flag := range dead {
+		var root struct {
+			Up UpCmd `cmd:"" help:"Bring a session up"`
+		}
+		k, err := kong.New(&root)
+		if err != nil {
+			t.Fatalf("kong.New: %v", err)
+		}
+		if _, err := k.Parse([]string{"up", "--session=foo", flag}); err == nil {
+			t.Errorf("flag %q parsed successfully; want unknown-flag error (dead surface)", flag)
+		}
+	}
+}
+
 // TestSpawnHarness_ReturnsChan is the TDD skeleton sentinel for Task 3
 // (per implementation plan + locked Hybrid C). Written first so it fails
 // until spawnHarness exists with the right signature and returns a closed
@@ -93,17 +120,17 @@ func TestSpawnHarness_ReturnsChan(t *testing.T) {
 // This is the "compile + run" verification before wiring into Starter.serve.
 func TestSpawnHarness_HappyPathEnvAndWait(t *testing.T) {
 	env := harnessEnv{
-		Session:   "t3-sess",
-		NATSURL:   "nats://127.0.0.1:4222",
-		NATSWSURL: "ws://127.0.0.1:8080",
-		FossilURL: "http://127.0.0.1:8081/",
-		LeafURL:   "nats://127.0.0.1:7422",
-		Role:      "implementer",
-		Class:     "active",
+		Session: "t3-sess",
+		NATSURL: "nats://127.0.0.1:4222",
+		Role:    "implementer",
+		Class:   "active",
 	}
 	// The cmdStr is passed verbatim to sh -c; the test expression succeeds
 	// only when the injected vars match exactly what we put in harnessEnv.
-	cmdStr := `[ "$SESH_SESSION" = "t3-sess" ] && [ "$NATS_URL" = "nats://127.0.0.1:4222" ] && [ "$SESH_NATS_WS_URL" = "ws://127.0.0.1:8080" ] && [ "$SESH_FOSSIL_URL" = "http://127.0.0.1:8081/" ] && [ "$SESH_LEAF_URL" = "nats://127.0.0.1:7422" ] && [ "$SESH_ROLE" = "implementer" ] && [ "$SESH_CLASS" = "active" ] && exit 0 || exit 77`
+	// The embedded-hub URL vars (SESH_NATS_WS_URL / SESH_FOSSIL_URL /
+	// SESH_LEAF_URL) are gone now that sesh is a pure NATS client — the
+	// child reaches the hub via NATS_URL alone.
+	cmdStr := `[ "$SESH_SESSION" = "t3-sess" ] && [ "$NATS_URL" = "nats://127.0.0.1:4222" ] && [ "$SESH_ROLE" = "implementer" ] && [ "$SESH_CLASS" = "active" ] && exit 0 || exit 77`
 
 	ch := spawnHarness(context.Background(), cmdStr, env)
 	err := <-ch
@@ -162,14 +189,11 @@ func TestHarnessSysProcAttr_NilStdinFallsBack(t *testing.T) {
 // to asserting cmd.Env without spawning a subprocess.
 func TestHarnessEnvVars_CarriesProject(t *testing.T) {
 	env := harnessEnv{
-		Session:   "sesh-talk-2",
-		Project:   "sesh",
-		NATSURL:   "nats://127.0.0.1:4222",
-		NATSWSURL: "ws://127.0.0.1:8080",
-		FossilURL: "http://127.0.0.1:8081/",
-		LeafURL:   "nats://127.0.0.1:7422",
-		Role:      "orch",
-		Class:     "active",
+		Session: "sesh-talk-2",
+		Project: "sesh",
+		NATSURL: "nats://127.0.0.1:4222",
+		Role:    "orch",
+		Class:   "active",
 	}
 	got := harnessEnvVars(env)
 
@@ -196,6 +220,21 @@ func TestHarnessEnvVars_CarriesProject(t *testing.T) {
 	}
 	if !has("SESH_ROLE=orch") {
 		t.Errorf("harnessEnvVars missing SESH_ROLE; got %v", got)
+	}
+	// The embedded-hub URL exports are gone now that sesh is a pure NATS
+	// client; the child must NOT receive three empty SESH_*_URL exports.
+	hasPrefix := func(prefix string) bool {
+		for _, kv := range got {
+			if strings.HasPrefix(kv, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, dead := range []string{"SESH_NATS_WS_URL=", "SESH_FOSSIL_URL=", "SESH_LEAF_URL="} {
+		if hasPrefix(dead) {
+			t.Errorf("harnessEnvVars must not emit dead embedded-hub var %q; got %v", dead, got)
+		}
 	}
 }
 
@@ -326,7 +365,7 @@ func TestUpCmd_Run_DerivesSessionFromCwd(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(named)
 
-	c := &UpCmd{Seed: "all", Scope: "session"}
+	c := &UpCmd{Scope: "session"}
 	// Run will fail (no hub, no git repo), but Session must be set before it does.
 	_ = c.Run()
 	if c.Session == "" {

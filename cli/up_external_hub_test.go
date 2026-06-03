@@ -94,7 +94,7 @@ func TestUpCmd_Run_HardFailsWithoutHub(t *testing.T) {
 	os.Unsetenv("SESH_HUB_URL")
 	os.Unsetenv("NATS_URL")
 
-	c := &UpCmd{Session: "alpha", Seed: "all", Scope: "session"}
+	c := &UpCmd{Session: "alpha", Scope: "session"}
 	err := c.Run()
 	if err == nil {
 		t.Fatal("sesh up succeeded with no hub configured; want hard error")
