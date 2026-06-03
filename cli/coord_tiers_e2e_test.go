@@ -61,14 +61,23 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 
 	const sessionLabel = "coord-e2e"
 
-	// Bring up the sesh session — gives us a hub, NATS server, and the
-	// .sesh/project-id pin we read host-side and inject into each refagent
-	// as SESH_PROJECT_ID (the refagent no longer walks the filesystem for it).
-	seshCmd, seshStderr := startSeshArgs(t, seshBin, home, project, sessionLabel)
+	// sesh is a NATS client now — it dials an EXTERNAL hub rather than
+	// embedding one. Stand up a real nats-server for the session + the
+	// ref-agents to share, and point `sesh up` at it via SESH_HUB_URL.
+	hubURL := startExternalNATSServer(t)
+
+	// Bring up the sesh session as a client of the external hub. This writes
+	// the .sesh/project-id pin we read host-side and inject into each refagent
+	// as SESH_PROJECT_ID (the refagent no longer walks the filesystem for it),
+	// and publishes the hub URL into the session JSON.
+	seshCmd, seshStderr := startSeshArgs(t, seshBin, home, project, sessionLabel, hubURL)
 	defer killAndWait(t, seshCmd, seshStderr)
 	sess := waitForURLs(t, filepath.Join(project, ".sesh", "sessions", sessionLabel+".json"), 15*time.Second)
 	if sess.NATSURL == "" {
 		t.Fatalf("sesh session reported no NATS URL after 15s")
+	}
+	if sess.NATSURL != hubURL {
+		t.Fatalf("session NATS URL = %q, want external hub URL %q", sess.NATSURL, hubURL)
 	}
 
 	pid := readProjectID(t, project)

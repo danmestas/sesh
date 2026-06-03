@@ -48,7 +48,7 @@ type SessionState struct {
 	Scope     string     `json:"scope,omitempty"`       // "session" or "project" — the scope this session was brought up under, used to auto-detect scope without flag repetition. Empty for backward compat with older session JSONs; consumers fall back to "session" in that case. (#84)
 	NATSURL   string     `json:"nats_url,omitempty"`    // for NATS clients under this session
 	NATSWSURL string     `json:"nats_ws_url,omitempty"` // WebSocket NATS endpoint (ws://, loopback, no_tls); for browser / Cloudflare Workers clients via @nats-io/transport-websockets. Present iff the embedded NATS server has WebSocket enabled.
-	LeafURL   string     `json:"leaf_url,omitempty"`    // for EdgeSync leaves to solicit upstream
+	LeafURL   string     `json:"leaf_url,omitempty"`    // legacy leafnode URL field; unused now that sesh is a NATS client (kept for JSON back-compat)
 	FossilURL string     `json:"fossil_url,omitempty"`  // hub HTTP xfer endpoint; sub-leaves use as --seed-from-upstream
 	Agents    []AgentRef `json:"agents,omitempty"`      // live agents in this session; eventual, updated by watcher
 }

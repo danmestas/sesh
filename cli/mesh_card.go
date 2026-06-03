@@ -44,7 +44,7 @@ type MeshGroup struct {
 // agent/owner/name addressing is gone — cards are session-scoped now.
 //
 // Reuses the same NATS-URL resolution path as MeshCmd (--nats-url
-// flag → ReadHubInfo fallback) so operator habits transfer between
+// flag → resolveHubURL fallback) so operator habits transfer between
 // `sesh mesh` and `sesh mesh card`.
 type MeshCardCmd struct {
 	Session  string        `arg:""            help:"Session token (the <session> subject segment)"`
@@ -100,15 +100,11 @@ func (cmd *MeshCardCmd) Run(ctx context.Context) error {
 
 	url := cmd.NATSURL
 	if url == "" {
-		stateDir, err := seshHome()
+		resolved, err := resolveHubURL()
 		if err != nil {
-			return fmt.Errorf("mesh card: state dir: %w", err)
+			return fmt.Errorf("mesh card: %w (or pass --nats-url)", err)
 		}
-		info, err := ReadHubInfo(stateDir)
-		if err != nil {
-			return fmt.Errorf("mesh card: hub URL not found (run `sesh up` first or pass --nats-url): %w", err)
-		}
-		url = info.NATSURL
+		url = resolved
 	}
 
 	nc, err := nats.Connect(url,
