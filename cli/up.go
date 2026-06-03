@@ -53,9 +53,6 @@ type harnessEnv struct {
 	// filesystem for a .sesh/project-id pin.
 	ProjectID string
 	NATSURL   string
-	NATSWSURL string
-	FossilURL string
-	LeafURL   string
 	Role      string
 	Class     string
 }
@@ -71,9 +68,6 @@ func harnessEnvVars(env harnessEnv) []string {
 		"SESH_PROJECT=" + env.Project,
 		"SESH_PROJECT_ID=" + env.ProjectID,
 		"NATS_URL=" + env.NATSURL,
-		"SESH_NATS_WS_URL=" + env.NATSWSURL,
-		"SESH_FOSSIL_URL=" + env.FossilURL,
-		"SESH_LEAF_URL=" + env.LeafURL,
 		"SESH_ROLE=" + env.Role,
 		"SESH_CLASS=" + env.Class,
 	}
@@ -101,25 +95,6 @@ type Harness struct {
 // editing this method.
 type UpCmd struct {
 	Session string `optional:"" help:"Session label (free-form). Defaults to the cwd basename; if that label is already claimed, '-2', '-3', … is appended until a free slot is found. Held exclusively by this sesh up — a second sesh up --session=<same-label> in another shell will fail. Run multiple adapters in one session by passing a multiplex wrapper to --exec."`
-
-	HTTPPort          int `help:"Fossil HTTP port (0 = auto)" default:"0"`
-	NATSClientPort    int `help:"NATS client port (0 = auto)" default:"0"`
-	NATSLeafPort      int `help:"NATS leafnode port (0 = auto)" default:"0"`
-	NATSWebSocketPort int `help:"NATS WebSocket port (0 = auto)" default:"0"`
-	// DisableWebSocket lets the operator turn off the embedded NATS
-	// WebSocket listener. Default is enabled — sesh's loopback-only
-	// posture makes the WS endpoint dialable for browser / Cloudflare
-	// Workers clients via @nats-io/transport-websockets without
-	// surfacing any extra knob. Opt-out is for environments that want
-	// to minimize listening sockets.
-	DisableWebSocket bool `name:"disable-ws" help:"Disable the embedded NATS WebSocket listener (advertised as nats_ws_url in the session JSON). Default: enabled."`
-
-	// Seed controls what gets committed to this session's Fossil repo
-	// at sesh up. Only applies on fresh repos — a session that's been
-	// up before retains whatever commits accumulated. "all" (default)
-	// captures tracked + untracked-but-not-gitignored files; "tracked"
-	// captures only what's in the git index; "none" skips seeding.
-	Seed string `help:"Seed mode for the session's Fossil repo: all|tracked|none" enum:"all,tracked,none" default:"all"`
 
 	// Scope selects the Fossil repo path. "session" (default) gives
 	// each session its own repo at .sesh/sessions/<label>.repo;
