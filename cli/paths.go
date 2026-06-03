@@ -120,9 +120,8 @@ func hubRepoPath(stateDir string) string {
 // repo file but keep distinct working dirs keyed on <label>.
 //
 // Tier-1 safety: .sesh/checkouts/<label>/ is the ONLY path under .sesh/
-// that sesh worktree --force-recreate is permitted to remove. Adjacent
-// trees — .sesh/sessions/, .sesh/messaging/ — are never touched by the
-// worktree code path.
+// that checkout-provisioning code is permitted to remove. Adjacent
+// trees — .sesh/sessions/, .sesh/messaging/ — are never touched.
 //
 // Defense-in-depth: the label is re-validated here even though every
 // operator entrypoint already validates at the top of Run(). The first

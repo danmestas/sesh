@@ -13,9 +13,8 @@ import (
 
 // ensureSeshGitignored makes sure <project>/.gitignore excludes the .sesh/
 // runtime state directory. Called at sesh up after .sesh/ has been
-// materialized; closes the circular-UX gap where `sesh up` creates .sesh/
-// as untracked content and a subsequent `sesh materialize` refuses to
-// operate on the resulting "dirty" worktree (issue #86).
+// created; keeps sesh's own runtime state from showing up as untracked
+// content in the project worktree (issue #86).
 //
 // Contract:
 //
