@@ -7,12 +7,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/danmestas/sesh/internal/agentmeta"
 	"github.com/danmestas/sesh/internal/coord"
 	"github.com/danmestas/sesh/internal/subject"
 )
 
-// coordinateLoop subscribes to the sesh coordination subjects per cfg.Class.
+// coordinateLoop subscribes to the sesh prompt coordination subject.
 //
 // Sesh's coordination subjects layer on top of the Synadia `agents.*`
 // namespace by extending it with two sesh-owned segments (machine,
@@ -22,23 +21,17 @@ import (
 //	agents.<verb>.<machine>.<project>.<session>    5 tokens — addresses the session
 //
 // There is no role-pool or direct-instance addressing tier. Work-stealing
-// among the active agents in a session rides a NATS queue group
+// among the agents in a session rides a NATS queue group
 // (subject.PromptQueueGroup) on the SUBSCRIBE side, not the subject:
-// every active agent QueueSubscribes the same 5-token prompt subject under
-// that group, so each prompt is delivered to exactly one member. A single-
+// every agent QueueSubscribes the same 5-token prompt subject under that
+// group, so each prompt is delivered to exactly one member. A single-
 // member group degenerates to a plain subscribe; a multi-member one keeps
 // the work-stealing semantics.
 //
-// Subscription policy by class:
-//
-//   - class=observer: subscribes to `agents.report.<machine>.<project>.<session>.>`
-//     only. Verb-based exclusion ensures `agents.prompt.*` dispatch never
-//     reaches an observer; the policy is convention, not type-checked, but
-//     enforced by tests.
-//
-//   - class=active: QueueSubscribes the 5-token prompt subject under
-//     subject.PromptQueueGroup. Role is no longer consulted for subject
-//     selection — orch and worker subscribe identically.
+// Every agent QueueSubscribes the 5-token prompt subject under
+// subject.PromptQueueGroup; neither role nor class is consulted for
+// subscription — orch and worker subscribe identically. (role/class
+// survive only as display metadata in $SRV.INFO and heartbeats.)
 //
 // projectID is the injected, pinned 40-hex routing key (cfg.ProjectID,
 // validated non-empty at boot in Run). identity is injected, never derived
@@ -77,33 +70,19 @@ func coordinateLoop(ctx context.Context, nc *nats.Conn, cfg Config, projectID, i
 		}
 	}
 
-	switch cfg.Class {
-	case agentmeta.ClassObserver:
-		reportFilter := fmt.Sprintf("agents.report.%s.%s.%s.>", machine, projectID, session)
-		sub, err := nc.Subscribe(reportFilter, handler("report"))
-		if err != nil {
-			return fmt.Errorf("subscribe %s: %w", reportFilter, err)
-		}
-		subs = append(subs, sub)
-
-	case agentmeta.ClassActive:
-		// Single 5-token prompt subject, QueueSubscribed under the fixed
-		// PromptQueueGroup. Every active agent in the session joins the same
-		// group, so a prompt is delivered to exactly one member (work-
-		// stealing). Role is no longer part of the subject or the group.
-		front := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, projectID, session)
-		fsub, err := nc.QueueSubscribe(front, subject.PromptQueueGroup, handler("prompt"))
-		if err != nil {
-			return fmt.Errorf("queue subscribe %s: %w", front, err)
-		}
-		subs = append(subs, fsub)
-
-	default:
-		// applyDefaults + agentmeta.ValidateClass at boot should make this
-		// unreachable; belt-and-braces guard so a future Config extension
-		// doesn't silently skip coordination.
-		slog.Warn("coordinate: unknown class; skipping subscriptions", "class", cfg.Class)
+	// Single 5-token prompt subject, QueueSubscribed under the fixed
+	// PromptQueueGroup. Every agent in the session joins the same group,
+	// so a prompt is delivered to exactly one member (work-stealing).
+	// Neither role nor class is part of the subject or the group.
+	front, err := subject.Prompt(subject.Coord{Machine: machine, Project: projectID, Session: session})
+	if err != nil {
+		return fmt.Errorf("build prompt subject: %w", err)
 	}
+	fsub, err := nc.QueueSubscribe(front, subject.PromptQueueGroup, handler("prompt"))
+	if err != nil {
+		return fmt.Errorf("queue subscribe %s: %w", front, err)
+	}
+	subs = append(subs, fsub)
 
 	slog.Info("coordinate: tiers active",
 		"agent", cfg.Agent, "role", cfg.Role, "class", cfg.Class,

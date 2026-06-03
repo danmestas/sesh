@@ -21,14 +21,6 @@ func ValidateRole(role string) error {
 	return nil
 }
 
-// ValidateClass returns nil iff c is one of the canonical class values.
-func ValidateClass(c AgentClass) error {
-	if c != ClassActive && c != ClassObserver {
-		return fmt.Errorf("class %q must be %q or %q", string(c), ClassActive, ClassObserver)
-	}
-	return nil
-}
-
 // DefaultedRole returns s, or DefaultRole if s is empty.
 // Does NOT validate — caller decides whether to validate after defaulting.
 func DefaultedRole(s string) string {

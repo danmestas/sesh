@@ -138,7 +138,7 @@ type UpCmd struct {
 
 	// Role and Class (locked decision A) — propagated to the harness for sesh.* coordination subjects.
 	Role  string `name:"role"  help:"Role for coordination subjects (e.g. implementer, verifier, spy). Passed as SESH_ROLE to --exec child (falls back to 'worker')."`
-	Class string `name:"class" help:"Class for coordination subjects: active (default) or observer. Passed as SESH_CLASS to --exec child." enum:"active,observer" default:"active"`
+	Class string `name:"class" help:"Class display tag for the mesh listing (e.g. active). Passed as SESH_CLASS to --exec child; not consulted for subscription routing." default:"active"`
 }
 
 // sanitizeLabelFromBasename strips characters that validateLabel rejects from a

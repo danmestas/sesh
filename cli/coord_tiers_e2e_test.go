@@ -4,19 +4,18 @@ package cli_test
 
 // End-to-end verification of the collapsed coordination model. Spawns a
 // real `sesh up` session, launches four real `sesh-ref-agent` processes
-// (orch + two implementer workers + one observer spy), then drives the
+// (orch + two implementer workers + one extra worker), then drives the
 // full stack through real NATS publish/subscribe to verify:
 //
 //  - All four agents register on $SRV.INFO.agents with role + class metadata.
 //  - Heartbeats on agents.hb.* carry the role/class sesh-extension fields.
 //  - Prompt routing on the single 5-token subject
 //    agents.prompt.<machine>.<project>.<session>:
-//      every active agent QueueSubscribes it under the fixed prompt queue
-//      group, so a publish reaches EXACTLY ONE active agent (work-stealing
-//      across orch + the two implementers); the role no longer selects a
-//      subject tier.
-//  - Spy exclusion: observer-class agent does NOT receive any
-//    agents.prompt.* dispatch; DOES receive agents.report.* messages.
+//      every agent QueueSubscribes it under the fixed prompt queue group,
+//      so a publish reaches EXACTLY ONE agent (work-stealing across all
+//      four); neither role nor class selects a subject tier. (Class is
+//      pure display metadata post-scope-cut — there is no observer/report
+//      subscription branch.)
 //  - Synadia §8.6 shutdown heartbeat: on graceful SIGTERM, the dying
 //    agent publishes an empty-payload final heartbeat before exiting.
 //
@@ -84,8 +83,8 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 	machine := "_local" // refagent's coord.Machine() with no SESH_MACHINE set
 
 	// Spawn four agents. Each gets the same NATS URL + project + session
-	// but distinct role/class via env. Role no longer selects a prompt
-	// subject tier — all three active agents subscribe to the same 5-token
+	// but distinct role/class via env. Neither role nor class selects a
+	// prompt subject tier — all four agents subscribe to the same 5-token
 	// prompt subject under the shared queue group.
 	type agentSpec struct {
 		agent string
@@ -96,7 +95,7 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 		{agent: "orch", role: "orch", class: "active"},
 		{agent: "imp1", role: "implementer", class: "active"},
 		{agent: "imp2", role: "implementer", class: "active"},
-		{agent: "spy1", role: "spy", class: "observer"},
+		{agent: "wrk1", role: "worker", class: "active"},
 	}
 
 	// Connect a test-side NATS client to query / publish / capture
@@ -161,7 +160,7 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 		}
 		want := map[string]string{
 			"orch": "orch/active", "imp1": "implementer/active",
-			"imp2": "implementer/active", "spy1": "spy/observer",
+			"imp2": "implementer/active", "wrk1": "worker/active",
 		}
 		for agent, expected := range want {
 			if got := seen[agent]; got != expected {
@@ -174,18 +173,18 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 	t.Run("5-token prompt reaches one active agent", func(t *testing.T) {
 		subj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, sessionLabel)
 		ack := mustRequest(t, nc, subj, []byte("dispatch"), 2*time.Second)
-		// Any of the three active agents may answer (queue group); the spy
-		// (observer) must never answer.
+		// Any of the four agents may answer (queue group); class is no
+		// longer a routing input, so there is no excluded responder.
 		role := jsonString(t, ack, "role")
 		class := jsonString(t, ack, "class")
 		if class != "active" {
 			t.Errorf("5-token responder class = %q, want active", class)
 		}
 		switch role {
-		case "orch", "implementer":
-			// expected — one active agent answered
+		case "orch", "implementer", "worker":
+			// expected — one agent answered
 		default:
-			t.Errorf("5-token responder role = %q, want orch or implementer", role)
+			t.Errorf("5-token responder role = %q, want orch, implementer, or worker", role)
 		}
 	})
 
@@ -198,9 +197,8 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 		// queue subscriber per-message and fairness over small N is loose.
 		// Load-bearing properties:
 		//   - every message gets exactly one ack
-		//   - more than one distinct active agent participates (work-stealing,
+		//   - more than one distinct agent participates (work-stealing,
 		//     not a single sticky subscriber)
-		//   - no observer ever answers
 		seen := map[string]int{}
 		for i := 0; i < 30; i++ {
 			ack := mustRequest(t, nc, subj, []byte(fmt.Sprintf("work-%d", i)), 2*time.Second)
@@ -216,54 +214,7 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 		}
 	})
 
-	// === Subtest 5: spy exclusion — no agents.prompt.* reaches observer ===
-	t.Run("spy exclusion: observer never receives agents.prompt", func(t *testing.T) {
-		// Publish to the 5-token prompt subject AND to longer spy-keyed
-		// subjects, then verify the spy never responds. The observer
-		// subscribes only to agents.report.>, so no agents.prompt.* subject
-		// should reach it.
-		spyInstance := instanceByRoleAgent["spy1"]
-		frontSubj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, sessionLabel)
-		spySubj := frontSubj + ".spy." + spyInstance
-
-		// Test passes when each request reaching the spy TIMES OUT (no spy
-		// responder). The 5-token subject IS answered by active agents, so
-		// we only assert the spy never identifies itself as the responder.
-		ack, err := nc.Request(frontSubj, []byte("dispatch"), 2*time.Second)
-		if err == nil {
-			if role := jsonString(t, ack.Data, "class"); role == "observer" {
-				t.Errorf("observer answered the 5-token prompt subject — verb-based spy exclusion violated")
-			}
-		}
-
-		// Spy-keyed subject has no subscriber at all; expect a timeout/no-
-		// responder.
-		for _, subj := range []string{spySubj} {
-			_, err := nc.Request(subj, []byte("forbidden"), 400*time.Millisecond)
-			if err == nil {
-				t.Errorf("spy responded to agents.prompt subject %q — verb-based spy exclusion violated", subj)
-				continue
-			}
-			// Acceptable errors: timeout (no subscriber installed at all)
-			// or ErrNoResponders (broker saw no interest).
-		}
-	})
-
-	// === Subtest 6: spy DOES receive agents.report.* messages ===
-	t.Run("spy receives agents.report", func(t *testing.T) {
-		reportSubj := fmt.Sprintf("agents.report.%s.%s.%s.workers.status", machine, pid, sessionLabel)
-		ack := mustRequest(t, nc, reportSubj, []byte("status"), 2*time.Second)
-		role := jsonString(t, ack, "role")
-		if role != "spy" {
-			t.Errorf("agents.report responder role = %q, want spy", role)
-		}
-		class := jsonString(t, ack, "class")
-		if class != "observer" {
-			t.Errorf("agents.report responder class = %q, want observer", class)
-		}
-	})
-
-	// === Subtest 7: §8.6 shutdown heartbeat ===
+	// === Subtest 4: §8.6 shutdown heartbeat ===
 	t.Run("Synadia §8.6 shutdown emits empty heartbeat", func(t *testing.T) {
 		// Subscribe to the heartbeat subject of imp2 BEFORE killing it.
 		// Then SIGTERM; wait for an empty-payload message.

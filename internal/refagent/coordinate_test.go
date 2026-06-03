@@ -1,6 +1,7 @@
 package refagent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync/atomic"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/danmestas/sesh/internal/agentmeta"
 	"github.com/danmestas/sesh/internal/coord"
 	"github.com/danmestas/sesh/internal/subject"
 )
@@ -74,19 +74,19 @@ func TestCoordinateLoop_PromptQueueGroup(t *testing.T) {
 	}
 }
 
-// TestCoordinateLoop_ObserverNeverReceivesPrompt asserts the spy-exclusion
-// contract: an observer-class agent subscribed via coordinateLoop receives
-// agents.report.* messages but NEVER agents.prompt.* messages, even when a
-// prompt is published to a subject that wildcards over the same machine/
-// project/session triple.
-func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
+// TestCoordinateLoop_SubscribesPromptRegardlessOfClass asserts the
+// post-scope-cut contract: class is no longer a routing input. An agent
+// with an arbitrary class value still QueueSubscribes the 5-token prompt
+// subject via coordinateLoop and receives a dispatch published to it —
+// there is no class-driven observer/report branch.
+func TestCoordinateLoop_SubscribesPromptRegardlessOfClass(t *testing.T) {
 	url := startBroker(t)
 	pid := testProjectID
 	t.Setenv("SESH_MACHINE", coord.MachineLocal)
 
 	cfg := Config{
 		Agent: "watcher", Owner: "alice", Session: "s1",
-		Role: "spy", Class: agentmeta.ClassObserver,
+		Role: "spy", Class: "observer", // arbitrary display tag; must NOT gate routing
 		Interval: 1 * time.Second,
 	}
 
@@ -98,51 +98,24 @@ func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
 	loopDone := make(chan error, 1)
 	go func() { loopDone <- coordinateLoop(ctx, nc, cfg, pid, "obs-inst-1") }()
 
-	// Give coordinateLoop a moment to install subscriptions.
+	// Give coordinateLoop a moment to install the subscription.
 	time.Sleep(50 * time.Millisecond)
 
 	pubNC := mustConnect(t, url)
 	defer pubNC.Close()
 	machine := coord.MachineLocal
 
-	// A prompt — observer must NOT receive.
+	// Publish a prompt to the 5-token subject as a request: coordinateLoop's
+	// handler responds with an ack when a reply inbox is set. Receiving the
+	// ack proves the loop subscribed to prompt despite class="observer".
 	promptSubj := fmt.Sprintf("agents.prompt.%s.%s.s1", machine, pid)
-	mustPublish(t, pubNC, promptSubj, []byte("dispatch"))
-
-	// A report — observer SHOULD receive (via the report wildcard).
-	reportSubj := fmt.Sprintf("agents.report.%s.%s.s1.workers.status", machine, pid)
-	mustPublish(t, pubNC, reportSubj, []byte("status update"))
-
-	// Subscribe via a sibling on the prompt subject to confirm the broker
-	// DID route the dispatch — without this we'd be testing "broker
-	// dropped the message" rather than "observer didn't receive it".
-	siblingHits := make(chan struct{}, 4)
-	ssub, err := pubNC.Subscribe(promptSubj, func(*nats.Msg) { siblingHits <- struct{}{} })
+	resp, err := pubNC.Request(promptSubj, []byte("dispatch"), 500*time.Millisecond)
 	if err != nil {
-		t.Fatalf("sibling subscribe: %v", err)
+		t.Fatalf("prompt request got no ack — class gated routing: %v", err)
 	}
-	defer ssub.Unsubscribe()
-	if err := pubNC.Flush(); err != nil {
-		t.Fatalf("flush sibling: %v", err)
+	if !bytes.Contains(resp.Data, []byte(`"verb":"prompt"`)) {
+		t.Errorf("ack = %q, want a prompt-verb ack", resp.Data)
 	}
-	mustPublish(t, pubNC, promptSubj, []byte("dispatch-2"))
-
-	select {
-	case <-siblingHits:
-		// good — broker routed the dispatch
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("sibling subscriber missed dispatch — broker wiring is broken, test inconclusive")
-	}
-
-	// Cancel and wait for loop to drain. The observer received the report
-	// (logged via slog inside the handler) but should NOT have received
-	// either dispatch. There's no direct hook to assert that from the
-	// loop's slog-only handler — but the subscription topology IS the
-	// assertion: coordinateLoop subscribed only to agents.report.>, so
-	// agents.prompt.* is structurally unreachable. The
-	// TestCoordinateLoop_PromptQueueGroup test above proves the 5-token
-	// prompt subject exists and is reachable when active subscribers
-	// wire it.
 
 	cancel()
 	select {
@@ -153,7 +126,6 @@ func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("coordinateLoop did not exit within 1s of ctx cancel")
 	}
-	_ = reportSubj // silence unused-var if test logic shifts
 }
 
 // ---- helpers ----
