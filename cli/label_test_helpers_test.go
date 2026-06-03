@@ -1,12 +1,64 @@
 package cli_test
 
-// Shared hostile-label inputs for the five tier-1 traversal tests:
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// fingerprintTree walks root and returns a deterministic string keyed on
+// (relative-path, mode-perm-bits, regular-file-content-hash). Used by the
+// up/down tier-1 traversal tests to assert hostile inputs never mutate the
+// .sesh/ tree. Errors during the walk are folded into the fingerprint as
+// `ERR:<path>:<msg>` lines so the diff is human-readable when the
+// assertion fails.
+func fingerprintTree(t *testing.T, root string) string {
+	t.Helper()
+	var lines []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			lines = append(lines, "ERR:"+path+":"+walkErr.Error())
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			lines = append(lines, "D:"+rel)
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			lines = append(lines, "ERR:"+rel+":"+infoErr.Error())
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			lines = append(lines, "S:"+rel+":"+info.Mode().String())
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			lines = append(lines, "ERR:"+rel+":"+readErr.Error())
+			return nil
+		}
+		sum := sha256.Sum256(data)
+		lines = append(lines, "F:"+rel+":"+info.Mode().Perm().String()+":"+hex.EncodeToString(sum[:]))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
+}
+
+// Shared hostile-label inputs for the tier-1 traversal tests:
 //
 //   - TestSeshUp_RejectsLabelTraversal
 //   - TestSeshDown_RejectsLabelTraversal
-//   - TestSeshWorktree_RejectsLabelTraversal
-//   - TestSeshMaterialize_RejectsLabelTraversal
-//   - TestSeshWorkerCwd_RejectsLabelTraversal
 //
 // validateLabel is the single safety gate every label-consuming entrypoint
 // funnels through; the same matrix MUST fail at every door. Keeping the

@@ -343,10 +343,10 @@ func (s *Starter) Start(parent context.Context) error {
 		return err
 	}
 	s.postHubBootstrap(ctx)
-	// Auto-add .sesh/ to the project's .gitignore so `sesh materialize`
-	// doesn't refuse-as-dirty over our own runtime state (#86). Idempotent;
-	// no-op outside a git repo. Logged + continued on any failure — seed
-	// shouldn't block on .gitignore wrangling.
+	// Auto-add .sesh/ to the project's .gitignore so our own runtime state
+	// doesn't show up as untracked content in the project worktree (#86).
+	// Idempotent; no-op outside a git repo. Logged + continued on any
+	// failure — seed shouldn't block on .gitignore wrangling.
 	if err := ensureSeshGitignored(s.cwd); err != nil {
 		slog.Warn("auto-gitignore of .sesh/ failed (continuing)", "err", err)
 	}

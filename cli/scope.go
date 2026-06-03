@@ -44,10 +44,9 @@ const (
 // for free.
 //
 // Defense-in-depth: see checkoutDir's doc for the rationale. The first
-// gate sits at operator entrypoints (up, down, worktree, materialize,
-// worker-cwd); this second gate exists so a future entrypoint cannot
-// silently re-introduce traversal by forgetting the entrypoint-level
-// check.
+// gate sits at operator entrypoints (up, down); this second gate exists
+// so a future entrypoint cannot silently re-introduce traversal by
+// forgetting the entrypoint-level check.
 func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
 	if err := validateLabel(session); err != nil {
 		return "", fmt.Errorf("invalid label %q: %w", session, err)
@@ -75,10 +74,11 @@ func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
 //     Scope field, OR sessions that don't have a JSON yet (e.g., the
 //     caller probing a label that's never been up).
 //
-// Closes the operator-UX gap from #84: sesh up --scope=project followed by
-// sesh worktree <label> (no flag) used to fail because worktree defaulted
-// to session-scope and looked at the wrong backing repo. With resolveScope,
-// the second command picks up the recorded scope from session state.
+// Closes the operator-UX gap from #84: a label-scoped command issued after
+// sesh up --scope=project (no flag of its own) used to fail because it
+// defaulted to session-scope and looked at the wrong backing repo. With
+// resolveScope, the later command picks up the recorded scope from session
+// state.
 //
 // validateLabel runs upstream of every caller. resolveScope trusts its
 // label input — it does not validate. (Path math against an unvalidated
