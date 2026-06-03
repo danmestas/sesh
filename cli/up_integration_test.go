@@ -19,18 +19,21 @@ import (
 )
 
 // TestUp_PopulatesSessionURLs is the topology pre-req: a running `sesh up`
-// must surface its NATS client URL and leafnode URL in the project state
-// file so sub-leaves and clients can attach without grepping logs.
+// (a NATS client of an EXTERNAL hub) must surface the resolved hub NATS URL
+// in the project state file so `sesh down` and clients can attach without
+// grepping logs.
 //
-// Builds the sesh binary into a tmpdir, isolates HOME and the project cwd,
-// spawns `sesh up`, polls for the JSON to gain URLs, TCP-dials both, then
-// SIGINTs and verifies the state file is reaped.
+// Stands up a real external nats-server, points `sesh up` at it via
+// SESH_HUB_URL, polls for the JSON to gain the URL, TCP-dials it, then
+// SIGINTs and verifies the state file is reaped. sesh no longer embeds a
+// hub, so there is no leaf URL / WebSocket URL / hub.nats.url to assert.
 func TestUp_PopulatesSessionURLs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test: builds binary + spawns subprocess")
 	}
 
 	bin := buildSesh(t)
+	hubURL := startExternalNATSServer(t)
 
 	home := t.TempDir()
 	project := t.TempDir()
@@ -38,7 +41,7 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 
 	cmd := exec.Command(bin, "up", "--session=alpha")
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "SESH_HUB_URL="+hubURL)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -57,30 +60,10 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	if state.PID != cmd.Process.Pid {
 		t.Errorf("state PID = %d, want %d", state.PID, cmd.Process.Pid)
 	}
+	if state.NATSURL != hubURL {
+		t.Errorf("state NATSURL = %q, want external hub URL %q", state.NATSURL, hubURL)
+	}
 	dial(t, state.NATSURL, "NATSURL")
-	dial(t, state.LeafURL, "LeafURL")
-
-	// nats_ws_url is the WebSocket endpoint for browser / CF Workers
-	// clients. WS is enabled by default; the field must be present and
-	// the underlying TCP socket dialable. (NATS-level WS pub/sub
-	// round-trip is covered by EdgeSync's hub package tests; sesh's
-	// job here is just to confirm the URL surfaces in the session JSON
-	// and the socket is bound end-to-end.)
-	if state.NATSWSURL == "" {
-		t.Fatal("nats_ws_url missing from session JSON (WS default-enabled)")
-	}
-	if !strings.HasPrefix(state.NATSWSURL, "ws://") {
-		t.Errorf("nats_ws_url = %q, want ws:// scheme", state.NATSWSURL)
-	}
-	dial(t, state.NATSWSURL, "NATSWSURL")
-
-	// hub.nats.url is the hub's client NATS URL — clients doing
-	// hub/project/workflow-scoped KV work connect here so their KV
-	// buckets live in the shared (hub) JetStream domain, not in a
-	// session's domain.
-	hubNATSURLPath := filepath.Join(home, ".sesh", "hub.nats.url")
-	hubNATSURL := readTrimmed(t, hubNATSURLPath)
-	dial(t, hubNATSURL, "hub.nats.url")
 
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("SIGINT: %v", err)
@@ -92,9 +75,6 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
 		t.Errorf("state file lingered after shutdown: %v", err)
 	}
-	// hub.nats.url is cleaned up by the hub process on its auto-shutdown
-	// (~500ms after sesh up exits), not by sesh up itself — same as
-	// hub.url. Not asserted here; race-prone.
 }
 
 // TestSeshUp_RejectsLabelTraversal is the tier-1 safety test for the
@@ -205,6 +185,7 @@ func TestUp_ChildHarnessExitTriggersShutdown(t *testing.T) {
 	}
 
 	bin := buildSesh(t)
+	hubURL := startExternalNATSServer(t)
 
 	home := t.TempDir()
 	project := t.TempDir()
@@ -214,7 +195,7 @@ func TestUp_ChildHarnessExitTriggersShutdown(t *testing.T) {
 	// Harness spawns quickly; its exit must unblock serve's select.
 	cmd := exec.Command(bin, "up", "--session=harness-child", "--exec=exit 0")
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "SESH_HUB_URL="+hubURL)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -269,6 +250,7 @@ func TestUp_SignalForwardingToHarnessPgid(t *testing.T) {
 	}
 
 	bin := buildSesh(t)
+	hubURL := startExternalNATSServer(t)
 
 	home := t.TempDir()
 	project := t.TempDir()
@@ -289,7 +271,7 @@ func TestUp_SignalForwardingToHarnessPgid(t *testing.T) {
 
 	cmd := exec.Command(bin, "up", "--session=signal-fwd-harness", "--exec="+childCmd)
 	cmd.Dir = project
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "SESH_HUB_URL="+hubURL)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -364,30 +346,14 @@ func TestUp_SignalForwardingToHarnessPgid(t *testing.T) {
 	}
 }
 
-// readTrimmed reads a file and trims trailing whitespace. The hub
-// writes its NATS URL with a trailing newline; clients trim before use.
-func readTrimmed(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	s := string(data)
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == ' ' || s[len(s)-1] == '\r' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
 // stateOnDisk mirrors cli.SessionState — keeping the integration test in
 // package cli_test (external) means we can't reference the unexported
-// claim helpers, but the JSON schema is the public contract.
+// claim helpers, but the JSON schema is the public contract. sesh is a
+// NATS client now, so the only published URL is the resolved external hub
+// NATS URL.
 type stateOnDisk struct {
-	PID       int    `json:"pid"`
-	NATSURL   string `json:"nats_url"`
-	NATSWSURL string `json:"nats_ws_url"`
-	LeafURL   string `json:"leaf_url"`
-	FossilURL string `json:"fossil_url"`
+	PID     int    `json:"pid"`
+	NATSURL string `json:"nats_url"`
 }
 
 func waitForURLs(t *testing.T, path string, timeout time.Duration) stateOnDisk {
@@ -398,14 +364,14 @@ func waitForURLs(t *testing.T, path string, timeout time.Duration) stateOnDisk {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			if err := json.Unmarshal(data, &last); err == nil {
-				if last.NATSURL != "" && last.LeafURL != "" {
+				if last.NATSURL != "" {
 					return last
 				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting for URLs in %s; last=%+v", path, last)
+	t.Fatalf("timeout waiting for URL in %s; last=%+v", path, last)
 	return last
 }
 

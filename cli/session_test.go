@@ -501,7 +501,7 @@ func TestLoadOrCreateProjectCode_PinsOnFirstCall(t *testing.T) {
 // backward-compat path: on a fresh dir (no .sesh/project-code), the function
 // seeds the file from deriveProjectCode(projectName) so existing projects
 // already running with that derived code stay subscribed to the same
-// EdgeSync sync subject after this change rolls out.
+// fossil sync subject after this change rolls out.
 func TestLoadOrCreateProjectCode_BackwardCompatSeedsFromHostname(t *testing.T) {
 	tmp := t.TempDir()
 

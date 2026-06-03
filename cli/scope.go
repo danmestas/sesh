@@ -1,11 +1,7 @@
 package cli
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 )
 
@@ -43,10 +39,9 @@ const (
 // future scope variant that does interpolate the label gets the gate
 // for free.
 //
-// Defense-in-depth: see checkoutDir's doc for the rationale. The first
-// gate sits at operator entrypoints (up, down); this second gate exists
-// so a future entrypoint cannot silently re-introduce traversal by
-// forgetting the entrypoint-level check.
+// Defense-in-depth: the first gate sits at operator entrypoints (up,
+// down); this second gate exists so a future entrypoint cannot silently
+// re-introduce traversal by forgetting the entrypoint-level check.
 func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
 	if err := validateLabel(session); err != nil {
 		return "", fmt.Errorf("invalid label %q: %w", session, err)
@@ -57,100 +52,13 @@ func repoPathFor(scope SeshScope, cwd, session string) (string, error) {
 	return filepath.Join(projectSeshDir(cwd), "sessions", session+".repo"), nil
 }
 
-// resolveScope returns the SeshScope a follow-on subcommand should use for
-// the given session label. The chosen scope is whichever of these wins,
-// in order of precedence:
+// storeDirFor returns the per-session JetStream store directory path. The
+// embedded NATS server is gone (sesh is a client now), so this path is
+// retained only as the historical per-session messaging location; the
+// validation gate matters more than the path today.
 //
-//  1. flagScope is non-empty — the operator passed --scope=... explicitly.
-//     We honor the override even if the session JSON disagrees (the
-//     operator may be probing a different scope's repo intentionally).
-//
-//  2. The session JSON at <cwd>/.sesh/sessions/<label>.json has a Scope
-//     field — this is the scope `sesh up --session=<label>` was brought
-//     up under, written by publishSession (#84). Newer sessions get this
-//     for free; the operator never needs to repeat --scope.
-//
-//  3. Default: ScopeSession. Backward-compat for session JSONs without a
-//     Scope field, OR sessions that don't have a JSON yet (e.g., the
-//     caller probing a label that's never been up).
-//
-// Closes the operator-UX gap from #84: a label-scoped command issued after
-// sesh up --scope=project (no flag of its own) used to fail because it
-// defaulted to session-scope and looked at the wrong backing repo. With
-// resolveScope, the later command picks up the recorded scope from session
-// state.
-//
-// validateLabel runs upstream of every caller. resolveScope trusts its
-// label input — it does not validate. (Path math against an unvalidated
-// label would be the bug class #66 closed.)
-func resolveScope(cwd, label, flagScope string) (SeshScope, error) {
-	if flagScope != "" {
-		if flagScope != string(ScopeSession) && flagScope != string(ScopeProject) {
-			return "", fmt.Errorf("invalid --scope %q (want %q or %q)", flagScope, ScopeSession, ScopeProject)
-		}
-		return SeshScope(flagScope), nil
-	}
-	statePath := filepath.Join(projectSeshDir(cwd), "sessions", label+".json")
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return ScopeSession, nil
-		}
-		return "", fmt.Errorf("read session state %s: %w", statePath, err)
-	}
-	var state SessionState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return "", fmt.Errorf("parse session state %s: %w", statePath, err)
-	}
-	if state.Scope == "" {
-		return ScopeSession, nil
-	}
-	if state.Scope != string(ScopeSession) && state.Scope != string(ScopeProject) {
-		return "", fmt.Errorf("session %s has invalid scope %q in state file", label, state.Scope)
-	}
-	return SeshScope(state.Scope), nil
-}
-
-// otherScopeRepoHint inspects the OTHER scope's backing repo and returns a
-// short hint string if it exists. The missing-repo error for one scope is
-// often the operator hitting the scope-drift gap pre-fix: they ran sesh up
-// with one scope, then a follow-on subcommand defaulted to the other.
-// Surfacing the hint lets the operator self-correct fast.
-//
-// Returns the empty string when the other scope's repo doesn't exist —
-// no hint to add. Errors silently degrade to no-hint; this is a UX
-// helper, not a load-bearing check.
-func otherScopeRepoHint(cwd string, current SeshScope) string {
-	var otherRepo string
-	var otherName SeshScope
-	if current == ScopeProject {
-		otherRepo = filepath.Join(projectSeshDir(cwd), "sessions")
-		otherName = ScopeSession
-		entries, err := os.ReadDir(otherRepo)
-		if err != nil {
-			return ""
-		}
-		for _, e := range entries {
-			if !e.IsDir() && filepath.Ext(e.Name()) == ".repo" {
-				return fmt.Sprintf("\n             note: %s/%s exists — did you mean --scope=%s?", otherRepo, e.Name(), otherName)
-			}
-		}
-		return ""
-	}
-	otherRepo = filepath.Join(projectSeshDir(cwd), "project.repo")
-	otherName = ScopeProject
-	if _, err := os.Stat(otherRepo); err == nil {
-		return fmt.Sprintf("\n             note: %s exists — did you mean --scope=%s?", otherRepo, otherName)
-	}
-	return ""
-}
-
-// storeDirFor returns the JetStream store directory for this session.
-// JetStream storage is always per-session even in project scope: each
-// sesh up runs its own embedded NATS server in its own process and
-// JetStream's on-disk layout cannot be shared across processes.
-//
-// Defense-in-depth: see checkoutDir's doc. Same gate, same rationale.
+// Defense-in-depth: same label-validation gate as repoPathFor, same
+// rationale.
 func storeDirFor(cwd, session string) (string, error) {
 	if err := validateLabel(session); err != nil {
 		return "", fmt.Errorf("invalid label %q: %w", session, err)

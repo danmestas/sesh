@@ -348,8 +348,9 @@ func renderTree(agents []MeshAgent) string {
 
 // MeshCmd is the kong-driven `sesh mesh` subcommand.
 //
-// All flags are optional. Defaults: connect via ReadHubInfo(stateDir),
-// format=table, no filters (show every agent the local hub knows about).
+// All flags are optional. Defaults: connect via resolveHubURL
+// ($SESH_HUB_URL / $NATS_URL), format=table, no filters (show every agent
+// the hub knows about).
 type MeshCmd struct {
 	NATSURL string `name:"nats-url" help:"NATS URL to query (overrides hub discovery)" env:"NATS_URL"`
 	Format  string `short:"o" help:"Output format: table | json | tree" default:"table" enum:"table,json,tree"`
@@ -378,15 +379,11 @@ func (cmd *MeshCmd) Run(ctx context.Context) error {
 
 	url := cmd.NATSURL
 	if url == "" {
-		stateDir, err := seshHome()
+		resolved, err := resolveHubURL()
 		if err != nil {
-			return fmt.Errorf("mesh: state dir: %w", err)
+			return fmt.Errorf("mesh: %w (or pass --nats-url)", err)
 		}
-		info, err := ReadHubInfo(stateDir)
-		if err != nil {
-			return fmt.Errorf("mesh: hub URL not found (run `sesh up` first or pass --nats-url): %w", err)
-		}
-		url = info.NATSURL
+		url = resolved
 	}
 
 	nc, err := nats.Connect(url,

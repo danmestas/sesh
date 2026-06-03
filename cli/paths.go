@@ -1,19 +1,14 @@
-// Package cli implements sesh's command-line surface: up, down, and hub serve.
+// Package cli implements sesh's command-line surface: up, down, mesh.
 //
-// Design captured during simple-brainstorm (2026-05-11):
+// sesh is a NATS CLIENT: `sesh up` resolves an external hub's NATS URL
+// (via $SESH_HUB_URL / $NATS_URL), connects, and spawns the agent harness.
+// It does not embed or spawn a hub.
 //
-//   - Hub lives at user level under ~/.sesh/. Auto-lifecycle: spawned by the
-//     first `sesh up` when no hub is running, exits when the last leaf
-//     disconnects (unless --keepalive).
 //   - Project state at <cwd>/.sesh/sessions/<label>.json — git-style hidden
-//     dir, ships with the project. JSON for future metadata; PID-only today.
-//   - Connection-state on the hub IS the registry — no explicit register
-//     protocol, no JetStream KV, no TTL, no renewer.
-//   - Hub discovery: ~/.sesh/hub.url written O_EXCL by hub at bind, read by
-//     sesh up at startup. Race-resolution = O_EXCL (one writer wins). Stale
-//     URL handled by "try connect → fail → remove → respawn."
-//   - Local lockfile is replaced by O_EXCL on the project state file itself.
-//     Same fast-fail behavior, one fewer file.
+//     dir, ships with the project. Carries the owning PID + the resolved
+//     hub NATS URL so `sesh down` and clients can reach the session.
+//   - The session state file IS the claim: O_EXCL create gives one owner
+//     per label with fast-fail semantics, no separate lockfile.
 package cli
 
 import (
@@ -98,95 +93,6 @@ func seshHome() (string, error) {
 	return dir, nil
 }
 
-// Hub-state path helpers. All take the hub's stateDir (typically the
-// result of seshHome()) and return a fully-qualified path. Centralizing
-// every hub-state filename here makes "what files does sesh own under
-// ~/.sesh/" answerable by reading one file; the alternative — inline
-// filepath.Join calls — left the filenames scattered across hubinfo,
-// hubguard, hub_serve, and up.
-
-// hubRepoPath returns <stateDir>/hub.repo — the hub's libfossil repo file.
-func hubRepoPath(stateDir string) string {
-	return filepath.Join(stateDir, "hub.repo")
-}
-
-// checkoutDir returns <cwd>/.sesh/checkouts/<label> — the materialized
-// fossil working directory for a worker (or operator) bound to the
-// session-or-project repo identified by <label>. The label is the same
-// disambiguator used by .sesh/sessions/<label>.repo (and by the worker's
-// orch-spawned session identity), so .sesh/sessions/<label>.repo and
-// .sesh/checkouts/<label>/ form a 1:1 pair under --scope=session. Under
-// --scope=project, all checkouts share the single .sesh/project.repo
-// repo file but keep distinct working dirs keyed on <label>.
-//
-// Tier-1 safety: .sesh/checkouts/<label>/ is the ONLY path under .sesh/
-// that checkout-provisioning code is permitted to remove. Adjacent
-// trees — .sesh/sessions/, .sesh/messaging/ — are never touched.
-//
-// Defense-in-depth: the label is re-validated here even though every
-// operator entrypoint already validates at the top of Run(). The first
-// gate is the primary defense; this second gate exists so a future
-// entrypoint (or refactor that inlines path math) cannot silently
-// re-introduce path traversal by forgetting the entrypoint-level check.
-// The cost is a sub-microsecond regex; the consequence of a missed gate
-// is the entire .sesh/ tier-1 safety boundary.
-func checkoutDir(cwd, label string) (string, error) {
-	if err := validateLabel(label); err != nil {
-		return "", fmt.Errorf("invalid label %q: %w", label, err)
-	}
-	return filepath.Join(projectSeshDir(cwd), "checkouts", label), nil
-}
-
-// checkoutMarkerPath returns the absolute path to the .fslckout marker
-// file libfossil writes inside a materialized checkout. Stat-ing this
-// file is the cheapest way to ask "does this directory contain a live
-// fossil checkout?" without opening the SQLite DB. On Windows the
-// equivalent marker is _FOSSIL_ — sesh is POSIX-only today so the
-// fixed-name check is fine; the helper centralizes the assumption so
-// the inevitable Windows port has a single call site to fix.
-func checkoutMarkerPath(checkoutDir string) string {
-	return filepath.Join(checkoutDir, ".fslckout")
-}
-
-// hubURLPath returns <stateDir>/hub.url — the daemon's leafnode URL,
-// owned O_EXCL by HubGuard's daemon lease.
-func hubURLPath(stateDir string) string {
-	return filepath.Join(stateDir, "hub.url")
-}
-
-// hubNATSURLPath returns <stateDir>/hub.nats.url — the hub's NATS client
-// URL, written via WriteHubInfo's temp-then-rename.
-func hubNATSURLPath(stateDir string) string {
-	return filepath.Join(stateDir, "hub.nats.url")
-}
-
-// hubFossilURLPath returns <stateDir>/hub.fossil.url — the hub's Fossil
-// HTTP xfer endpoint, written via WriteHubInfo's temp-then-rename.
-func hubFossilURLPath(stateDir string) string {
-	return filepath.Join(stateDir, "hub.fossil.url")
-}
-
-// hubSpawnLockPath returns <stateDir>/hub.spawn.lock — the flock target
-// that serializes concurrent `sesh up` invocations so only one ever
-// fork-execs a hub. The file content is irrelevant; flock semantics
-// operate on the inode.
-func hubSpawnLockPath(stateDir string) string {
-	return filepath.Join(stateDir, "hub.spawn.lock")
-}
-
-// hubLogPath returns <stateDir>/hub.log — where the auto-spawned hub's
-// stderr goes for debugging.
-func hubLogPath(stateDir string) string {
-	return filepath.Join(stateDir, "hub.log")
-}
-
-// hubStoreDir returns <stateDir>/messaging — the hub daemon's JetStream
-// store directory. Session JetStream stores live elsewhere
-// (see scope.storeDirFor); this one is the shared user-wide hub store.
-func hubStoreDir(stateDir string) string {
-	return filepath.Join(stateDir, "messaging")
-}
-
 // deriveProjectCode produces a deterministic 40-char lowercase hex
 // project-code from (hostname, projectName). Used only as a SEED for
 // loadOrCreateProjectCode on the first sesh up in a project — the
@@ -265,8 +171,8 @@ func loadOrCreateProjectCode(cwd, projectName string) (string, error) {
 // project-code from ReadHubProjectCode). If hubCode is empty (no hub
 // content yet) or already agrees with localCode, returns localCode
 // untouched. Otherwise the hub wins: ResolveProjectCode rewrites the
-// pin to match hubCode and returns hubCode so EdgeSync's
-// SeedFromUpstream sees agreement on both sides of the clone.
+// pin to match hubCode and returns hubCode so both sides of a
+// fossil clone agree on the project-code.
 //
 // Idempotent: a second call with the same args is a no-op. A missing
 // or unreadable local file is treated the same as "current value is
