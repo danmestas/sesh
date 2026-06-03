@@ -12,10 +12,10 @@ import (
 	"github.com/nats-io/nats.go/micro"
 )
 
-// registerCleanOpts describes a synthetic v0.4 agent: machine-rooted clean
-// prompt subject (agents.prompt.<machine>.<project>.<session>.<role>) plus
-// the metadata adapters now advertise (agent, owner, machine, project_id,
-// session, role, capabilities).
+// registerCleanOpts describes a synthetic v0.4 agent: machine-rooted
+// prompt subject (agents.prompt.<machine>.<project>.<session>) plus the
+// metadata adapters now advertise (agent, owner, machine, project_id,
+// session, role, capabilities). Role lives in metadata, not the subject.
 type registerCleanOpts struct {
 	agent    string
 	owner    string
@@ -34,7 +34,7 @@ type registerCleanOpts struct {
 // publishes. Returns the live service (stopped on test cleanup).
 func registerTestAgentClean(t *testing.T, nc *nats.Conn, o registerCleanOpts) micro.Service {
 	t.Helper()
-	subj := "agents.prompt." + o.machine + "." + o.project + "." + o.session + "." + o.role
+	subj := "agents.prompt." + o.machine + "." + o.project + "." + o.session
 	meta := map[string]string{
 		"agent":      o.agent,
 		"owner":      o.owner,
@@ -114,7 +114,7 @@ func TestQueryMesh_PopulatesProtocolFields(t *testing.T) {
 	_, url := startTestNATSServer(t)
 	nc, _ := nats.Connect(url)
 	defer nc.Close()
-	// Clean v0.4 subject: agents.prompt.<machine>.<project>.<session>.<role>.
+	// Clean v0.4 subject: agents.prompt.<machine>.<project>.<session>.
 	registerTestAgentClean(t, nc, registerCleanOpts{
 		agent: "claude-code", owner: "dmestas",
 		machine: "m4-host", project: "sesh", session: "alpha", role: "worker",
@@ -149,8 +149,8 @@ func TestQueryMesh_PopulatesProtocolFields(t *testing.T) {
 	if a.InstanceID == "" {
 		t.Errorf("InstanceID empty; want non-empty")
 	}
-	if a.Subject != "agents.prompt.m4-host.sesh.alpha.worker" {
-		t.Errorf("Subject=%q, want agents.prompt.m4-host.sesh.alpha.worker", a.Subject)
+	if a.Subject != "agents.prompt.m4-host.sesh.alpha" {
+		t.Errorf("Subject=%q, want agents.prompt.m4-host.sesh.alpha", a.Subject)
 	}
 }
 

@@ -407,7 +407,7 @@ func TestAgentRef_JSONShapeIncludesRoleAndClass(t *testing.T) {
 		Agent:      "claude-code",
 		Owner:      "dmestas",
 		InstanceID: "ABC123",
-		Subject:    "agents.prompt.m4-host.sesh.foo.implementer",
+		Subject:    "agents.prompt.m4-host.sesh.foo",
 		Role:       "implementer",
 		Class:      "active",
 	}
@@ -419,7 +419,7 @@ func TestAgentRef_JSONShapeIncludesRoleAndClass(t *testing.T) {
 		`"agent":"claude-code"`,
 		`"owner":"dmestas"`,
 		`"instance_id":"ABC123"`,
-		`"subject":"agents.prompt.m4-host.sesh.foo.implementer"`,
+		`"subject":"agents.prompt.m4-host.sesh.foo"`,
 		`"role":"implementer"`,
 		`"class":"active"`,
 	}
@@ -453,7 +453,7 @@ func TestSessionJSON_RoleAndClassRoundTrip(t *testing.T) {
 			Agent:      "claude-code",
 			Owner:      "dmestas",
 			InstanceID: "ABC",
-			Subject:    "agents.prompt.m4-host.sesh.rc.implementer",
+			Subject:    "agents.prompt.m4-host.sesh.rc",
 			Role:       "implementer",
 			Class:      "active",
 		},
@@ -461,7 +461,7 @@ func TestSessionJSON_RoleAndClassRoundTrip(t *testing.T) {
 			Agent:      "pi",
 			Owner:      "dmestas",
 			InstanceID: "XYZ",
-			Subject:    "agents.prompt.m4-host.sesh.rc.spy",
+			Subject:    "agents.prompt.m4-host.sesh.rc",
 			Role:       "spy",
 			Class:      "observer",
 		},
@@ -635,7 +635,7 @@ func TestAgentRef_JSONOmitsEmptyRoleAndClass(t *testing.T) {
 		Agent:      "claude-code",
 		Owner:      "dmestas",
 		InstanceID: "ABC123",
-		Subject:    "agents.prompt.m4-host.sesh.foo.worker",
+		Subject:    "agents.prompt.m4-host.sesh.foo",
 	}
 	b, _ := json.Marshal(ref)
 	got := string(b)

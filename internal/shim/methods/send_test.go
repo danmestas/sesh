@@ -3,21 +3,15 @@ package methods
 import (
 	"bytes"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/nats-io/nats.go/micro"
 
 	"github.com/danmestas/sesh-ops/messages"
 	"github.com/danmestas/sesh-ops/scope"
-
-	"github.com/danmestas/sesh/internal/shim/card"
-	"github.com/danmestas/sesh/internal/subject"
 )
 
 func TestSendMessage_NewTask(t *testing.T) {
@@ -95,8 +89,8 @@ func TestSendMessage_NewTask(t *testing.T) {
 	// Confirm publish.
 	select {
 	case m := <-got:
-		if !strings.HasPrefix(m.Subject, "agents.prompt.test-machine.abc123.abc123.test-agent") {
-			t.Errorf("publish subject = %q", m.Subject)
+		if m.Subject != "agents.prompt.test-machine.abc123.abc123" {
+			t.Errorf("publish subject = %q, want %q", m.Subject, "agents.prompt.test-machine.abc123.abc123")
 		}
 		if !bytes.Contains(m.Data, []byte(`"messageId":"M1"`)) {
 			t.Errorf("publish payload missing messageId: %s", m.Data)
@@ -298,14 +292,13 @@ func TestSendMessage_InvalidParams(t *testing.T) {
 
 // TestSendMessage_DottedScopeID_PublishesPrompt covers sesh#121 +
 // sesh#124: a session-scoped shim has ScopeID = "<project>.<session>".
-// The clean v0.4 prompt subject grammar is
-// `agents.prompt.<machine>.<project>.<session>.<role>`, with
-// project and session as SEPARATE tokens — adapters subscribe with
-// SESH_PROJECT / SESH_SESSION split, not a collapsed single token.
-// publishPrompt must split the scope-id on '.' so both sides
-// converge on the same subject. Regression guard: the pre-#124 code
-// collapsed project=session=ScopeID (sanitized "acme_demo.acme_demo")
-// and the adapter starved.
+// The prompt subject grammar is
+// `agents.prompt.<machine>.<project>.<session>`, with project and
+// session as SEPARATE tokens — adapters subscribe with SESH_PROJECT /
+// SESH_SESSION split, not a collapsed single token. publishPrompt must
+// split the scope-id on '.' so both sides converge on the same subject.
+// Regression guard: the pre-#124 code collapsed project=session=ScopeID
+// (sanitized "acme_demo.acme_demo") and the adapter starved.
 func TestSendMessage_DottedScopeID_PublishesPrompt(t *testing.T) {
 	deps, nc, _ := testDeps(t)
 	deps.ScopeKind = "session"
@@ -315,7 +308,7 @@ func TestSendMessage_DottedScopeID_PublishesPrompt(t *testing.T) {
 	defer cancel()
 
 	// Subscribe to the exact split-token subject we expect.
-	wantSubj := "agents.prompt.test-machine.acme.demo.test-agent"
+	wantSubj := "agents.prompt.test-machine.acme.demo"
 	got := make(chan *nats.Msg, 1)
 	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
 		select {
@@ -343,161 +336,6 @@ func TestSendMessage_DottedScopeID_PublishesPrompt(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Errorf("no publish on split subject %q (sesh#124 regression — project/session must be split tokens, not collapsed)", wantSubj)
-	}
-}
-
-// TestSendMessage_RoleTokenFromDiscovery covers the sesh#124 matches()
-// overload + role-derivation fix end to end. Mirrors the sesh-channels
-// integration rig: shim has --agent=demo (an abbreviated subject token,
-// per the rig's entrypoint), the adapter advertises
-// metadata.agent="demo" AND metadata.role="worker-discovered"
-// (subject token). Two things must hold:
-//
-//  1. The composer's matches() must accept the loose form —
-//     key.Agent="demo" matches metadata.agent="demo" even when the role
-//     metadata is a distinct token. Without the loose match, discover()
-//     returns no match and the role falls back to --agent verbatim
-//     (which happens to work in the rig because --agent IS the token,
-//     but masks the real flow).
-//
-//  2. publishPrompt must build the subject from the DISCOVERED role
-//     token (metadata.role), not the operator's --agent flag — so a
-//     real production deployment with --agent="claude-code" and a
-//     distinct metadata.role routes to the right adapter subscription.
-//
-// To assert #2 cleanly, the test uses metadata.role="worker-discovered"
-// (deliberately distinct from key.Agent="demo") and asserts the publish
-// lands on the worker-discovered subject. The loose match holds because
-// metadata.agent="demo" equals key.Agent, AND the discovered role is the
-// distinct token, proving the publish uses discovery not --agent.
-func TestSendMessage_RoleTokenFromDiscovery(t *testing.T) {
-	deps, nc, _ := testDeps(t)
-	deps.AgentKey = card.AgentKey{Agent: "demo", Owner: "integ", Name: "demo"}
-	deps.ScopeKind = "session"
-	deps.ScopeID = "integ.demo"
-
-	// Stub adapter $SRV.INFO: agent matches key (so discover() finds it)
-	// but metadata.role is a deliberately distinct token so we can prove
-	// the publish subject came from discovery, not --agent.
-	svc, err := micro.AddService(nc, micro.Config{
-		Name:        "agents",
-		Version:     "0.0.0",
-		Description: "stub adapter for role-discovery test",
-		Metadata: map[string]string{
-			"agent": "demo",
-			"owner": "integ",
-			"role":  "worker-discovered",
-		},
-	})
-	if err != nil {
-		t.Fatalf("add stub service: %v", err)
-	}
-	defer func() { _ = svc.Stop() }()
-
-	// Wire the composer the dispatcher will discover through. Its Coord
-	// matches deps.Machine + the split of deps.ScopeID (Slice 3C); these
-	// tests assert only the prompt subject, so the card binding is
-	// incidental here.
-	project, session := SplitScopeIDForSubject(deps.ScopeID)
-	composer := card.NewComposer(nc, subject.Coord{Machine: deps.Machine, Project: project, Session: session}, card.L1Defaults{
-		GatewayURL: "https://shim.example/a2a",
-	}, 750*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	deps.Composer = composer
-
-	disp := NewDispatcher(deps)
-	ctx, cancel := mustCtx(t)
-	defer cancel()
-
-	wantSubj := "agents.prompt.test-machine.integ.demo.worker-discovered"
-	got := make(chan *nats.Msg, 1)
-	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
-		select {
-		case got <- m:
-		default:
-		}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sub.Unsubscribe()
-
-	params := json.RawMessage(`{"message":{"messageId":"M-ROLE","role":"ROLE_USER","parts":[{"text":"x"}]}}`)
-	if _, jerr := disp.sendMessage(ctx, params); jerr != nil {
-		t.Fatalf("sendMessage: %+v", jerr)
-	}
-
-	select {
-	case m := <-got:
-		if m.Subject != wantSubj {
-			t.Errorf("publish subject = %q, want %q", m.Subject, wantSubj)
-		}
-	case <-time.After(2 * time.Second):
-		t.Errorf("no publish on discovered-role subject %q (sesh#124 — role token should come from $SRV.INFO metadata.role)", wantSubj)
-	}
-}
-
-// TestSendMessage_LooseMatch_AbbreviatedAgent covers the composer's
-// matches() loosening directly: shim --agent=worker with adapter
-// metadata.agent="claude-code", metadata.role="worker". Pre-#124 the
-// strict canonical-only check rejected this pairing and discover()
-// returned no match, starving both L3 card fetch and prompt routing.
-func TestSendMessage_LooseMatch_AbbreviatedAgent(t *testing.T) {
-	deps, nc, _ := testDeps(t)
-	deps.AgentKey = card.AgentKey{Agent: "worker", Owner: "integ", Name: "worker"}
-	deps.ScopeKind = "session"
-	deps.ScopeID = "integ.demo"
-
-	// Rig-style: canonical agent + abbreviated role (the rig sets
-	// SESH_ROLE=AGENT_TOKEN so metadata.role ends up the short token).
-	svc, err := micro.AddService(nc, micro.Config{
-		Name:    "agents",
-		Version: "0.0.0",
-		Metadata: map[string]string{
-			"agent": "claude-code",
-			"owner": "integ",
-			"role":  "worker",
-		},
-	})
-	if err != nil {
-		t.Fatalf("add stub service: %v", err)
-	}
-	defer func() { _ = svc.Stop() }()
-
-	project, session := SplitScopeIDForSubject(deps.ScopeID)
-	composer := card.NewComposer(nc, subject.Coord{Machine: deps.Machine, Project: project, Session: session}, card.L1Defaults{
-		GatewayURL: "https://shim.example/a2a",
-	}, 750*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	deps.Composer = composer
-
-	disp := NewDispatcher(deps)
-	ctx, cancel := mustCtx(t)
-	defer cancel()
-
-	wantSubj := "agents.prompt.test-machine.integ.demo.worker"
-	got := make(chan *nats.Msg, 1)
-	sub, err := nc.Subscribe(wantSubj, func(m *nats.Msg) {
-		select {
-		case got <- m:
-		default:
-		}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sub.Unsubscribe()
-
-	params := json.RawMessage(`{"message":{"messageId":"M-RIG","role":"ROLE_USER","parts":[{"text":"x"}]}}`)
-	if _, jerr := disp.sendMessage(ctx, params); jerr != nil {
-		t.Fatalf("sendMessage: %+v", jerr)
-	}
-
-	select {
-	case m := <-got:
-		if m.Subject != wantSubj {
-			t.Errorf("publish subject = %q, want %q", m.Subject, wantSubj)
-		}
-	case <-time.After(2 * time.Second):
-		t.Errorf("no publish on rig subject %q (sesh#124 — abbreviated --agent should match metadata.role)", wantSubj)
 	}
 }
 
@@ -567,19 +405,21 @@ func TestSendMessage_PublishedRoleIsTranslated(t *testing.T) {
 	}
 }
 
-// TestSendMessage_PublishNoOp_WhenAgentEmpty verifies that when no
-// agent token is configured (so publishPrompt early-returns), the
-// SendMessage path still completes successfully — i.e., the publish
-// is fire-and-forget and never gates the JSON-RPC response.
-func TestSendMessage_PublishNoOp_WhenAgentEmpty(t *testing.T) {
+// TestSendMessage_PublishIsFireAndForget verifies that the prompt
+// publish never gates the JSON-RPC response: SendMessage completes
+// successfully even with no agent token configured (the prompt subject
+// no longer carries a role token, so an empty agent does not affect the
+// 5-token publish — and a publish failure is logged and swallowed, the
+// KV write being authoritative).
+func TestSendMessage_PublishIsFireAndForget(t *testing.T) {
 	deps, _, _ := testDeps(t)
-	deps.AgentKey.Agent = "" // force publishPrompt to return early
+	deps.AgentKey.Agent = ""
 	disp := NewDispatcher(deps)
 	ctx, cancel := mustCtx(t)
 	defer cancel()
 	params := json.RawMessage(`{"message":{"messageId":"M-NOPUB","role":"ROLE_USER","parts":[{"text":"x"}]}}`)
 	if _, jerr := disp.sendMessage(ctx, params); jerr != nil {
-		t.Fatalf("sendMessage should succeed even with publish no-op: %+v", jerr)
+		t.Fatalf("sendMessage should succeed regardless of publish outcome: %+v", jerr)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/danmestas/sesh/internal/agentmeta"
 	"github.com/danmestas/sesh/internal/coord"
+	"github.com/danmestas/sesh/internal/subject"
 )
 
 // testProjectID is the injected pinned 40-hex routing key used across the
@@ -19,93 +20,57 @@ import (
 // value directly rather than seeding a .sesh/project-id pin on disk.
 const testProjectID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-// TestCoordinateLoop_TierRouting is the load-bearing test: each tier
-// (5-token orch front door, 6-token role pool with queue group, 7-token
-// direct address) reaches the expected subscriber and ONLY that subscriber.
-//
-// All three tiers run against the same in-process broker; the queue-group
-// property (one delivery for the 6-token pool subject across two same-role
-// workers) and the direct-address property (only the named worker
-// receives) are both verified.
-func TestCoordinateLoop_TierRouting(t *testing.T) {
+// TestCoordinateLoop_PromptQueueGroup is the load-bearing test for the
+// collapsed scheme: active agents subscribe to the SINGLE 5-token prompt
+// subject under the fixed PromptQueueGroup. A prompt published to that
+// subject is delivered to exactly one of two same-session subscribers
+// (work-stealing) — the queue group is what preserves single-delivery,
+// now that the role-pool and direct-instance tiers are gone.
+func TestCoordinateLoop_PromptQueueGroup(t *testing.T) {
 	url := startBroker(t)
 	pid := testProjectID
 	t.Setenv("SESH_MACHINE", coord.MachineLocal)
 	machine := coord.MachineLocal
 	session := "s1"
 
-	// --- Wire three subscribers directly (not via coordinateLoop) so the
-	// test exercises the exact subject shapes coordinateLoop produces and
-	// can assert per-subscriber receive counts. coordinateLoop's own
+	// --- Wire two subscribers directly (not via coordinateLoop) so the
+	// test exercises the exact subject + queue group coordinateLoop
+	// produces and can assert delivery counts. coordinateLoop's own
 	// integration is covered by TestRun_CoordinateLoopAttaches below.
 
 	nc := mustConnect(t, url)
 	defer nc.Close()
 
-	// Orch on 5-token front door.
-	orchHits := make(chan string, 4)
-	orchSubj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, session)
-	orchSub, err := nc.Subscribe(orchSubj, func(m *nats.Msg) { orchHits <- m.Subject })
-	if err != nil {
-		t.Fatalf("subscribe orch %s: %v", orchSubj, err)
-	}
-	defer orchSub.Unsubscribe()
+	promptSubj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, session)
 
-	// Two implementer workers on 6-token role pool (queue group = role).
-	var pool1, pool2 atomic.Int32
-	poolSubj := fmt.Sprintf("agents.prompt.%s.%s.%s.implementer", machine, pid, session)
-	psub1, err := nc.QueueSubscribe(poolSubj, "implementer", func(*nats.Msg) { pool1.Add(1) })
+	// Two active agents on the same 5-token subject, same queue group.
+	var hits1, hits2 atomic.Int32
+	qsub1, err := nc.QueueSubscribe(promptSubj, subject.PromptQueueGroup, func(*nats.Msg) { hits1.Add(1) })
 	if err != nil {
-		t.Fatalf("queue subscribe pool 1: %v", err)
+		t.Fatalf("queue subscribe 1: %v", err)
 	}
-	defer psub1.Unsubscribe()
-	psub2, err := nc.QueueSubscribe(poolSubj, "implementer", func(*nats.Msg) { pool2.Add(1) })
+	defer qsub1.Unsubscribe()
+	qsub2, err := nc.QueueSubscribe(promptSubj, subject.PromptQueueGroup, func(*nats.Msg) { hits2.Add(1) })
 	if err != nil {
-		t.Fatalf("queue subscribe pool 2: %v", err)
+		t.Fatalf("queue subscribe 2: %v", err)
 	}
-	defer psub2.Unsubscribe()
-
-	// One direct worker on 7-token.
-	const workerID = "VMKS6MHK71PCPWGY38A7N5"
-	var directHits atomic.Int32
-	directSubj := fmt.Sprintf("agents.prompt.%s.%s.%s.implementer.%s", machine, pid, session, workerID)
-	dsub, err := nc.Subscribe(directSubj, func(*nats.Msg) { directHits.Add(1) })
-	if err != nil {
-		t.Fatalf("subscribe direct: %v", err)
-	}
-	defer dsub.Unsubscribe()
+	defer qsub2.Unsubscribe()
 
 	if err := nc.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
-	// Publish to 5-token: only orch receives.
+	// Publish one prompt to the 5-token subject.
 	pubNC := mustConnect(t, url)
 	defer pubNC.Close()
-	mustPublish(t, pubNC, orchSubj, []byte("to-orch"))
-
-	// Publish to 6-token: queue group routes to exactly one pool worker.
-	mustPublish(t, pubNC, poolSubj, []byte("to-pool"))
-
-	// Publish to 7-token: only the direct worker receives.
-	mustPublish(t, pubNC, directSubj, []byte("to-direct"))
+	mustPublish(t, pubNC, promptSubj, []byte("to-session"))
 
 	// Give the broker a beat to deliver.
 	time.Sleep(150 * time.Millisecond)
 
-	// Orch: exactly one message on 5-token.
-	if got := drainStr(orchHits); len(got) != 1 || got[0] != orchSubj {
-		t.Errorf("orch hits = %v, want [%s]", got, orchSubj)
-	}
-
-	// Pool: exactly one of the two workers received (queue group).
-	if got := pool1.Load() + pool2.Load(); got != 1 {
-		t.Errorf("pool queue-group hits = %d, want 1 (work-stealing)", got)
-	}
-
-	// Direct: exactly one delivery to the named worker.
-	if got := directHits.Load(); got != 1 {
-		t.Errorf("direct hits = %d, want 1", got)
+	// Queue group: exactly one of the two subscribers received.
+	if got := hits1.Load() + hits2.Load(); got != 1 {
+		t.Errorf("queue-group hits = %d, want 1 (work-stealing)", got)
 	}
 }
 
@@ -141,7 +106,7 @@ func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
 	machine := coord.MachineLocal
 
 	// A prompt — observer must NOT receive.
-	promptSubj := fmt.Sprintf("agents.prompt.%s.%s.s1.implementer.w1", machine, pid)
+	promptSubj := fmt.Sprintf("agents.prompt.%s.%s.s1", machine, pid)
 	mustPublish(t, pubNC, promptSubj, []byte("dispatch"))
 
 	// A report — observer SHOULD receive (via the report wildcard).
@@ -174,9 +139,10 @@ func TestCoordinateLoop_ObserverNeverReceivesPrompt(t *testing.T) {
 	// either dispatch. There's no direct hook to assert that from the
 	// loop's slog-only handler — but the subscription topology IS the
 	// assertion: coordinateLoop subscribed only to agents.report.>, so
-	// agents.prompt.* is structurally unreachable. The TestCoordinateLoop_
-	// TierRouting test above proves the prompt subjects exist as a
-	// reachable tier when active subscribers wire them.
+	// agents.prompt.* is structurally unreachable. The
+	// TestCoordinateLoop_PromptQueueGroup test above proves the 5-token
+	// prompt subject exists and is reachable when active subscribers
+	// wire it.
 
 	cancel()
 	select {
@@ -208,17 +174,5 @@ func mustPublish(t *testing.T, nc *nats.Conn, subj string, data []byte) {
 	}
 	if err := nc.Flush(); err != nil {
 		t.Fatalf("flush after publish: %v", err)
-	}
-}
-
-func drainStr(ch <-chan string) []string {
-	var out []string
-	for {
-		select {
-		case s := <-ch:
-			out = append(out, s)
-		default:
-			return out
-		}
 	}
 }

@@ -2,19 +2,19 @@
 
 package cli_test
 
-// End-to-end verification of the coordination tier model from
-// docs/synadia-agents-on-sesh.md §8.1. Spawns a real `sesh up` session,
-// launches four real `sesh-ref-agent` processes (orch + two implementer
-// workers + one observer spy), then drives the full stack through real
-// NATS publish/subscribe to verify:
+// End-to-end verification of the collapsed coordination model. Spawns a
+// real `sesh up` session, launches four real `sesh-ref-agent` processes
+// (orch + two implementer workers + one observer spy), then drives the
+// full stack through real NATS publish/subscribe to verify:
 //
 //  - All four agents register on $SRV.INFO.agents with role + class metadata.
 //  - Heartbeats on agents.hb.* carry the role/class sesh-extension fields.
-//  - Tier routing on agents.prompt.*:
-//      5-token publish → only orch receives
-//      6-token publish (queue group on role) → exactly one of two
-//          implementers receives (work-stealing)
-//      7-token direct address → only the named instance_id receives
+//  - Prompt routing on the single 5-token subject
+//    agents.prompt.<machine>.<project>.<session>:
+//      every active agent QueueSubscribes it under the fixed prompt queue
+//      group, so a publish reaches EXACTLY ONE active agent (work-stealing
+//      across orch + the two implementers); the role no longer selects a
+//      subject tier.
 //  - Spy exclusion: observer-class agent does NOT receive any
 //    agents.prompt.* dispatch; DOES receive agents.report.* messages.
 //  - Synadia §8.6 shutdown heartbeat: on graceful SIGTERM, the dying
@@ -84,8 +84,9 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 	machine := "_local" // refagent's coord.Machine() with no SESH_MACHINE set
 
 	// Spawn four agents. Each gets the same NATS URL + project + session
-	// but distinct role/class via env. The orch agent gets role=orch (the
-	// reserved role that subscribes to the 5-token front door).
+	// but distinct role/class via env. Role no longer selects a prompt
+	// subject tier — all three active agents subscribe to the same 5-token
+	// prompt subject under the shared queue group.
 	type agentSpec struct {
 		agent string
 		role  string
@@ -169,70 +170,75 @@ func TestE2E_CoordTiers_FullStack(t *testing.T) {
 		}
 	})
 
-	// === Subtest 2: 5-token publish reaches ONLY the orch ===
-	t.Run("5-token tier reaches only orch", func(t *testing.T) {
+	// === Subtest 2: a 5-token publish reaches exactly one active agent ===
+	t.Run("5-token prompt reaches one active agent", func(t *testing.T) {
 		subj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, sessionLabel)
-		ack := mustRequest(t, nc, subj, []byte("front-door"), 2*time.Second)
+		ack := mustRequest(t, nc, subj, []byte("dispatch"), 2*time.Second)
+		// Any of the three active agents may answer (queue group); the spy
+		// (observer) must never answer.
 		role := jsonString(t, ack, "role")
-		if role != "orch" {
-			t.Errorf("5-token responder role = %q, want orch", role)
+		class := jsonString(t, ack, "class")
+		if class != "active" {
+			t.Errorf("5-token responder class = %q, want active", class)
+		}
+		switch role {
+		case "orch", "implementer":
+			// expected — one active agent answered
+		default:
+			t.Errorf("5-token responder role = %q, want orch or implementer", role)
 		}
 	})
 
-	// === Subtest 3: 6-token publish goes to ONE implementer (queue group) ===
-	t.Run("6-token tier work-stealing on queue group", func(t *testing.T) {
-		subj := fmt.Sprintf("agents.prompt.%s.%s.%s.implementer", machine, pid, sessionLabel)
-		// Publish 20 messages; each should reach exactly one of the two
-		// implementers (queue group on role). Distribution doesn't have to
-		// be exactly 10/10 — NATS picks a queue subscriber per-message and
-		// fairness over small N is loose. The load-bearing properties are:
+	// === Subtest 3: fan-out on the 5-token subject work-steals across the
+	// active agents via the shared prompt queue group ===
+	t.Run("5-token work-stealing across active agents", func(t *testing.T) {
+		subj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, sessionLabel)
+		// Publish 30 messages; each should reach exactly one active agent
+		// (queue group). Distribution doesn't have to be even — NATS picks a
+		// queue subscriber per-message and fairness over small N is loose.
+		// Load-bearing properties:
 		//   - every message gets exactly one ack
-		//   - both implementers receive at least one
-		//   - no non-implementer receives ANY
+		//   - more than one distinct active agent participates (work-stealing,
+		//     not a single sticky subscriber)
+		//   - no observer ever answers
 		seen := map[string]int{}
-		for i := 0; i < 20; i++ {
+		for i := 0; i < 30; i++ {
 			ack := mustRequest(t, nc, subj, []byte(fmt.Sprintf("work-%d", i)), 2*time.Second)
 			id := jsonString(t, ack, "instance_id")
-			role := jsonString(t, ack, "role")
-			if role != "implementer" {
-				t.Errorf("6-token responder role = %q, want implementer", role)
+			class := jsonString(t, ack, "class")
+			if class != "active" {
+				t.Errorf("work-stealing responder class = %q, want active", class)
 			}
 			seen[id]++
 		}
-		if got := len(seen); got != 2 {
-			t.Errorf("queue-group fan-in: %d distinct responders over 20 messages, want 2 (both implementers)", got)
-		}
-		for id, n := range seen {
-			if n == 0 {
-				t.Errorf("implementer %s never received a message (queue group starvation)", id)
-			}
-		}
-	})
-
-	// === Subtest 4: 7-token direct address reaches one specific worker ===
-	t.Run("7-token direct address", func(t *testing.T) {
-		impInstance := instanceByRoleAgent["imp1"]
-		subj := fmt.Sprintf("agents.prompt.%s.%s.%s.implementer.%s", machine, pid, sessionLabel, impInstance)
-		ack := mustRequest(t, nc, subj, []byte("direct"), 2*time.Second)
-		gotID := jsonString(t, ack, "instance_id")
-		if gotID != impInstance {
-			t.Errorf("7-token direct: responder = %q, want %q (imp1)", gotID, impInstance)
+		if got := len(seen); got < 2 {
+			t.Errorf("queue-group fan-in: %d distinct responders over 30 messages, want ≥2 (work-stealing across active agents)", got)
 		}
 	})
 
 	// === Subtest 5: spy exclusion — no agents.prompt.* reaches observer ===
 	t.Run("spy exclusion: observer never receives agents.prompt", func(t *testing.T) {
-		// Publish a prompt with the spy's exact role at every tier the
-		// spy might accidentally subscribe to. Then verify the spy did
-		// NOT respond — at the 6 and 7 token tiers spies would be on if
-		// the verb gating broke.
+		// Publish to the 5-token prompt subject AND to longer spy-keyed
+		// subjects, then verify the spy never responds. The observer
+		// subscribes only to agents.report.>, so no agents.prompt.* subject
+		// should reach it.
 		spyInstance := instanceByRoleAgent["spy1"]
-		baseSubj := fmt.Sprintf("agents.prompt.%s.%s.%s.spy", machine, pid, sessionLabel)
-		directSubj := baseSubj + "." + spyInstance
+		frontSubj := fmt.Sprintf("agents.prompt.%s.%s.%s", machine, pid, sessionLabel)
+		spySubj := frontSubj + ".spy." + spyInstance
 
-		// Direct address using the spy's instance_id. Test passes when
-		// the request TIMES OUT (no responder) — we set a short tolerance.
-		for _, subj := range []string{baseSubj, directSubj} {
+		// Test passes when each request reaching the spy TIMES OUT (no spy
+		// responder). The 5-token subject IS answered by active agents, so
+		// we only assert the spy never identifies itself as the responder.
+		ack, err := nc.Request(frontSubj, []byte("dispatch"), 2*time.Second)
+		if err == nil {
+			if role := jsonString(t, ack.Data, "class"); role == "observer" {
+				t.Errorf("observer answered the 5-token prompt subject — verb-based spy exclusion violated")
+			}
+		}
+
+		// Spy-keyed subject has no subscriber at all; expect a timeout/no-
+		// responder.
+		for _, subj := range []string{spySubj} {
 			_, err := nc.Request(subj, []byte("forbidden"), 400*time.Millisecond)
 			if err == nil {
 				t.Errorf("spy responded to agents.prompt subject %q — verb-based spy exclusion violated", subj)

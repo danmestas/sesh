@@ -11,6 +11,12 @@ import (
 // locks in. The shapes here MUST match the TS SDK's golden fixtures
 // (sesh-channels/sdk/test/subjects.test.ts) byte-for-byte. Any change
 // here is a cross-stack wire change and requires the paired TS PR.
+//
+// Prompt is now a single 5-token, session-scoped subject — identical in
+// shape to Heartbeat/Status/Card/Cardx. The former 6-token role-pool and
+// 7-token direct-instance tiers are gone (smol scope-cut slice D1); a
+// queue group still rides the subscribe side (PromptQueueGroup) but is
+// invisible in the subject bytes.
 func TestPrompt_Build(t *testing.T) {
 	cases := []struct {
 		name string
@@ -18,29 +24,14 @@ func TestPrompt_Build(t *testing.T) {
 		want string
 	}{
 		{
-			name: "5-token session orch (empty role)",
+			name: "5-token session prompt",
 			in:   Coord{Machine: "m1", Project: "p1", Session: "s1"},
 			want: "agents.prompt.m1.p1.s1",
 		},
 		{
-			name: "6-token role pool",
-			in:   Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "impl"},
-			want: "agents.prompt.m1.p1.s1.impl",
-		},
-		{
-			name: "7-token direct instance",
-			in:   Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "impl", Inst: "i7"},
-			want: "agents.prompt.m1.p1.s1.impl.i7",
-		},
-		{
 			name: "hyphenated tokens stay intact",
-			in:   Coord{Machine: "laptop", Project: "sesh-channels", Session: "main", Role: "worker"},
-			want: "agents.prompt.laptop.sesh-channels.main.worker",
-		},
-		{
-			name: "numeric inst",
-			in:   Coord{Machine: "laptop", Project: "p", Session: "s", Role: "r", Inst: "1"},
-			want: "agents.prompt.laptop.p.s.r.1",
+			in:   Coord{Machine: "laptop", Project: "sesh-channels", Session: "main"},
+			want: "agents.prompt.laptop.sesh-channels.main",
 		},
 	}
 	for _, tc := range cases {
@@ -64,10 +55,8 @@ func TestPrompt_RejectsBadTokens(t *testing.T) {
 		{"dot in machine", Coord{Machine: "m.1", Project: "p", Session: "s"}},
 		{"star in project", Coord{Machine: "m", Project: "*", Session: "s"}},
 		{"gt in session", Coord{Machine: "m", Project: "p", Session: ">"}},
-		{"space in role", Coord{Machine: "m", Project: "p", Session: "s", Role: "r "}},
 		{"empty machine", Coord{Machine: "", Project: "p", Session: "s"}},
-		{"bad inst", Coord{Machine: "m", Project: "p", Session: "s", Role: "r", Inst: "i.1"}},
-		{"inst without role", Coord{Machine: "m", Project: "p", Session: "s", Inst: "i1"}},
+		{"empty session", Coord{Machine: "m", Project: "p", Session: ""}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,15 +79,6 @@ func TestHeartbeat(t *testing.T) {
 	}
 	if want := "agents.hb.m1.p1.s1"; got != want {
 		t.Fatalf("Heartbeat = %q, want %q", got, want)
-	}
-
-	// Role and Inst are ignored — Heartbeat is always 5-token.
-	gotIgnored, err := Heartbeat(Coord{Machine: "m1", Project: "p1", Session: "s1", Role: "r", Inst: "i"})
-	if err != nil {
-		t.Fatalf("Heartbeat with role+inst err = %v", err)
-	}
-	if gotIgnored != "agents.hb.m1.p1.s1" {
-		t.Fatalf("Heartbeat ignored-tokens = %q, want %q", gotIgnored, "agents.hb.m1.p1.s1")
 	}
 
 	if _, err := Heartbeat(Coord{Machine: "", Project: "p", Session: "s"}); err == nil {
@@ -148,11 +128,12 @@ func TestCardx(t *testing.T) {
 	}
 }
 
-// TestVerbsAreSingleSegment is a structural guard: every session-scoped
-// verb MUST occupy exactly one segment between `agents` and the first
-// machine token. Compound verbs (e.g. `card.get`) would shift the
-// 5/6/7-token tier boundary downstream consumers count on. The check
-// runs against the canonical 5-token output of each builder.
+// TestVerbsAreSingleSegment is a structural guard: every verb MUST
+// occupy exactly one segment between `agents` and the first machine
+// token, and every verb is a single 5-token, session-scoped subject.
+// Compound verbs (e.g. `card.get`) would split into two segments and
+// push the subject to 6 tokens. The check runs against the canonical
+// 5-token output of each builder.
 func TestVerbsAreSingleSegment(t *testing.T) {
 	c := Coord{Machine: "m", Project: "p", Session: "s"}
 	cases := []struct {
