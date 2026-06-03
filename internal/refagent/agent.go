@@ -104,9 +104,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := agentmeta.ValidateRole(cfg.Role); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	if err := agentmeta.ValidateClass(cfg.Class); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
 	// Identity is injected, never derived. A missing project-id is a boot
 	// error — the agent must not silently skip coordination or fall back to
 	// walking the filesystem for a .sesh/project-id pin.

@@ -7,15 +7,16 @@
 // "Canonical role/class rules" section.
 package agentmeta
 
-// AgentClass is the on-the-wire class enum. Defined as a string type so
-// JSON marshaling matches the wire format, while still letting the
-// compiler reject typo'd assignments at every call site that uses the
-// constants.
+// AgentClass is the on-the-wire class value. Defined as a string type so
+// JSON marshaling matches the wire format. It is pure display metadata —
+// carried in $SRV.INFO and heartbeats so `sesh mesh` can show and filter
+// it — and is NOT consulted for subscription routing. (The class-driven
+// observer/report subscription tier was removed in the smol scope-cut: no
+// code published agents.report.*, and no path spawned an observer.)
 type AgentClass string
 
 const (
-	ClassActive   AgentClass = "active"
-	ClassObserver AgentClass = "observer"
+	ClassActive AgentClass = "active"
 
 	DefaultRole  string     = "worker"
 	DefaultClass AgentClass = ClassActive

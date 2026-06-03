@@ -352,7 +352,7 @@ type MeshCmd struct {
 	Owner   string `help:"Filter by owner"`
 	Session string `help:"Filter by session label"`
 	Role    string `help:"Filter by role (e.g. implementer, planner)"`
-	Class   string `help:"Filter by class (active | observer)"`
+	Class   string `help:"Filter by class display tag (e.g. active)"`
 	Machine string `help:"Filter by machine ID (first 8 hex of /etc/machine-id)"`
 
 	// Window controls how long QueryMesh waits for INFO replies.

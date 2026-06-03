@@ -822,22 +822,6 @@ func TestApplyDefaults_RoleAndClassDefaults(t *testing.T) {
 	}
 }
 
-// TestRun_RejectsBadClassAtBoot asserts the agent refuses to start with an
-// unknown SESH_CLASS value rather than silently coercing.
-func TestRun_RejectsBadClassAtBoot(t *testing.T) {
-	t.Setenv("SESH_CLASS", "passive")
-	t.Setenv("SESH_ROLE", "worker")
-	t.Setenv("NATS_URL", "nats://127.0.0.1:1") // unreachable; should never be dialed
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := Run(ctx, Config{Agent: "echo", Owner: "alice"})
-	if err == nil || !strings.Contains(err.Error(), "class") {
-		t.Fatalf("Run with SESH_CLASS=passive: err = %v, want class error", err)
-	}
-}
-
 // TestRun_RejectsBadRoleAtBoot asserts the agent refuses to start with a
 // role that doesn't match the canonical regex.
 func TestRun_RejectsBadRoleAtBoot(t *testing.T) {

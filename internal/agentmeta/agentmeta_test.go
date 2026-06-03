@@ -41,21 +41,6 @@ func TestValidateRole(t *testing.T) {
 	}
 }
 
-func TestValidateClass(t *testing.T) {
-	if err := ValidateClass(ClassActive); err != nil {
-		t.Errorf("ValidateClass(active) = %v, want nil", err)
-	}
-	if err := ValidateClass(ClassObserver); err != nil {
-		t.Errorf("ValidateClass(observer) = %v, want nil", err)
-	}
-	if err := ValidateClass(AgentClass("passive")); err == nil {
-		t.Errorf("ValidateClass(passive) = nil, want error")
-	}
-	if err := ValidateClass(AgentClass("")); err == nil {
-		t.Errorf("ValidateClass(empty) = nil, want error")
-	}
-}
-
 func TestDefaultedRole(t *testing.T) {
 	if got := DefaultedRole(""); got != DefaultRole {
 		t.Errorf("DefaultedRole(empty) = %q, want %q", got, DefaultRole)
@@ -69,13 +54,14 @@ func TestDefaultedClass(t *testing.T) {
 	if got := DefaultedClass(""); got != DefaultClass {
 		t.Errorf("DefaultedClass(empty) = %v, want %v", got, DefaultClass)
 	}
-	if got := DefaultedClass("observer"); got != ClassObserver {
-		t.Errorf("DefaultedClass(observer) = %v, want observer", got)
-	}
 	if got := DefaultedClass("active"); got != ClassActive {
 		t.Errorf("DefaultedClass(active) = %v, want active", got)
 	}
-	// Unknown values pass through unchanged — validation is the caller's job.
+	// Class is free display metadata now — any non-empty value passes
+	// through unchanged (no closed enum, no validation).
+	if got := DefaultedClass("observer"); got != AgentClass("observer") {
+		t.Errorf("DefaultedClass(observer) = %v, want observer (unchanged)", got)
+	}
 	if got := DefaultedClass("passive"); got != AgentClass("passive") {
 		t.Errorf("DefaultedClass(passive) = %v, want passive (unchanged)", got)
 	}
