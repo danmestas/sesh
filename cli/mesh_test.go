@@ -273,6 +273,53 @@ func TestRenderTable_EmptyCapsRendersDash(t *testing.T) {
 	}
 }
 
+func TestRenderHubHeader_FullInfo(t *testing.T) {
+	out := renderHubHeader(hubInfo{
+		URL:        "nats://hub:4222",
+		Version:    "2.10.22",
+		Cluster:    "c1",
+		RTT:        612 * time.Microsecond,
+		HaveRTT:    true,
+		JetStream:  true,
+		AgentCount: 4,
+	})
+	for _, want := range []string{
+		"hub", "nats://hub:4222", "nats-server 2.10.22",
+		"cluster c1", "JetStream", "rtt", "4 agents",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("hub header missing %q\nfull: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "no-JetStream") {
+		t.Errorf("JetStream-enabled hub must not render no-JetStream\nfull: %s", out)
+	}
+}
+
+func TestRenderHubHeader_NoJetStreamIsFlagged(t *testing.T) {
+	out := renderHubHeader(hubInfo{URL: "nats://localhost:4222", JetStream: false, AgentCount: 0})
+	if !strings.Contains(out, "no-JetStream") {
+		t.Errorf("a hub without reachable JetStream must be flagged\nfull: %s", out)
+	}
+	// 0 agents pluralizes to "agents"; 1 should be singular.
+	if !strings.Contains(out, "0 agents") {
+		t.Errorf("expected '0 agents'\nfull: %s", out)
+	}
+}
+
+func TestRenderHubHeader_OmitsAbsentFieldsAndSingularizes(t *testing.T) {
+	out := renderHubHeader(hubInfo{URL: "nats://h:4222", JetStream: true, AgentCount: 1})
+	if !strings.Contains(out, "1 agent") || strings.Contains(out, "1 agents") {
+		t.Errorf("single agent should be singular\nfull: %s", out)
+	}
+	// No version, cluster, or RTT supplied → those tokens must be absent.
+	for _, absent := range []string{"nats-server", "cluster", "rtt"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("absent field %q should be omitted\nfull: %s", absent, out)
+		}
+	}
+}
+
 func TestRenderTable_EmptyInputReturnsHeadersOnly(t *testing.T) {
 	out := renderTable(nil)
 	if !strings.Contains(out, "AGENT") {
