@@ -230,6 +230,72 @@ func dashIfEmpty(s string) string {
 	return s
 }
 
+// hubInfo is the display view of the NATS hub `sesh mesh` is connected to.
+// Every field is read from the live connection — the hub is the one mesh
+// participant with no AgentCard and no heartbeat, so the CLI speaks for it.
+type hubInfo struct {
+	URL        string        // ConnectedUrlRedacted (passwords stripped)
+	Version    string        // ConnectedServerVersion
+	Cluster    string        // ConnectedClusterName, if any
+	RTT        time.Duration // round-trip to the hub; 0 if RTT errored
+	HaveRTT    bool          // whether RTT succeeded
+	JetStream  bool          // AccountInfo succeeded (JetStream reachable)
+	AgentCount int           // agents the hub reported (post-filter)
+}
+
+// gatherHubInfo pulls the hub's identity + health off the live connection.
+// JetStream presence is probed with AccountInfo (a single round-trip); sesh
+// requires JetStream, so surfacing its absence here catches a misconfigured
+// hub before it bites a session.
+func gatherHubInfo(nc *nats.Conn, agentCount int) hubInfo {
+	h := hubInfo{
+		URL:        nc.ConnectedUrlRedacted(),
+		Version:    nc.ConnectedServerVersion(),
+		Cluster:    nc.ConnectedClusterName(),
+		AgentCount: agentCount,
+	}
+	if rtt, err := nc.RTT(); err == nil {
+		h.RTT, h.HaveRTT = rtt, true
+	}
+	if js, err := nc.JetStream(); err == nil {
+		if _, err := js.AccountInfo(); err == nil {
+			h.JetStream = true
+		}
+	}
+	return h
+}
+
+// renderHubHeader formats the one-line hub banner shown above the mesh table.
+// Pure (no I/O) so it's unit-testable without a server. Shape:
+//
+//	hub  nats://hub:4222 · nats-server 2.10.22 · cluster c1 · JetStream · rtt 0.6ms · 4 agents
+//
+// Fields that aren't available are omitted rather than printed empty; a hub
+// with no reachable JetStream renders "no-JetStream" since sesh needs it.
+func renderHubHeader(h hubInfo) string {
+	parts := []string{dashIfEmpty(h.URL)}
+	if h.Version != "" {
+		parts = append(parts, "nats-server "+h.Version)
+	}
+	if h.Cluster != "" {
+		parts = append(parts, "cluster "+h.Cluster)
+	}
+	if h.JetStream {
+		parts = append(parts, "JetStream")
+	} else {
+		parts = append(parts, "no-JetStream")
+	}
+	if h.HaveRTT {
+		parts = append(parts, fmt.Sprintf("rtt %s", h.RTT.Round(100*time.Microsecond)))
+	}
+	plural := "s"
+	if h.AgentCount == 1 {
+		plural = ""
+	}
+	parts = append(parts, fmt.Sprintf("%d agent%s", h.AgentCount, plural))
+	return "hub  " + strings.Join(parts, " · ") + "\n"
+}
+
 // renderTable formats agents as a tab-aligned table keyed on the clean
 // v0.4 mesh shape: AGENT MACHINE PROJECT SESSION ROLE CAPS. Owner, class,
 // and the full instance id are intentionally NOT in the default table —
@@ -403,10 +469,14 @@ func (cmd *MeshCmd) Run(ctx context.Context) error {
 
 	switch cmd.Format {
 	case "", "table":
+		// Hub banner first: which mesh am I looking at, and is it healthy.
+		// Human-facing only — JSON stays a bare array for scripts.
+		fmt.Fprint(cmd.Out, renderHubHeader(gatherHubInfo(nc, len(agents))))
 		fmt.Fprint(cmd.Out, renderTable(agents))
 	case "json":
 		fmt.Fprint(cmd.Out, renderJSON(agents))
 	case "tree":
+		fmt.Fprint(cmd.Out, renderHubHeader(gatherHubInfo(nc, len(agents))))
 		out := renderTree(agents)
 		if out == "" {
 			fmt.Fprintln(cmd.Out, "(no agents on the mesh)")
