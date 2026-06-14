@@ -77,6 +77,57 @@ func TestUp_PopulatesSessionURLs(t *testing.T) {
 	}
 }
 
+// TestUp_Preflight_DeadHubLeavesNoClaim is the end-to-end guarantee behind the
+// preflight probe: pointing `sesh up` at a hub that is not running must fail
+// fast and leave .sesh/ untouched — no session claim file, no orphaned state.
+// This proves the probe is wired ABOVE ClaimSession, so a no-hub start can
+// never strand a half-initialized session (the "bad state" the embedded-hub
+// removal could otherwise reintroduce).
+func TestUp_Preflight_DeadHubLeavesNoClaim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: builds binary + spawns subprocess")
+	}
+
+	bin := buildSesh(t)
+
+	// A bound-then-freed port refuses connections: a hub that isn't there.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadURL := "nats://" + ln.Addr().String()
+	_ = ln.Close()
+
+	home := t.TempDir()
+	project := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "up", "--session=alpha")
+	cmd.Dir = project
+	cmd.Env = append(os.Environ(), "HOME="+home, "SESH_HUB_URL="+deadURL)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	err = cmd.Run()
+	if err == nil {
+		t.Fatalf("sesh up succeeded against dead hub %s; want non-zero exit. output=%q", deadURL, out.String())
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("sesh up did not fail-fast against dead hub (deadline-killed); output=%q", out.String())
+	}
+	if s := out.String(); !strings.Contains(s, "hub") {
+		t.Errorf("dead-hub error should mention the hub; output=%q", s)
+	}
+
+	// The ordering guarantee: no session claim file was written.
+	claim := filepath.Join(project, ".sesh", "sessions", "alpha.json")
+	if _, err := os.Stat(claim); !os.IsNotExist(err) {
+		t.Errorf("session claim %s exists after dead-hub start; preflight must gate ClaimSession (err=%v)", claim, err)
+	}
+}
+
 // TestSeshUp_RejectsLabelTraversal is the tier-1 safety test for the
 // up entrypoint. It exercises validateLabel through `sesh up --session`
 // with the hostile inputs that would otherwise let the label escape its
