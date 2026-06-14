@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/nats-io/nats.go"
 	"golang.org/x/term"
 )
 
@@ -35,6 +37,42 @@ func resolveHubURL() (string, error) {
 		return v, nil
 	}
 	return "", errors.New("no hub configured; set SESH_HUB_URL (or NATS_URL) to the NATS URL of an external hub (e.g. nats://127.0.0.1:4222)")
+}
+
+// hubProbeTimeout bounds the preflight dial AND the follow-up round-trip, so
+// both a missing hub (connection refused, fails in ms) and a wedged hub
+// (accepts the socket but never answers, fails after the timeout) resolve
+// quickly instead of hanging `sesh up`.
+const hubProbeTimeout = 3 * time.Second
+
+// probeHub verifies a healthy hub actually answers at url BEFORE sesh up
+// claims a session slot or spawns the harness child. sesh is a NATS client
+// with no embedded hub, so a session pointed at a dead or wedged hub can
+// never be served. Without this gate sesh up would claim the slot, fork the
+// harness, and let the agent watcher retry the dial forever — an invisible
+// broken session where the harness is running but never reaches the mesh
+// (the exact "agent is up but `sesh mesh` is empty" failure mode).
+//
+// The probe is a real round-trip, not a bare TCP dial: a wedged hub can
+// accept the connection yet never send the protocol's INFO line. nats.Connect
+// blocks on that handshake (bounded by Timeout) and FlushTimeout forces a
+// PING/PONG, so "connection refused" and "accepts but mute" both fail here
+// with an actionable error rather than a silently-degraded session.
+func probeHub(url string) error {
+	nc, err := nats.Connect(url,
+		nats.Name("sesh-up-preflight"),
+		nats.Timeout(hubProbeTimeout),
+		nats.MaxReconnects(0),
+		nats.RetryOnFailedConnect(false),
+	)
+	if err != nil {
+		return fmt.Errorf("no healthy hub at %s: %w; start one (e.g. `dagnats serve`) or point SESH_HUB_URL at a running hub", url, err)
+	}
+	defer nc.Close()
+	if err := nc.FlushTimeout(hubProbeTimeout); err != nil {
+		return fmt.Errorf("hub at %s accepted the connection but did not answer (%w); it may be wedged — restart it (e.g. `dagnats serve`)", url, err)
+	}
+	return nil
 }
 
 // harnessEnv is the supporting struct for spawnHarness / Harness (Hybrid C).
@@ -191,6 +229,14 @@ func (c *UpCmd) Run() error {
 	// identity files — a no-hub `sesh up` leaves .sesh/ untouched.
 	hubURL, err := resolveHubURL()
 	if err != nil {
+		return fmt.Errorf("sesh up: %w", err)
+	}
+
+	// Preflight: confirm a healthy hub answers BEFORE claiming the session
+	// slot or spawning the harness. A no-hub / wedged-hub start fails fast
+	// here and leaves .sesh/ untouched, instead of booting an invisible
+	// broken session that never reaches the mesh.
+	if err := probeHub(hubURL); err != nil {
 		return fmt.Errorf("sesh up: %w", err)
 	}
 

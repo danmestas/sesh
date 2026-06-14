@@ -364,6 +364,14 @@ func TestUpCmd_Run_DerivesSessionFromCwd(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(named) })
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(named)
+	// Force the no-hub path deterministically so Run() fails fast at hub
+	// resolution regardless of any ambient SESH_HUB_URL/NATS_URL — otherwise
+	// a configured (and reachable) hub would let Run() pass the preflight
+	// probe and reach the blocking serve loop, hanging this test.
+	t.Setenv("SESH_HUB_URL", "")
+	t.Setenv("NATS_URL", "")
+	os.Unsetenv("SESH_HUB_URL")
+	os.Unsetenv("NATS_URL")
 
 	c := &UpCmd{Scope: "session"}
 	// Run will fail (no hub, no git repo), but Session must be set before it does.
