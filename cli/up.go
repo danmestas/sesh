@@ -53,11 +53,14 @@ const hubProbeTimeout = 3 * time.Second
 // broken session where the harness is running but never reaches the mesh
 // (the exact "agent is up but `sesh mesh` is empty" failure mode).
 //
-// The probe is a real round-trip, not a bare TCP dial: a wedged hub can
-// accept the connection yet never send the protocol's INFO line. nats.Connect
-// blocks on that handshake (bounded by Timeout) and FlushTimeout forces a
-// PING/PONG, so "connection refused" and "accepts but mute" both fail here
-// with an actionable error rather than a silently-degraded session.
+// The probe is a real round-trip, not a bare TCP dial. nats.Connect's Timeout
+// bounds the TCP dial AND the INFO handshake, so a missing hub (connection
+// refused) and a wedged hub that accepts the socket but never sends INFO both
+// fail at the connect itself within hubProbeTimeout. FlushTimeout then forces
+// a PING/PONG on a connection that DID complete the handshake, catching a hub
+// that greets but has stopped servicing traffic. Together they reject every
+// can't-serve hub here with an actionable error instead of a silently-degraded
+// session.
 func probeHub(url string) error {
 	nc, err := nats.Connect(url,
 		nats.Name("sesh-up-preflight"),
@@ -70,7 +73,7 @@ func probeHub(url string) error {
 	}
 	defer nc.Close()
 	if err := nc.FlushTimeout(hubProbeTimeout); err != nil {
-		return fmt.Errorf("hub at %s accepted the connection but did not answer (%w); it may be wedged — restart it (e.g. `dagnats serve`)", url, err)
+		return fmt.Errorf("hub at %s accepted the connection but did not answer; it may be wedged — restart it (e.g. `dagnats serve`): %w", url, err)
 	}
 	return nil
 }
